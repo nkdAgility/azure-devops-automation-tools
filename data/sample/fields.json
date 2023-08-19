@@ -1,0 +1,17 @@
+{
+    "fields": [
+      {
+        "enabled": false,
+        "refname": "Custom.DateSample"
+      },
+      {
+        "enabled": true,
+        "refname": "Custom.PickListSample"
+      },
+      {
+        "enabled": true,
+        "refname": "Custom.PickListSample2"
+      }
+    ]
+  }
+  

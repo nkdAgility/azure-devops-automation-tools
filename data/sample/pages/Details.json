@@ -1,0 +1,57 @@
+{
+  "name": "Details",
+  "enabled": true,
+  "workItemTypes": ["Epic"],
+  "PagePOST": {
+    "sections": [
+      {
+        "id": "Section1",
+        "groups": [],
+        "overridden": false
+      },
+      {
+        "id": "Section2",
+        "groups": [
+          {
+            "controls": null,
+            "label": "Status",
+            "order": null,
+            "overridden": null,
+            "inherited": null,
+            "visible": true
+          },
+          {
+            "controls": null,
+            "label": "Details",
+            "order": null,
+            "overridden": null,
+            "inherited": null,
+            "visible": true
+          },
+          {
+            "controls": null,
+            "label": "Planning",
+            "order": null,
+            "overridden": null,
+            "inherited": null,
+            "visible": true
+          }
+        ],
+        "overridden": false
+      },
+      {
+        "id": "Section3",
+        "groups": [],
+        "overridden": false
+      }
+    ],
+    "label": "Details",
+    "order": null,
+    "overridden": null,
+    "inherited": null,
+    "visible": true,
+    "locked": false,
+    "pageType": 1,
+    "contribution": null
+  }
+}

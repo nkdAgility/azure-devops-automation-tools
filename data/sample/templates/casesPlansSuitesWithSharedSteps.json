@@ -1,0 +1,147 @@
+{
+  "ChangeSetMappingFile": null,
+  "Source": {
+    "$type": "TfsTeamProjectConfig",
+    "Collection": "https://dev.azure.com/orgName/",
+    "Project": "PMO Transformation Program",
+    "AllowCrossProjectLinking": false,
+    "AuthenticationMode": "Prompt",
+    "PersonalAccessToken": "",
+    "PersonalAccessTokenVariableName": "",
+    "LanguageMaps": {
+      "AreaPath": "Area",
+      "IterationPath": "Iteration"
+    }
+  },
+  "Target": {
+    "$type": "TfsTeamProjectConfig",
+    "Collection": "https://dev.azure.com/YourTarget/",
+    "Project": "PMO Transformation Program",
+    "ReflectedWorkItemIDFieldName": "Microsoft.VSTS.Build.IntegrationBuild",
+    "AllowCrossProjectLinking": false,
+    "AuthenticationMode": "Prompt",
+    "PersonalAccessToken": "",
+    "PersonalAccessTokenVariableName": "",
+    "LanguageMaps": {
+      "AreaPath": "Area",
+      "IterationPath": "Iteration"
+    }
+  },
+  "FieldMaps": [
+    {
+      "$type": "FieldtoFieldMapConfig",
+      "WorkItemTypeName": "Test Case",
+      "sourceField": "Custom.ReflectedWorkItemId",
+      "targetField": "Microsoft.VSTS.Build.IntegrationBuild",
+      "defaultValue": ""
+    }
+  ],
+  "GitRepoMapping": null,
+  "LogLevel": "Information",
+  "CommonEnrichersConfig": null,
+  "Processors": [
+    {
+      "$type": "WorkItemUpdateConfig",
+      "Enabled": true,
+      "WhatIf": false,
+      "WIQLQueryBit": "AND [System.WorkItemType] IN ('Test Case')",
+      "WIQLOrderBit": null,
+      "WorkItemIDs": null,
+      "FilterWorkItemsThatAlreadyExistInTarget": false,
+      "PauseAfterEachWorkItem": false,
+      "WorkItemCreateRetryLimit": 0
+    },
+    {
+      "$type": "WorkItemMigrationConfig",
+      "Enabled": true,
+      "ReplayRevisions": true,
+      "PrefixProjectToNodes": false,
+      "UpdateCreatedDate": true,
+      "UpdateCreatedBy": true,
+      "WIQLQueryBit": "AND [System.WorkItemType] IN ('Shared Steps','Shared Parameter')",
+      "WIQLOrderBit": "[System.ChangedDate] desc",
+      "LinkMigration": true,
+      "AttachmentMigration": true,
+      "AttachmentWorkingPath": "c:\\temp\\WorkItemAttachmentWorkingFolder\\",
+      "FixHtmlAttachmentLinks": false,
+      "SkipToFinalRevisedWorkItemType": false,
+      "WorkItemCreateRetryLimit": 5,
+      "FilterWorkItemsThatAlreadyExistInTarget": false,
+      "PauseAfterEachWorkItem": false,
+      "AttachmentMaxSize": 480000000,
+      "AttachRevisionHistory": false,
+      "LinkMigrationSaveEachAsAdded": false,
+      "GenerateMigrationComment": false,
+      "WorkItemIDs": null,
+      "MaxRevisions": 0,
+      "UseCommonNodeStructureEnricherConfig": false,
+      "StopMigrationOnMissingAreaIterationNodes": true,
+      "NodeBasePaths": [],
+      "AreaMaps": {},
+      "IterationMaps": {},
+      "MaxGracefulFailures": 0,
+      "SkipRevisionWithInvalidIterationPath": false,
+      "SkipRevisionWithInvalidAreaPath": false
+    },
+    {
+      "$type": "WorkItemMigrationConfig",
+      "Enabled": true,
+      "ReplayRevisions": true,
+      "PrefixProjectToNodes": false,
+      "UpdateCreatedDate": true,
+      "UpdateCreatedBy": true,
+      "WIQLQueryBit": "AND [System.WorkItemType] IN ('Test Case')",
+      "WIQLOrderBit": "[System.ChangedDate] desc",
+      "LinkMigration": true,
+      "AttachmentMigration": true,
+      "AttachmentWorkingPath": "c:\\temp\\WorkItemAttachmentWorkingFolder\\",
+      "FixHtmlAttachmentLinks": false,
+      "SkipToFinalRevisedWorkItemType": false,
+      "WorkItemCreateRetryLimit": 5,
+      "FilterWorkItemsThatAlreadyExistInTarget": false,
+      "PauseAfterEachWorkItem": false,
+      "AttachmentMaxSize": 480000000,
+      "AttachRevisionHistory": false,
+      "LinkMigrationSaveEachAsAdded": false,
+      "GenerateMigrationComment": false,
+      "WorkItemIDs": null,
+      "MaxRevisions": 0,
+      "UseCommonNodeStructureEnricherConfig": false,
+      "StopMigrationOnMissingAreaIterationNodes": true,
+      "NodeBasePaths": [],
+      "AreaMaps": {},
+      "IterationMaps": {},
+      "MaxGracefulFailures": 0,
+      "SkipRevisionWithInvalidIterationPath": false,
+      "SkipRevisionWithInvalidAreaPath": false
+    },
+    {
+      "$type": "TestVariablesMigrationConfig",
+      "Enabled": true
+    },
+    {
+      "$type": "TestConfigurationsMigrationConfig",
+      "Enabled": true
+    },
+    {
+      "$type": "TestPlansAndSuitesMigrationConfig",
+      "Enabled": true,
+      "PrefixProjectToNodes": false,
+      "OnlyElementsWithTag": null,
+      "TestPlanQueryBit": null,
+      "RemoveAllLinks": false,
+      "MigrationDelay": 0,
+      "UseCommonNodeStructureEnricherConfig": false,
+      "NodeBasePaths": null,
+      "AreaMaps": null,
+      "IterationMaps": null,
+      "RemoveInvalidTestSuiteLinks": false,
+      "FilterCompleted": false
+    }
+  ],
+  "Version": "13.0",
+  "workaroundForQuerySOAPBugEnabled": false,
+  "WorkItemTypeDefinition": {
+    "sourceWorkItemTypeName": "targetWorkItemTypeName"
+  }
+}

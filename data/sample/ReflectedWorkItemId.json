@@ -1,0 +1,41 @@
+{
+    "fieldName" : "ReflectedWorkItemId",
+    "type" : "String",
+    "createFieldPOST" : {
+        "name": "ReflectedWorkItemId",
+        "referenceName": "Custom.ReflectedWorkItemId",
+        "description": null,
+        "type": "string",
+        "usage": "workItem",
+        "readOnly": false,
+        "canSortBy": true,
+        "isQueryable": true,
+        "supportedOperations": [
+            {
+            "referenceName": "SupportedOperations.Equals",
+            "name": "="
+            }
+        ],
+        "isIdentity": true,
+        "isPicklist": false,
+        "isPicklistSuggested": false,
+        "url": null
+    },
+    "addFieldPOST" : {
+        "referenceName": "Custom.ReflectedWorkItemId",
+        "defaultValue": "",
+        "allowGroups": false
+    },
+    "createControlPOST" : {
+        "id": "Custom.ReflectedWorkItemId",
+        "inherited": true,
+        "label": "ReflectedWorkItemId",
+        "controlType": "FieldControl",
+        "readOnly": false,
+        "watermark": "",
+        "metadata": "",
+        "visible": false,
+        "isContribution": false
+    }
+}
+

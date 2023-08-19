@@ -1,0 +1,56 @@
+{
+    "name" : "Picklist Sample",
+    "referenceName" : "Custom.PicklistSample",
+    "defaultGroupLabel" : "Details",
+    "createFieldPOST" : {
+        "name": "Picklist Sample",
+        "referenceName": "Custom.PicklistSample",
+        "description": null,
+        "type": "string",
+        "usage": "workItem",
+        "readOnly": false,
+        "canSortBy": true,
+        "isQueryable": true,
+        "supportedOperations": [
+            {
+            "referenceName": "SupportedOperations.Equals",
+            "name": "="
+            }
+        ],
+        "isIdentity": true,
+        "isPicklist": true,
+        "isPicklistSuggested": false,
+        "picklistId": "",
+        "url": null
+    },
+    "addFieldPOST" : {
+        "referenceName": "Custom.PicklistSample",
+        "defaultValue": "",
+        "allowGroups": false
+    },
+    "createControlPOST" : {
+        "id": "Custom.PicklistSample",
+        "inherited": true,
+        "label": "Picklist Sample",
+        "controlType": "FieldControl",
+        "readOnly": false,
+        "watermark": "",
+        "metadata": "",
+        "visible": true,
+        "isContribution": false
+    },
+    "createPicklistPOST" : 
+    {
+        "id": null,
+        "name": "picklist_Custom_PicklistSample",
+        "type": "String",
+        "url": null,
+        "items": [
+            "yes",
+            "no",
+            "maybe"
+        ],
+        "isSuggested": false
+        }
+
+}

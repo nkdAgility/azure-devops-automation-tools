@@ -1,0 +1,15 @@
+{
+    "sourceAccountUrl": "https://dev.azure.com/mySOurce/",
+    "sourceAccountToken": "mySOurcePAT",
+    "targetAccountUrl": "https://dev.azure.com/mytarget/",
+    "targetAccountToken": "mytargetPAT",
+    "sourceProcessName": "Process Name To Migrate",
+    "options": {
+        "processFilename": "../../output/process.json",
+        "logLevel":"information",
+        "logFilename":"../../output/processMigrator.log",
+        "overwritePicklist": false,
+        "continueOnRuleImportFailure": false,
+        "skipImportFormContributions": false
+    }
+}

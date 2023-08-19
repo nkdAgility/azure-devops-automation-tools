@@ -1,0 +1,44 @@
+{
+    "GitRepoMapping": null,
+    "LogLevel": "Information",
+    "Processors": [
+      {
+        "$type": "AzureDevOpsPipelineProcessorOptions",
+        "Enabled": true,
+        "MigrateBuildPipelines": true,
+        "MigrateReleasePipelines": true,
+        "MigrateTaskGroups": true,
+        "MigrateVariableGroups": true,
+        "MigrateServiceConnections": true,
+        "BuildPipelines": null,
+        "ReleasePipelines": null,
+        "RefName": null,
+        "SourceName": "Source",
+        "TargetName": "Target",
+        "RepositoryNameMaps": {}
+      }
+    ],
+  "Version": "13.0",
+    "Endpoints": {
+      "TfsEndpoints": [
+        {
+          "name": "Source",
+          "$type": "AzureDevOpsEndpointOptions",
+          "Organisation": "https://dev.azure.com/orgName/",
+          "Project": "ProjectName",
+          "AuthenticationMode": "Prompt",
+          "AccessToken": "xxxxx",
+          "EndpointEnrichers": null
+        },
+        {
+          "Name": "Target",
+          "$type": "AzureDevOpsEndpointOptions",
+          "Organisation": "https://dev.azure.com/YourTarget/",
+          "Project": "ProjectName",
+          "AuthenticationMode": "Prompt",
+          "AccessToken": "xxxxx",
+          "EndpointEnrichers": null
+        }
+      ]
+    }
+  }

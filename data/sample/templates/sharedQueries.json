@@ -1,0 +1,39 @@
+{
+    "GitRepoMapping": null,
+    "LogLevel": "Information",
+    "Processors": [
+        {
+            "$type": "TfsSharedQueryProcessorOptions",
+            "Enabled": true,
+            "PrefixProjectToNodes": false,
+            "SharedFolderName": "Shared Queries",
+            "SourceToTargetFieldMappings": null,
+            "ProcessorEnrichers": null,
+            "SourceName": "Source",
+            "TargetName": "Target"
+          }
+    ],
+  "Version": "13.0",
+    "Endpoints": {
+      "TfsEndpoints": [
+        {
+          "name": "Source",
+          "$type": "AzureDevOpsEndpointOptions",
+          "Organisation": "https://dev.azure.com/orgName/",
+          "Project": "ProjectName",
+          "AuthenticationMode": "Prompt",
+          "AccessToken": "xxxxx",
+          "EndpointEnrichers": null
+        },
+        {
+          "Name": "Target",
+          "$type": "AzureDevOpsEndpointOptions",
+          "Organisation": "https://dev.azure.com/YourTarget/",
+          "Project": "ProjectName",
+          "AuthenticationMode": "Prompt",
+          "AccessToken": "xxxxx",
+          "EndpointEnrichers": null
+        }
+      ]
+    }
+  }

@@ -1,0 +1,29 @@
+{
+  "organisations": [
+    {
+      "enabled": true,
+      "url": "https://dev.azure.com/nkdagility-preview",
+      "pat": "somePat",
+      "processMatch": [
+        {
+          "ProcessID": "17e92926-ddcf-4ca9-ac36-412e42358937",
+          "ProcessName": "MyProcess1",
+          "WorkItemType": "MyProcess1.Epic",
+          "enabled": true
+        },
+        {
+          "ProcessID": "27653272-57fd-42c9-83bd-4310e29be726",
+          "ProcessName": "MyProcess2",
+          "WorkItemType": "MyProcess2.Epic",
+          "enabled": false
+        }
+      ]
+    },
+    {
+      "enabled": false,
+      "url": "https://dev.azure.com/nkdagility-learn",
+      "pat": "somePat",
+      "processMatch": []
+    }
+  ]
+}

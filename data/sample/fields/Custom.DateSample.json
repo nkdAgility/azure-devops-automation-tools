@@ -1,0 +1,42 @@
+{
+    "name" : "Some Date",
+    "referenceName" : "Custom.DateSample",
+    "defaultGroupLabel": "Details",
+    "createFieldPOST" : {
+        "name": "Some Date",
+        "referenceName": "Custom.DateSample",
+        "description": null,
+        "type": "string",
+        "usage": "workItem",
+        "readOnly": false,
+        "canSortBy": true,
+        "isQueryable": true,
+        "supportedOperations": [
+            {
+            "referenceName": "SupportedOperations.Equals",
+            "name": "="
+            }
+        ],
+        "isIdentity": true,
+        "isPicklist": false,
+        "isPicklistSuggested": false,
+        "url": null
+    },
+    "addFieldPOST" : {
+        "referenceName": "Custom.DateSample",
+        "defaultValue": "",
+        "allowGroups": false
+    },
+    "createControlPOST" : {
+        "id": "Custom.DateSample",
+        "inherited": true,
+        "label": "Some Date",
+        "controlType": "DateTimeControl",
+        "readOnly": false,
+        "watermark": "",
+        "metadata": "",
+        "visible": true,
+        "isContribution": false
+    }
+}
+
