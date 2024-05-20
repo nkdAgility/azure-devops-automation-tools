@@ -22,17 +22,17 @@ foreach ($organisation in $config.organisations) {
     $header = @{authorization = "Basic $temptoken" }
 
     #GET https://dev.azure.com/{organization}/_apis/projects?api-version=7.0
-    $callUrl = "$($organisation.url)/_apis/projects?$queryString"
-    $projects = Invoke-RestMethod -Uri $callUrl -Method Get -ContentType "application/json" -Headers $header
-    Write-InfoLog "Found $($projects.count) projects"
-    foreach ($project in $projects.value) {
+    #$callUrl = "$($organisation.url)/_apis/projects?$queryString"
+    #$projects = Invoke-RestMethod -Uri $callUrl -Method Get -ContentType "application/json" -Headers $header
+    Write-InfoLog "Found $($organisation.projects.count) projects"
+    foreach ($project in $organisation.projects) {
         $filepath = "$outputFolder\$sanitisedOrgname\projects\$($project.name)"
         New-item $filepath -ItemType Directory -force
 
         $configFiles = Get-ChildItem -Path $configLocation -Filter "*.json"
         Write-InfoLog "Found $($configFiles.count) config files"
         foreach ($configFile in $configFiles) {
-        
+            Write-InfoLog "Running $configFile"
             $migrationConfig = $null
             $migrationConfig = Get-Content $configFile.FullName | ConvertFrom-Json -Depth 100
             if ($null -eq $migrationConfig.Endpoints) {

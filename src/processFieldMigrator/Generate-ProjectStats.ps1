@@ -101,8 +101,9 @@ organisation,project,workItems, sharedsteps,pipelines,plans,suites,repos, area, 
     }
 
     $sanitisedOrgname = $($org.url).Replace("https://dev.azure.com/", "").Replace("visualstudio.com/", "").Replace("/", "")
-    $filename = "./output/$sanitisedOrgname/stats.xlsx"
-    New-item $filename -ItemType Directory -force
+    $foldername = "./output/$sanitisedOrgname/stats.xlsx"
+    New-item $foldername -ItemType Directory -force
+    $filename = "$foldername/stats.xlsx"
     $data = $csv | ConvertFrom-Csv
     $data | Export-Excel $filename 
     

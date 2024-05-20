@@ -6,7 +6,8 @@ Get-ChildItem .\src\_includes\ | Unblock-File
 
 BeginLoggerTitle "Search-ProcessesWeCareAbout.ps1"
 
-$config = Get-Content "$dataFolder\organisations.json" | Out-String | ConvertFrom-Json
+$configFile = "$dataFolder\organisations.json"
+$config = Get-Content $configFile | Out-String | ConvertFrom-Json
 
 for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
     $organisation = $config.organisations[$orgNum]
@@ -41,32 +42,20 @@ for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
             Write-InfoLog "Skipping {processID}:{processName} as already in list" -PropertyValues $processID, $processName
         }
         else {
-            Write-InfoLog "Checking {processID}:{processName}" -PropertyValues $processID, $processName
-            # Get the list of all projects in the organization
-            $callUrl = "$orgUrl/_apis/work/processes/$processID/workItemTypes/?$queryString"
-            $witypes = Invoke-RestMethod -Uri $callUrl -Method Get -ContentType "application/json" -Headers $header
-            $witypes.value | Where-Object { $_.referenceName.EndsWith("Epic") } | ForEach-Object {
-                Write-DebugLog "$($_.referenceName) $($_.name)"
-                $workItemType = $_.referenceName
-                # Get the list of all projects in the organization
-                $fieldsURL = "$orgUrl/_apis/work/processes/$processID/workItemTypes/$workItemType/fields?$queryString"
-                $fields = Invoke-RestMethod -Uri $fieldsURL -Method Get -ContentType "application/json" -Headers $header
-                $fields.value | Where-Object { $_.referenceName.StartsWith("Custom.ITReport") } |  ForEach-Object {
-                    Write-DebugLog "$($_.referenceName) $($_.name)"
-                    $obj = [PSCustomObject]@{
-                        enabled      = $true;
-                        ProcessName  = $processName
-                        WorkItemType = $workItemType
-                        ProcessID    = $processID
-                    }
-                    $Collection = {$organisation.processMatch}.Invoke()
-                    $Collection.Add($obj)
-                    $organisation.processMatch = $Collection
-                    Write-InfoLog "Adding {processID}:{processName}:{workItemType}" -PropertyValues $processID, $processName, $workItemType
+                Write-InfoLog "Checking {processID}:{processName}" -PropertyValues $processID, $processName
+                $obj = [PSCustomObject]@{
+                    enabled      = $true;
+                    ProcessName  = $processName
+                    WorkItemType = $workItemType
+                    ProcessID    = $processID
                 }
-            }
+                $Collection = {$organisation.processMatch}.Invoke()
+                $Collection.Add($obj)
+                $organisation.processMatch = $Collection
+                Write-InfoLog "Adding {processID}:{processName}:{workItemType}" -PropertyValues $processID, $processName, $workItemType
         }
     }
+    $config.organisations[$orgNum] = $organisation;
 }
 Write-InfoLog "=============="
 Write-InfoLog "DONE"
