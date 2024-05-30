@@ -5,11 +5,11 @@ Get-ChildItem .\src\_includes\ | Unblock-File
 . .\src\_includes\setup.ps1
 . .\src\_includes\ImportExcel.ps1
 
-BeginLoggerTitle "Add-ProjectsToConfig"
+BeginLoggerTitle "Add-ProjectsToConfig XXX"
 
 # Define organization base url, PAT and API version variables
-
-$config = Get-Content "$dataFolder\organisations.json" | Out-String | ConvertFrom-Json
+$configFile = "$dataFolder\organisations.json"
+$config = Get-Content $configFile | Out-String | ConvertFrom-Json
 
 for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
     $org = $config.organisations[$orgNum]
@@ -17,6 +17,7 @@ for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
         Write-InfoLog "Skipping $($organisation.url)"
         continue
     }
+    Write-InfoLog "Processing $($organisation.url)"
     # Create header with PAT
     $token = $null
     $token = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$($org.pat)"))
@@ -33,6 +34,7 @@ for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
     Write-DebugLog $projectsURL
     $projects = Invoke-RestMethod -Uri $projectsURL -Method Get -ContentType "application/json" -Headers $header
 
+    Write-InfoLog "Processing $($organisation.url) with $($projects.value.count) projects"
 
     foreach ($project in $projects.value) {
         Write-DebugLog "$project"
