@@ -49,7 +49,19 @@ organisation,project,workItems, sharedsteps,pipelines,plans,suites,repos, area, 
         $WorkItemCount = 0
         if ($null -eq $queryResults.workItems) {
             Write-WarningLog "    $($queryResults.message)"
-            $WorkItemCount = 20000
+            [bool]$queryHasResults = $true;
+            [int]$queryYear = Get-Date -Format "yyyy"
+            while ($queryHasResults)
+            {
+                $BODY = '{ "query": "Select [System.Id], [System.Title], [System.State] From WorkItems where [System.ChangedDate] >= ''01-01-' + $queryYear + ''' AND [System.ChangedDate] <= ''01-01-' + ($queryYear+1) + ''' AND [System.TeamProject] = ''' + $($project.name) + ''' order by [System.CreatedDate] desc"}' | ConvertFrom-Json -Depth 100
+                $queryResults = $null
+                $queryResults = Invoke-RestMethod -Uri $wiqlURL -Method Post -ContentType "application/json" -Headers $header -Body ($BODY | ConvertTo-Json -Depth 10)
+                $WorkItemCount += $queryResults.workItems.Count
+                $queryYear--
+                if ($queryResults.workItems.Count -eq 0) {
+                    $queryHasResults = $false
+                }
+            }          
         }
         else {
             $WorkItemCount = $queryResults.workItems.Count

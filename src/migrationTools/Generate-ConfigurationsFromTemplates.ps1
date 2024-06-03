@@ -29,12 +29,12 @@ foreach ($organisation in $config.organisations) {
         $filepath = "$outputFolder\$sanitisedOrgname\projects\$($project.name)"
         New-item $filepath -ItemType Directory -force
 
-        $configFiles = Get-ChildItem -Path $configLocation -Filter "*.json"
-        Write-InfoLog "Found $($configFiles.count) config files"
-        foreach ($configFile in $configFiles) {
-            Write-InfoLog "Running $configFile"
+        $templateFiles = Get-ChildItem -Path $configLocation -Filter "*.json"
+        Write-InfoLog "Found $($templateFiles.count) config files"
+        foreach ($templateFile in $templateFiles) {
+            Write-InfoLog "Running $templateFile"
             $migrationConfig = $null
-            $migrationConfig = Get-Content $configFile.FullName | ConvertFrom-Json -Depth 100
+            $migrationConfig = Get-Content $templateFile.FullName | ConvertFrom-Json -Depth 100
             if ($null -eq $migrationConfig.Endpoints) {
                 $migrationConfig.Source.Project = $project.name
                 $migrationConfig.Source.Collection = $organisation.url
@@ -49,8 +49,8 @@ foreach ($organisation in $config.organisations) {
                 $migrationConfig.Endpoints[0].TfsEndpoints[1].Project = $project.name
             }
         
-            $filename = "$filepath\$($configFile.Name)"
-
+            $filename = "$filepath\$($templateFile.Name)"
+            Write-InfoLog "Saving $filename"
             Out-File -FilePath $filename -InputObject ($migrationConfig | ConvertTo-Json -Depth 100) -Encoding ascii
         }
     }
