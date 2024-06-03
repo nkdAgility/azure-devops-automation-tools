@@ -39,6 +39,7 @@ organisation,project,workItems, sharedsteps,pipelines,plans,suites,repos, area, 
 
     foreach ($project in $projects.value) {
         Write-InfoLog $project.name
+
         # POST https://dev.azure.com/{organization}?api-version=7.0
         $wiqlURL = "$($org.url)/$($project.id)/_apis/wit/wiql?$queryString"
         Write-DebugLog $wiqlURL
@@ -113,7 +114,7 @@ organisation,project,workItems, sharedsteps,pipelines,plans,suites,repos, area, 
     }
 
     $sanitisedOrgname = $($org.url).Replace("https://dev.azure.com/", "").Replace("visualstudio.com/", "").Replace("/", "")
-    $foldername = "./output/$sanitisedOrgname/stats.xlsx"
+    $foldername = "./output/$sanitisedOrgname"
     New-item $foldername -ItemType Directory -force
     $filename = "$foldername/stats.xlsx"
     $data = $csv | ConvertFrom-Csv
