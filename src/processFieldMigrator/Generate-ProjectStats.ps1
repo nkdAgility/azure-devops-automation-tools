@@ -13,7 +13,7 @@ $config = Get-Content "$dataFolder\organisations.json" | Out-String | ConvertFro
 
 foreach ($org in $config.organisations) {
     if ($org.enabled -eq $false) {
-        Write-InfoLog "Skipping $($organisation.url)"
+        Write-InfoLog "Skipping $($org.url)"
         continue
     }
     # Create header with PAT
