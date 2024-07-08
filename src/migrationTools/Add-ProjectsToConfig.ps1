@@ -14,10 +14,10 @@ $config = Get-Content $configFile | Out-String | ConvertFrom-Json
 for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
     $org = $config.organisations[$orgNum]
     if ($org.enabled -eq $false) {
-        Write-InfoLog "Skipping $($organisation.url)"
+        Write-InfoLog "Skipping $($org.url)"
         continue
     }
-    Write-InfoLog "Processing $($organisation.url)"
+    Write-InfoLog "Processing $($org.url)"
     # Create header with PAT
     $token = $null
     $token = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$($org.pat)"))
@@ -34,11 +34,11 @@ for ($orgNum = 0 ; $orgNum -le $config.organisations.Count - 1 ; $orgNum++) {
     Write-DebugLog $projectsURL
     $projects = Invoke-RestMethod -Uri $projectsURL -Method Get -ContentType "application/json" -Headers $header
 
-    Write-InfoLog "Processing $($organisation.url) with $($projects.value.count) projects"
+    Write-InfoLog "Processing $($org.url) with $($projects.value.count) projects"
 
     foreach ($project in $projects.value) {
         Write-DebugLog "$project"
-        $IsThereAlready = $organisation.projects | Where-Object { $_.name -eq $project.name }
+        $IsThereAlready = $org.projects | Where-Object { $_.name -eq $project.name }
         if ($IsThereAlready -ne $null) {
             Write-InfoLog "Skipping {project} as already in list" -PropertyValues $project.name
         }
