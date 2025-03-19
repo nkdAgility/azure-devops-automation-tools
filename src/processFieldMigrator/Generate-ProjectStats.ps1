@@ -33,7 +33,7 @@ foreach ($org in $config.organisations) {
     $projects = Invoke-RestMethod -Uri $projectsURL -Method Get -ContentType "application/json" -Headers $header
 
     $csv = @"
-organisation,project,process base, process,workItems, sharedsteps,pipelines,plans,suites,repos, area, inlcude, priority`n
+organisation,project, lastupdated,process base, process,workItems, sharedsteps,pipelines,plans,suites,repos, area, inlcude, priority`n
 "@
 
 
@@ -50,7 +50,7 @@ organisation,project,process base, process,workItems, sharedsteps,pipelines,plan
         $queryResults = Invoke-RestMethod -Uri $propertiesURL -Method Get -ContentType "application/json" -Headers $header
         $ProcessBase = ($queryResults.value | Where-Object { $_.name -eq 'System.Process Template' } | select -Property value).value
         Write-InfoLog "    '$ProcessBase' base process"
-        $ProcessTemplateId =  ($queryResults.value | Where-Object { $_.name -eq 'System.ProcessTemplateType' } | select -Property value).value
+        $ProcessTemplateId = ($queryResults.value | Where-Object { $_.name -eq 'System.ProcessTemplateType' } | select -Property value).value
         $processURL = "$($org.url)/_apis/work/processes/$($ProcessTemplateId)?api-version=7.2-preview.2"
         $queryResults = $null
         $queryResults = Invoke-RestMethod -Uri $processURL -Method Get -ContentType "application/json" -Headers $header
@@ -69,9 +69,8 @@ organisation,project,process base, process,workItems, sharedsteps,pipelines,plan
             Write-WarningLog "    $($queryResults.message)"
             [bool]$queryHasResults = $true;
             [int]$queryYear = Get-Date -Format "yyyy"
-            while ($queryHasResults)
-            {
-                $BODY = '{ "query": "Select [System.Id], [System.Title], [System.State], [System.Rev] From WorkItems where [System.CreatedDate] >= ''01-01-' + $queryYear + ''' AND [System.CreatedDate] <= ''01-01-' + ($queryYear+1) + ''' AND [System.TeamProject] = ''' + $($project.name) + ''' AND [System.WorkItemType] NOT IN (''Test Suite'', ''Test Plan'',''Shared Steps'',''Shared Parameter'',''Feedback Request'') ORDER BY [System.ChangedDate] desc"}' | ConvertFrom-Json -Depth 100
+            while ($queryHasResults) {
+                $BODY = '{ "query": "Select [System.Id], [System.Title], [System.State], [System.Rev] From WorkItems where [System.CreatedDate] >= ''01-01-' + $queryYear + ''' AND [System.CreatedDate] <= ''01-01-' + ($queryYear + 1) + ''' AND [System.TeamProject] = ''' + $($project.name) + ''' AND [System.WorkItemType] NOT IN (''Test Suite'', ''Test Plan'',''Shared Steps'',''Shared Parameter'',''Feedback Request'') ORDER BY [System.ChangedDate] desc"}' | ConvertFrom-Json -Depth 100
                 $queryResults = $null
                 $queryResults = Invoke-RestMethod -Uri $wiqlURL -Method Post -ContentType "application/json" -Headers $header -Body ($BODY | ConvertTo-Json -Depth 10)
                 $WorkItemCount += $queryResults.workItems.Count
@@ -130,7 +129,7 @@ organisation,project,process base, process,workItems, sharedsteps,pipelines,plan
 
 
 
-        $csv += "$($org.url),$($project.name),$ProcessBase, $Process,$WorkItemCount, $WorkItemCount2,$($pipelinesResults.Count),$($plansResults.Count),$totalSuits,$($reposResults.Count)`n"
+        $csv += "$($org.url),$($project.name),$($project.lastupdated),$ProcessBase, $Process,$WorkItemCount, $WorkItemCount2,$($pipelinesResults.Count),$($plansResults.Count),$totalSuits,$($reposResults.Count)`n"
     }
 
     $sanitisedOrgname = $($org.url).Replace("https://dev.azure.com/", "").Replace("visualstudio.com/", "").Replace("/", "")
