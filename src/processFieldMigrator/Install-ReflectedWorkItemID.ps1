@@ -9,7 +9,7 @@ $fieldConfig = Get-Content "$dataFolder\ReflectedWorkItemId.json" | Out-String |
 
 foreach ($org in $config.organisations) {
   if ($org.enabled -eq $false) {
-    Write-InfoLog "Skipping $($organisation.url)"
+    Write-InfoLog "Skipping $($org.url)"
     continue
   }
   $token = $null
