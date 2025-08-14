@@ -41,5 +41,6 @@ Write-Host "Using witadmin: $witAdmin" -ForegroundColor Cyan
 
 ## Project Updates
 
+"You need to clone https://github.com/microsoft/process-customization-scripts.git and use the emport and confom features"
 
 
