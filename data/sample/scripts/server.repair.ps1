@@ -40,7 +40,42 @@ Write-Host "Using witadmin: $witAdmin" -ForegroundColor Cyan
 & $witAdmin changefield /collection:http://sdfsddfsdg:8080/tfs/asdsadsad /n:ROMS.StartDate /name:"Start Date (moo)" /noprompt
 
 ## Project Updates
+## Ensure process-customization-scripts repo is present (clone or update)
+$repoUrl   = 'https://github.com/microsoft/process-customization-scripts.git'
+$repoName  = 'process-customization-scripts'
+$targetRoot = Join-Path $env:USERPROFILE 'source\repos'
+$repoPath  = Join-Path $targetRoot $repoName
 
-"You need to clone https://github.com/microsoft/process-customization-scripts.git and use the emport and confom features"
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+	throw 'git is required but was not found on PATH.'
+}
+
+if (-not (Test-Path $targetRoot)) {
+	Write-Host "Creating repos root: $targetRoot" -ForegroundColor DarkCyan
+	New-Item -ItemType Directory -Path $targetRoot | Out-Null
+}
+
+if (Test-Path (Join-Path $repoPath '.git')) {
+	Write-Host "Updating existing repo at $repoPath" -ForegroundColor Cyan
+	git -C $repoPath fetch --all --prune 2>&1 | Write-Verbose
+	git -C $repoPath pull --ff-only 2>&1 | Write-Verbose
+} else {
+	Write-Host "Cloning $repoUrl to $repoPath" -ForegroundColor Cyan
+	git clone $repoUrl $repoPath | Write-Verbose
+}
+
+if (-not (Test-Path (Join-Path $repoPath '.git'))) {
+	throw "Failed to ensure repository at $repoPath"
+}
+
+Write-Host "Repo ready: $repoPath" -ForegroundColor Green
+
+# Example: dot-source helper scripts from the cloned repo (uncomment/adjust as needed)
+# . (Join-Path $repoPath 'scripts' 'import.ps1')
+# . (Join-Path $repoPath 'scripts' 'conform.ps1')
+
+# TODO: Add calls to import / conform scripts as required
+
+
 
 
