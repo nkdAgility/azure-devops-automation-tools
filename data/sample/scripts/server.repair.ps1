@@ -39,43 +39,18 @@ Write-Host "Using witadmin: $witAdmin" -ForegroundColor Cyan
 
 & $witAdmin changefield /collection:http://sdfsddfsdg:8080/tfs/asdsadsad /n:ROMS.StartDate /name:"Start Date (moo)" /noprompt
 
-## Project Updates
-## Ensure process-customization-scripts repo is present (clone or update)
-$repoUrl   = 'https://github.com/microsoft/process-customization-scripts.git'
-$repoName  = 'process-customization-scripts'
-$targetRoot = Join-Path $env:USERPROFILE 'source\repos'
-$repoPath  = Join-Path $targetRoot $repoName
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-	throw 'git is required but was not found on PATH.'
-}
+# Export the Product Backlog Item work item type definition
 
-if (-not (Test-Path $targetRoot)) {
-	Write-Host "Creating repos root: $targetRoot" -ForegroundColor DarkCyan
-	New-Item -ItemType Directory -Path $targetRoot | Out-Null
-}
+$xmlPath = "data\ncsbn\scripts\ProductBacklogItem.xml"
+& $witAdmin exportwitd /collection:http://tfsa1uatvm01:8080/tfs/asdsadsad /P:Moo /n:"Product Backlog Item" /f:$xmlPath
 
-if (Test-Path (Join-Path $repoPath '.git')) {
-	Write-Host "Updating existing repo at $repoPath" -ForegroundColor Cyan
-	git -C $repoPath fetch --all --prune 2>&1 | Write-Verbose
-	git -C $repoPath pull --ff-only 2>&1 | Write-Verbose
-} else {
-	Write-Host "Cloning $repoUrl to $repoPath" -ForegroundColor Cyan
-	git clone $repoUrl $repoPath | Write-Verbose
-}
-
-if (-not (Test-Path (Join-Path $repoPath '.git'))) {
-	throw "Failed to ensure repository at $repoPath"
-}
-
-Write-Host "Repo ready: $repoPath" -ForegroundColor Green
-
-# Example: dot-source helper scripts from the cloned repo (uncomment/adjust as needed)
-# . (Join-Path $repoPath 'scripts' 'import.ps1')
-# . (Join-Path $repoPath 'scripts' 'conform.ps1')
-
-# TODO: Add calls to import / conform scripts as required
-
-
-
-
+Write-Host ''
+Write-Host '==================== ACTION REQUIRED ====================' -ForegroundColor Yellow
+Write-Host "Edit the exported work item type definition now: $xmlPath" -ForegroundColor Yellow
+Write-Host 'Make your changes (e.g., add/modify fields) and save the file.' -ForegroundColor Yellow
+Write-Host 'When you are finished,' -ForegroundColor Yellow
+Write-Host 'press Enter here to continue with the import...' -ForegroundColor Yellow
+Write-Host '==========================================================' -ForegroundColor Yellow
+Read-Host 'Press Enter to import once you have edited and saved the file'
+& $witAdmin importwitd /collection:http://tfsa1uatvm01:8080/tfs/asdsadsad /P:Moo /f:$xmlPath

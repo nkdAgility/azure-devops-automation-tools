@@ -15,10 +15,11 @@ if (-not (Test-Path -LiteralPath $OutDir)) {
 
 # Targets
 $targets = @(
-  @{ Name = "TFS2015U4Exe"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=844068" },
-  @{ Name = "TFS2015U4"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=844069" },
-  @{ Name = "AzureDevOpsServer2022exe"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=2269844" }
-  @{ Name = "AzureDevOpsServer2022"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=2269752" }
+  #@{ Name = "TFS2015U4Exe"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=844068" },
+  #@{ Name = "TFS2015U4"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=844069" },
+  #@{ Name = "AzureDevOpsServer2022exe"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=2269844" },
+  #@{ Name = "AzureDevOpsServer2022"; FwLink = "https://go.microsoft.com/fwlink/?LinkId=2269752" },
+  @{ Name = "SqlPackage"; FwLink = "https://go.microsoft.com/fwlink/?linkid=2209512" }
 )
 
 function Resolve-FwLink {
