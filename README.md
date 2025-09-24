@@ -1,4 +1,4 @@
-# Azure DevOps Automation Tools 
+# Azure DevOps Automation Tools
 
 All these tools are built in PowerShell and have both a $data and a $output folder.
 
@@ -8,9 +8,9 @@ A Sample data folder is provided in this repo.
 
 ## Setting up the environment
 
-1. Clone this repository 
-2. Install Visual Studio Code (https://code.visualstudio.com/)  
-3. Enable Powershell Plugins in Visual Studio Code 
+1. Clone this repository
+2. Install Visual Studio Code (<https://code.visualstudio.com/>)
+3. Enable Powershell Plugins in Visual Studio Code
 4. Install Powershell 7
 
 ## Run the Scripts with your own data
@@ -18,7 +18,8 @@ A Sample data folder is provided in this repo.
 The scripts use `config.json` in the root of this repo to determine where to find the data and where to put the output. It will be generated if it does not exist, and you can initiate it by running `runmefirst.ps1`. 
 
 ### SAMPLE CONFIG.JSON
-```
+
+```json
 {
   "dataFolder": "..\\my-data-repo\\data\\",
   "dataEnvironment": "debug",
@@ -27,6 +28,7 @@ The scripts use `config.json` in the root of this repo to determine where to fin
 }
 
 ```
+
 Although you can use the default values, this will store your data in untracked files in the same repo as the scripts. You would ecperiance data loss if this folder were to be deleted. We recommend that you create a new git repo for your data and output folders and then use the scripts to generate the data and output content that you would then use as input into your migrations.
 
 Once you have your config.json set up, you can run the follwoing scripts:
@@ -57,3 +59,41 @@ The data folder contains the data that is used to for each Script. You can check
 - [Create Picklist](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/lists/create?view=azure-devops-rest-7.0&tabs=HTTP)
 - [Add Field](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/fields/add?view=azure-devops-rest-7.0&tabs=HTTP)
 - [Add Control](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/controls/create?view=azure-devops-rest-7.0&tabs=HTTP)
+
+## Git Repository Migration
+
+The repository migration functionality is provided by a single script: `src/migrationTools/Migrate-GitRepos.ps1`.
+
+Purpose: Mirror (one-way) all enabled Git repositories from the source organisations & projects defined in a data environment `organisations.json` into an existing target Azure DevOps organisation (projects must already exist in target). Repositories are created if missing, then a `git --mirror` push updates all refs (branches, tags, deletes).
+
+Parameters (only three):
+
+- `-ConfigFile` (optional) Path to an `organisations.json`. If omitted the current data environment path from `setup.ps1` is used.
+- `-TargetOrgUrl` (required) Base URL of the target organisation, e.g. `https://dev.azure.com/TargetOrg/`.
+- `-TargetPat` (required) PAT for target organisation with Code (Read & Write) scope (and permission to create repositories).
+
+Example:
+
+```powershell
+pwsh ./src/migrationTools/Migrate-GitRepos.ps1 -TargetOrgUrl https://dev.azure.com/TargetOrg/ -TargetPat $env:TARGET_PAT
+```
+
+Source Authentication: Each source organisation entry in `organisations.json` must include a `pat` property (Code Read scope) and `enabled: true`. Each project that should be migrated must also have `enabled: true` and an `id` (GUID) and `name`.
+
+Behaviour Summary:
+
+1. Enumerate enabled organisations & projects from source config.
+2. List repos via Azure DevOps REST API.
+3. For each repo:
+   - Create target repo if it does not exist (same project name / repo name).
+   - Perform a temporary bare clone locally.
+   - Execute `git push --mirror` to target.
+4. Emit summary statistics to the log.
+
+Safety Notes:
+
+- Mirror push will delete refs in target that were deleted in source.
+- Projects are NOT created automatically; create them first in target.
+- PAT values are never logged.
+
+To adapt behaviour (e.g., additive push instead of mirror) extend the script locally—by design optional switches were removed for simplicity.
