@@ -7,15 +7,16 @@ Get-ChildItem .\src\_includes\ | Unblock-File
 
 <#
  .SYNOPSIS
-    Migrate Git repositories from source Azure DevOps organisations/projects to a target organisation (one-way mirror push).
+     Migrate Git repositories from source Azure DevOps organisations/projects to a target organisation using full working clones.
 
  .DESCRIPTION
     Reads organisations & projects from organisations.json (source) and for every enabled source repo ensures a destination
-    repository (same project name) exists in the target organisation (projects must already exist) then performs a mirror push.
+    repository (same project name) exists in the target organisation (projects must already exist) then performs a push of all branches and tags.
     This script has no runtime parameters. It loads:
         - Source organisations/projects from organisations.json in the current data environment.
         - Target settings (targetOrgUrl, targetPat) from target.json in the same data folder.
-    All cloning is done to the configured output folder.
+    All cloning is done to the configured output folder using the structure:
+        output/<org>/<project>/repos/<repoName>
 
 EXAMPLE
     pwsh ./src/migrationTools/Migrate-GitRepos.ps1
@@ -23,7 +24,7 @@ EXAMPLE
 .NOTES
     Does NOT create target projects; they must already exist.
     PAT values NEVER logged.
-    Uses git --mirror push semantics (branches, tags, deleted refs reflected).
+    Uses standard working clones so you can add or modify branches locally before pushing. Push sends all branches & tags (does not delete removed refs).
 #>
 
 # No parameters: configuration is file based
@@ -114,7 +115,9 @@ function Get-LocalRepoPath {
     $orgNameSan = ($OrgUrl -replace 'https://dev.azure.com/', '') -replace 'visualstudio.com/', '' -replace '/', ''
     $projFolder = Join-Path -Path $TargetRoot -ChildPath $orgNameSan
     $projFolder = Join-Path -Path $projFolder -ChildPath $ProjectName
-    return Join-Path -Path $projFolder -ChildPath ($RepoName.Replace(' ', '_'))
+    $reposFolder = Join-Path -Path $projFolder -ChildPath 'repos'
+    if (-not (Test-Path $reposFolder)) { New-Item -ItemType Directory -Path $reposFolder -Force | Out-Null }
+    return Join-Path -Path $reposFolder -ChildPath ($RepoName.Replace(' ', '_'))
 }
 
 function Get-SourceClone {
@@ -143,9 +146,7 @@ function Get-SourceClone {
     $uriBuilder.UserName = 'migration'
     $uriBuilder.Password = $Pat
     $authUrl = $uriBuilder.Uri.AbsoluteUri
-    $gitCloneArgs = @('clone')
-    if (-not $NoBare) { $gitCloneArgs += '--bare' }
-    $gitCloneArgs += @($authUrl, $LocalPath)
+    $gitCloneArgs = @('clone', $authUrl, $LocalPath)
     Write-InfoLog "Cloning source repo -> {path}" -PropertyValues $LocalPath
     $env:GIT_TERMINAL_PROMPT = 0
     $res = & git @gitCloneArgs 2>&1
@@ -164,9 +165,16 @@ function Push-ToTarget {
     $uriBuilder.UserName = 'migration'
     $uriBuilder.Password = $DestPat
     $pushUrl = $uriBuilder.Uri.AbsoluteUri
-    $gitCmdArgs = @('--git-dir', $LocalPath, 'push', '--mirror', $pushUrl)
-    $res = & git @gitCmdArgs 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Error "git push failed: $res" } else { Write-InfoLog "Push complete" }
+    Push-Location $LocalPath
+    try {
+        $existing = (& git remote) -split "`n" | Where-Object { $_ -eq 'target' }
+        if ($existing) { & git remote set-url target $pushUrl } else { & git remote add target $pushUrl }
+        Write-InfoLog "Pushing branches"; $res1 = & git push target --all 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-Error "git push branches failed: $res1"; return }
+        Write-InfoLog "Pushing tags"; $res2 = & git push target --tags 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-WarningLog "git push tags failed: $res2" } else { Write-InfoLog "Push complete" }
+    }
+    finally { Pop-Location }
 }
 
 $stats = [ordered]@{
