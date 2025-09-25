@@ -9,11 +9,11 @@ $setupConfigFile = ".\config.json"
 if ((Test-Path $setupConfigFile) -eq $false) {
 
     $setupConfig = @{
-        dataEnvironment = [dataEnvironments]::debug
-        queryString = "api-version=7.0"
+        dataEnvironment    = [dataEnvironments]::debug
+        queryString        = "api-version=7.0"
         queryStringPreview = "api-version=7.1-preview.3"
-        outputFolder = ".\output\"
-        dataFolder = ".\data\"
+        outputFolder       = "C:\temp\output"
+        dataFolder         = ".\data\"
     }
     Out-File -FilePath ".\config.json" -InputObject ($setupConfig | ConvertTo-Json -Depth 100 -EnumsAsStrings) -Encoding ascii
 }
@@ -30,7 +30,8 @@ $dataFolder = "$($setupConfig.dataFolder)\$dataEnvironment\"
 # Create any folders that don't exist
 if (Test-Path $outputFolder) {
     Write-DebugLog "Output folder {outputFolder} exists" -PropertyValues $outputFolder
-} else {
+}
+else {
     Write-DebugLog "Output folder {outputFolder} does not exist" -PropertyValues $outputFolder
     $outputFolderCreated = New-item $outputFolder -ItemType Directory -force
     Write-DebugLog "Created {outputFolder}" -PropertyValues $outputFolderCreated
@@ -40,7 +41,8 @@ Write-InfoLog "Output folder {outputFolder}" -PropertyValues $outputFolder
 
 if (Test-Path $dataFolder) {
     Write-DebugLog "Data folder {dataFolder} exists" -PropertyValues $dataFolder
-} else {
+}
+else {
     Write-DebugLog "Data folder {dataFolder} does not exist" -PropertyValues $dataFolder
     $dataFolderCreated = New-item $dataFolder -ItemType Directory -force
     Write-DebugLog "Created {dataFolder}" -PropertyValues $dataFolder
