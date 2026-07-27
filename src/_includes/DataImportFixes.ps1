@@ -246,6 +246,36 @@ function Set-ProcessConfigurationColumns {
     }
 }
 
+function Set-ProcessConfigurationAddPanel {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$BacklogElement,
+        [Parameter(Mandatory)] [string[]]$Fields
+    )
+
+    Write-FixStep "Replacing AddPanel on '$BacklogElement' with field(s): $($Fields -join ', ')"
+    Update-ProcessConfigurationFixFile -Path $Path -Mutation {
+        param($xml)
+        $backlog = $xml.ProjectProcessConfiguration.SelectSingleNode($BacklogElement)
+        if (-not $backlog) { throw "Process configuration element '$BacklogElement' was not found." }
+        $existing = $backlog.SelectSingleNode('AddPanel')
+        if ($existing) {
+            Write-FixStep '  removing existing AddPanel'
+            [void]$backlog.RemoveChild($existing)
+        }
+        $panel = $xml.CreateElement('AddPanel')
+        $fieldsNode = $xml.CreateElement('Fields')
+        foreach ($field in $Fields) {
+            $fieldNode = $xml.CreateElement('Field')
+            $fieldNode.SetAttribute('refname', $field)
+            [void]$fieldsNode.AppendChild($fieldNode)
+        }
+        [void]$panel.AppendChild($fieldsNode)
+        [void]$backlog.AppendChild($panel)
+    }
+}
+
 function Add-WorkItemCategory {
     [CmdletBinding()]
     param(
@@ -281,6 +311,46 @@ function Add-WorkItemCategory {
     }
     finally {
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Find-WitRuleScope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [string]$WitAdminPath
+    )
+
+    $executable = Resolve-WitAdminPath -WitAdminPath $WitAdminPath
+    Write-FixStep "Listing work item types in '$Project'"
+    $types = & $executable listwitd "/collection:$Collection" "/p:$Project"
+    if ($LASTEXITCODE -ne 0) { throw "witadmin listwitd failed with exit code $LASTEXITCODE." }
+
+    foreach ($type in ($types | Where-Object { $_ -and $_.Trim() })) {
+        $name = $type.Trim()
+        $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Witd.xml"
+        try {
+            & $executable exportwitd "/collection:$Collection" "/p:$Project" "/n:$name" "/f:$file" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-FixStep "  '$name': export failed with exit code $LASTEXITCODE"
+                continue
+            }
+            $xml = [xml](Get-Content -LiteralPath $file -Raw)
+            foreach ($node in $xml.SelectNodes('//*[@for or @not]')) {
+                [pscustomobject]@{
+                    Project      = $Project
+                    WorkItemType = $name
+                    Rule         = $node.Name
+                    Field        = $node.ParentNode.GetAttribute('refname')
+                    For          = $node.GetAttribute('for')
+                    Not          = $node.GetAttribute('not')
+                }
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
