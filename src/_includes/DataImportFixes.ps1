@@ -161,7 +161,8 @@ function Add-ProcessConfigurationTypeField {
     param(
         [Parameter(Mandatory)] [string]$Path,
         [Parameter(Mandatory)] [string]$Type,
-        [Parameter(Mandatory)] [string]$ReferenceName
+        [Parameter(Mandatory)] [string]$ReferenceName,
+        [string]$Format
     )
 
     Write-FixStep "Setting TypeField type='$Type' to refname='$ReferenceName'"
@@ -185,6 +186,10 @@ function Add-ProcessConfigurationTypeField {
         }
         $node.SetAttribute('refname', $ReferenceName)
         $node.SetAttribute('type', $Type)
+        if ($Format) {
+            Write-FixStep "  setting format='$Format'"
+            $node.SetAttribute('format', $Format)
+        }
     }
 }
 
@@ -351,6 +356,77 @@ function Find-WitRuleScope {
         finally {
             Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Get-WorkItemType {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [string]$WitAdminPath
+    )
+
+    $executable = Resolve-WitAdminPath -WitAdminPath $WitAdminPath
+    Write-FixStep "Listing work item types in '$Project'"
+    $types = & $executable listwitd "/collection:$Collection" "/p:$Project"
+    if ($LASTEXITCODE -ne 0) { throw "witadmin listwitd failed with exit code $LASTEXITCODE." }
+    $types | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }
+}
+
+function Copy-WorkItemType {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$SourceProject,
+        [Parameter(Mandatory)] [string]$TargetProject,
+        [Parameter(Mandatory)] [string]$WorkItemType,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Copying work item type '$WorkItemType' from '$SourceProject' to '$TargetProject'"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Witd.xml"
+    try {
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportwitd', "/collection:$Collection", "/p:$SourceProject", "/n:$WorkItemType", "/f:$file")
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importwitd', "/collection:$Collection", "/p:$TargetProject", "/f:$file")
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-WorkItemCategoryType {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$ReferenceName,
+        [Parameter(Mandatory)] [string]$WorkItemType,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Removing work item type '$WorkItemType' from category '$ReferenceName' in '$Project'"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Categories.xml"
+    try {
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+        $xml = [xml](Get-Content -LiteralPath $file -Raw)
+        $category = $xml.SelectSingleNode("//*[local-name()='CATEGORY'][@refname='$ReferenceName']")
+        if (-not $category) { throw "Category '$ReferenceName' was not found in '$Project'." }
+
+        $default = $category.SelectSingleNode("*[local-name()='DEFAULTWORKITEMTYPE'][@name='$WorkItemType']")
+        if ($default) { throw "'$WorkItemType' is the DEFAULTWORKITEMTYPE of '$ReferenceName' and cannot be removed." }
+
+        $node = $category.SelectSingleNode("*[local-name()='WORKITEMTYPE'][@name='$WorkItemType']")
+        if (-not $node) {
+            Write-FixStep "  '$WorkItemType' is not a member of '$ReferenceName' - no change"
+            return
+        }
+        [void]$category.RemoveChild($node)
+        $xml.Save($file)
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
     }
 }
 
