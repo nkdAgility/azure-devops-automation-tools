@@ -1,0 +1,325 @@
+function Write-FixStep {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$Message)
+
+    Write-Host "[fix] $Message" -ForegroundColor Cyan
+}
+
+function Resolve-WitAdminPath {
+    [CmdletBinding()]
+    param([string]$WitAdminPath)
+
+    if ($WitAdminPath) {
+        if (Test-Path -LiteralPath $WitAdminPath -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $WitAdminPath).Path
+        }
+        throw "Unable to find witadmin at '$WitAdminPath'."
+    }
+
+    $command = Get-Command 'witadmin.exe' -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $visualStudioRoot = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio'
+    $match = Get-ChildItem -Path $visualStudioRoot -Filter 'witadmin.exe' -File -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($match) {
+        return $match.FullName
+    }
+
+    throw 'Unable to find witadmin.exe on PATH or under the Visual Studio installation directory.'
+}
+
+function Invoke-WitAdminFix {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Arguments,
+
+        [string]$WitAdminPath
+    )
+
+    $executable = Resolve-WitAdminPath -WitAdminPath $WitAdminPath
+    Write-FixStep "witadmin $($Arguments -join ' ')"
+    & $executable @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "witadmin failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Rename-Field {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Collection,
+
+        [Parameter(Mandatory)]
+        [string]$ReferenceName,
+
+        [Parameter(Mandatory)]
+        [string]$NewName,
+
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Renaming field '$ReferenceName' to '$NewName' in $Collection"
+    Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @(
+        'changefield',
+        "/collection:$Collection",
+        "/n:$ReferenceName",
+        "/name:$NewName",
+        '/noprompt'
+    )
+}
+
+function Export-ProcessConfigurationFixFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$Path,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Exporting process configuration for '$Project' to '$Path'"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportprocessconfig', "/collection:$Collection", "/p:$Project", "/f:$Path")
+}
+
+function Import-ProcessConfigurationFixFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$Path,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Importing process configuration '$Path' into '$Project'"
+    Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importprocessconfig', "/collection:$Collection", "/p:$Project", "/f:$Path")
+}
+
+function Update-ProcessConfigurationFixFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [scriptblock]$Mutation
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Process configuration fix file '$Path' does not exist. Export it first." }
+    $xml = [xml](Get-Content -LiteralPath $Path -Raw)
+    & $Mutation $xml
+    $xml.Save($Path)
+    Write-FixStep "Saved '$Path'"
+}
+
+function Add-ProcessConfigurationElement {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$ParentXPath,
+        [Parameter(Mandatory)] [string]$ElementName
+    )
+
+    Write-FixStep "Ensuring element '$ElementName' exists under '$ParentXPath'"
+    Update-ProcessConfigurationFixFile -Path $Path -Mutation {
+        param($xml)
+        $parent = $xml.SelectSingleNode($ParentXPath)
+        if (-not $parent) { throw "Process configuration node '$ParentXPath' was not found." }
+        if ($parent.SelectSingleNode($ElementName)) {
+            Write-FixStep "  '$ElementName' already present - no change"
+        }
+        else {
+            [void]$parent.AppendChild($xml.CreateElement($ElementName))
+            Write-FixStep "  added '$ElementName'"
+        }
+    }
+}
+
+function Set-ProcessConfigurationAttribute {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$XPath,
+        [Parameter(Mandatory)] [string]$AttributeName,
+        [Parameter(Mandatory)] [string]$Value
+    )
+
+    Write-FixStep "Setting @$AttributeName='$Value' on '$XPath'"
+    Update-ProcessConfigurationFixFile -Path $Path -Mutation {
+        param($xml)
+        $node = $xml.SelectSingleNode($XPath)
+        if (-not $node) { throw "Process configuration node '$XPath' was not found." }
+        Write-FixStep "  previous value: '$($node.GetAttribute($AttributeName))'"
+        $node.SetAttribute($AttributeName, $Value)
+    }
+}
+
+function Add-ProcessConfigurationTypeField {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Type,
+        [Parameter(Mandatory)] [string]$ReferenceName
+    )
+
+    Write-FixStep "Setting TypeField type='$Type' to refname='$ReferenceName'"
+    Update-ProcessConfigurationFixFile -Path $Path -Mutation {
+        param($xml)
+        $root = $xml.ProjectProcessConfiguration
+        $typeFields = $root.SelectSingleNode('TypeFields')
+        if (-not $typeFields) {
+            $typeFields = $xml.CreateElement('TypeFields')
+            [void]$root.PrependChild($typeFields)
+            Write-FixStep '  created missing TypeFields element'
+        }
+        $node = $typeFields.SelectSingleNode("TypeField[@type='$Type']")
+        if (-not $node) {
+            $node = $xml.CreateElement('TypeField')
+            [void]$typeFields.AppendChild($node)
+            Write-FixStep "  added TypeField type='$Type'"
+        }
+        else {
+            Write-FixStep "  updating existing TypeField (was refname='$($node.GetAttribute('refname'))')"
+        }
+        $node.SetAttribute('refname', $ReferenceName)
+        $node.SetAttribute('type', $Type)
+    }
+}
+
+function Set-ProcessConfigurationStates {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$BacklogElement,
+        [Parameter(Mandatory)] [hashtable[]]$States
+    )
+
+    Write-FixStep "Replacing States on '$BacklogElement' with $($States.Count) state(s): $(($States | ForEach-Object { "$($_.Type)=$($_.Value)" }) -join ', ')"
+    Update-ProcessConfigurationFixFile -Path $Path -Mutation {
+        param($xml)
+        $backlog = $xml.ProjectProcessConfiguration.SelectSingleNode($BacklogElement)
+        if (-not $backlog) { throw "Process configuration element '$BacklogElement' was not found." }
+        $existing = $backlog.SelectSingleNode('States')
+        if ($existing) {
+            Write-FixStep "  removing $($existing.ChildNodes.Count) existing state(s)"
+            [void]$backlog.RemoveChild($existing)
+        }
+        $statesNode = $xml.CreateElement('States')
+        foreach ($state in $States) {
+            $stateNode = $xml.CreateElement('State')
+            $stateNode.SetAttribute('type', [string]$state.Type)
+            $stateNode.SetAttribute('value', [string]$state.Value)
+            [void]$statesNode.AppendChild($stateNode)
+        }
+        [void]$backlog.PrependChild($statesNode)
+    }
+}
+
+function Set-ProcessConfigurationColumns {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$BacklogElement,
+        [Parameter(Mandatory)] [hashtable[]]$Columns
+    )
+
+    Write-FixStep "Replacing Columns on '$BacklogElement' with $($Columns.Count) column(s): $(($Columns | ForEach-Object { $_.ReferenceName }) -join ', ')"
+    Update-ProcessConfigurationFixFile -Path $Path -Mutation {
+        param($xml)
+        $backlog = $xml.ProjectProcessConfiguration.SelectSingleNode($BacklogElement)
+        if (-not $backlog) { throw "Process configuration element '$BacklogElement' was not found." }
+        $existing = $backlog.SelectSingleNode('Columns')
+        if ($existing) {
+            Write-FixStep "  removing $($existing.ChildNodes.Count) existing column(s)"
+            [void]$backlog.RemoveChild($existing)
+        }
+        $columnsNode = $xml.CreateElement('Columns')
+        foreach ($column in $Columns) {
+            $columnNode = $xml.CreateElement('Column')
+            $columnNode.SetAttribute('refname', [string]$column.ReferenceName)
+            $columnNode.SetAttribute('width', [string]$column.Width)
+            [void]$columnsNode.AppendChild($columnNode)
+        }
+        [void]$backlog.AppendChild($columnsNode)
+    }
+}
+
+function Add-WorkItemCategory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$ReferenceName,
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [string]$DefaultWorkItemType,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Ensuring category '$ReferenceName' ('$Name') exists in '$Project' with default type '$DefaultWorkItemType'"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Categories.xml"
+    try {
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+        $xml = [xml](Get-Content -LiteralPath $file -Raw)
+        $category = $xml.SelectSingleNode("//*[local-name()='CATEGORY'][@refname='$ReferenceName']")
+        if ($category) {
+            Write-FixStep "  category '$ReferenceName' already exists - no change"
+        }
+        else {
+            Write-FixStep "  category '$ReferenceName' missing - adding it"
+            $category = $xml.CreateElement('CATEGORY')
+            $category.SetAttribute('refname', $ReferenceName)
+            $category.SetAttribute('name', $Name)
+            $default = $xml.CreateElement('DEFAULTWORKITEMTYPE')
+            $default.SetAttribute('name', $DefaultWorkItemType)
+            [void]$category.AppendChild($default)
+            [void]$xml.DocumentElement.AppendChild($category)
+            $xml.Save($file)
+            Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-WitRuleScope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$WorkItemType,
+        [Parameter(Mandatory)] [ValidateSet('for', 'not', 'both')] [string]$AttributeName,
+        [Parameter(Mandatory)] [string]$Identity,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Removing rule scope '$Identity' ($AttributeName) from work item type '$WorkItemType' in '$Project'"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Witd.xml"
+    try {
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportwitd', "/collection:$Collection", "/p:$Project", "/n:$WorkItemType", "/f:$file")
+        $xml = [xml](Get-Content -LiteralPath $file -Raw)
+        $attributes = if ($AttributeName -eq 'both') { @('for', 'not') } else { @($AttributeName) }
+        $changeCount = 0
+        foreach ($attribute in $attributes) {
+            $nodes = @($xml.SelectNodes("//*[@$attribute]") | Where-Object { $_.GetAttribute($attribute) -eq $Identity })
+            foreach ($node in $nodes) {
+                Write-FixStep "  removing @$attribute from <$($node.Name)> under $($node.ParentNode.Name)"
+                [void]$node.RemoveAttribute($attribute)
+                $changeCount++
+            }
+        }
+        if ($changeCount -eq 0) {
+            $scopes = @($xml.SelectNodes('//*[@for or @not]') | ForEach-Object { "<$($_.Name)> for='$($_.GetAttribute('for'))' not='$($_.GetAttribute('not'))'" } | Sort-Object -Unique)
+            $detail = if ($scopes) { " Scoped rules present: $($scopes -join '; ')" } else { ' No scoped rules exist in this work item type.' }
+            throw "No matching rule scope for '$Identity' was found in '$WorkItemType'.$detail"
+        }
+        Write-FixStep "  removed $changeCount scope attribute(s)"
+        $xml.Save($file)
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importwitd', "/collection:$Collection", "/p:$Project", "/f:$file")
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
