@@ -162,7 +162,8 @@ function Add-ProcessConfigurationTypeField {
         [Parameter(Mandatory)] [string]$Path,
         [Parameter(Mandatory)] [string]$Type,
         [Parameter(Mandatory)] [string]$ReferenceName,
-        [string]$Format
+        [string]$Format,
+        [hashtable[]]$Values
     )
 
     Write-FixStep "Setting TypeField type='$Type' to refname='$ReferenceName'"
@@ -189,6 +190,19 @@ function Add-ProcessConfigurationTypeField {
         if ($Format) {
             Write-FixStep "  setting format='$Format'"
             $node.SetAttribute('format', $Format)
+        }
+        if ($Values) {
+            Write-FixStep "  setting $($Values.Count) TypeFieldValue(s): $(($Values | ForEach-Object { "$($_.Type)=$($_.Value)" }) -join ', ')"
+            $existingValues = $node.SelectSingleNode('TypeFieldValues')
+            if ($existingValues) { [void]$node.RemoveChild($existingValues) }
+            $valuesNode = $xml.CreateElement('TypeFieldValues')
+            foreach ($value in $Values) {
+                $valueNode = $xml.CreateElement('TypeFieldValue')
+                $valueNode.SetAttribute('type', [string]$value.Type)
+                $valueNode.SetAttribute('value', [string]$value.Value)
+                [void]$valuesNode.AppendChild($valueNode)
+            }
+            [void]$node.AppendChild($valuesNode)
         }
     }
 }
@@ -395,6 +409,54 @@ function Copy-WorkItemType {
     }
 }
 
+function Import-WorkItemTypeFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$Path,
+        [string]$WitAdminPath
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Work item type definition '$Path' does not exist." }
+    Write-FixStep "Importing work item type definition '$Path' into '$Project'"
+    Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importwitd', "/collection:$Collection", "/p:$Project", "/f:$Path")
+}
+
+function Add-WorkItemCategoryType {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory)] [string]$ReferenceName,
+        [Parameter(Mandatory)] [string]$WorkItemType,
+        [string]$WitAdminPath
+    )
+
+    Write-FixStep "Adding work item type '$WorkItemType' to category '$ReferenceName' in '$Project'"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Categories.xml"
+    try {
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+        $xml = [xml](Get-Content -LiteralPath $file -Raw)
+        $category = $xml.SelectSingleNode("//*[local-name()='CATEGORY'][@refname='$ReferenceName']")
+        if (-not $category) { throw "Category '$ReferenceName' was not found in '$Project'." }
+
+        $member = $category.SelectSingleNode("*[@name='$WorkItemType']")
+        if ($member) {
+            Write-FixStep "  '$WorkItemType' is already a member of '$ReferenceName' - no change"
+            return
+        }
+        $node = $xml.CreateElement('WORKITEMTYPE')
+        $node.SetAttribute('name', $WorkItemType)
+        [void]$category.AppendChild($node)
+        $xml.Save($file)
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Remove-WorkItemCategoryType {
     [CmdletBinding()]
     param(
@@ -424,6 +486,87 @@ function Remove-WorkItemCategoryType {
         [void]$category.RemoveChild($node)
         $xml.Save($file)
         Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Find-GlobalWorkflowRuleScope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [string]$Project,
+        [string]$WitAdminPath
+    )
+
+    $scope = if ($Project) { "project '$Project'" } else { 'the collection' }
+    Write-FixStep "Scanning the global workflow for $scope"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).GlobalWorkflow.xml"
+    try {
+        $arguments = @('exportglobalworkflow', "/collection:$Collection")
+        if ($Project) { $arguments += "/p:$Project" }
+        $arguments += "/f:$file"
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments $arguments
+
+        $xml = [xml](Get-Content -LiteralPath $file -Raw)
+        foreach ($node in $xml.SelectNodes('//*[@for or @not]')) {
+            [pscustomobject]@{
+                Scope = if ($Project) { $Project } else { 'Collection' }
+                Rule  = $node.Name
+                Field = $node.SelectSingleNode('ancestor::*[@refname]').GetAttribute('refname')
+                For   = $node.GetAttribute('for')
+                Not   = $node.GetAttribute('not')
+            }
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-GlobalWorkflowRuleScope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Collection,
+        [string]$Project,
+        [Parameter(Mandatory)] [ValidateSet('for', 'not', 'both')] [string]$AttributeName,
+        [Parameter(Mandatory)] [string]$Identity,
+        [string]$WitAdminPath
+    )
+
+    $scope = if ($Project) { "project '$Project'" } else { 'the collection' }
+    Write-FixStep "Removing global workflow rule scope '$Identity' ($AttributeName) from $scope"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).GlobalWorkflow.xml"
+    try {
+        $exportArguments = @('exportglobalworkflow', "/collection:$Collection")
+        if ($Project) { $exportArguments += "/p:$Project" }
+        $exportArguments += "/f:$file"
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments $exportArguments
+
+        $xml = [xml](Get-Content -LiteralPath $file -Raw)
+        $attributes = if ($AttributeName -eq 'both') { @('for', 'not') } else { @($AttributeName) }
+        $changeCount = 0
+        foreach ($attribute in $attributes) {
+            $nodes = @($xml.SelectNodes("//*[@$attribute]") | Where-Object { $_.GetAttribute($attribute) -eq $Identity })
+            foreach ($node in $nodes) {
+                Write-FixStep "  removing @$attribute from <$($node.Name)> under $($node.ParentNode.Name)"
+                [void]$node.RemoveAttribute($attribute)
+                $changeCount++
+            }
+        }
+        if ($changeCount -eq 0) {
+            $scopes = @($xml.SelectNodes('//*[@for or @not]') | ForEach-Object { "<$($_.Name)> for='$($_.GetAttribute('for'))' not='$($_.GetAttribute('not'))'" } | Sort-Object -Unique)
+            $detail = if ($scopes) { " Scoped rules present: $($scopes -join '; ')" } else { ' No scoped rules exist in this global workflow.' }
+            throw "No matching global workflow rule scope for '$Identity' was found in $scope.$detail"
+        }
+        Write-FixStep "  removed $changeCount scope attribute(s)"
+        $xml.Save($file)
+
+        $importArguments = @('importglobalworkflow', "/collection:$Collection")
+        if ($Project) { $importArguments += "/p:$Project" }
+        $importArguments += "/f:$file"
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments $importArguments
     }
     finally {
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
