@@ -23,6 +23,7 @@ function Install-FeedbackWorkItemTypes {
         [Parameter(Mandatory)] [string]$Project,
         [Parameter(Mandatory)] [string]$TypeDefinitionsPath,
         [switch]$KeepBugInRequirementCategory,
+        [string]$RequirementWorkItemType = 'User Story',
         [string]$WitAdminPath
     )
 
@@ -32,6 +33,9 @@ function Install-FeedbackWorkItemTypes {
 
     Write-FixStep "Installing feedback work item types and categories in '$Project'"
     Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.TaskCategory' -Name 'Task Category' -DefaultWorkItemType 'Task' -WitAdminPath $WitAdminPath
+    # The RequirementCategory is required by the process configuration import and
+    # is absent from some projects (observed: sparse Scrum-derived category files).
+    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.RequirementCategory' -Name 'Requirement Category' -DefaultWorkItemType $RequirementWorkItemType -WitAdminPath $WitAdminPath
     Import-WorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackRequest.xml') -WitAdminPath $WitAdminPath
     Import-WorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackResponse.xml') -WitAdminPath $WitAdminPath
     Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackRequestCategory' -Name 'Feedback Request Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath

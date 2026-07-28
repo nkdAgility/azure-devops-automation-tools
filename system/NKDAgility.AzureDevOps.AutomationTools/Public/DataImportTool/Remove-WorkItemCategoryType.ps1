@@ -14,7 +14,10 @@ function Remove-WorkItemCategoryType {
         Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportcategories', "/collection:$Collection", "/p:$Project", "/f:$file")
         $xml = [xml](Get-Content -LiteralPath $file -Raw)
         $category = $xml.SelectSingleNode("//*[local-name()='CATEGORY'][@refname='$ReferenceName']")
-        if (-not $category) { throw "Category '$ReferenceName' was not found in '$Project'." }
+        if (-not $category) {
+            Write-FixStep "  category '$ReferenceName' does not exist in '$Project' - nothing to remove, no change"
+            return
+        }
 
         $default = $category.SelectSingleNode("*[local-name()='DEFAULTWORKITEMTYPE'][@name='$WorkItemType']")
         if ($default) { throw "'$WorkItemType' is the DEFAULTWORKITEMTYPE of '$ReferenceName' and cannot be removed." }
