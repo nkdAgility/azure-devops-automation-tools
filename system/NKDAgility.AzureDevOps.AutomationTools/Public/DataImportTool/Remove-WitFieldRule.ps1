@@ -21,7 +21,19 @@ function Remove-WitFieldRule {
         foreach ($node in $nodes) {
             $field = $node.SelectSingleNode('ancestor::*[@refname]')
             Write-FixStep "  removing <$Rule> from field '$(if ($field) { $field.GetAttribute('refname') } else { 'unknown' })'"
-            [void]$node.ParentNode.RemoveChild($node)
+            $parent = $node.ParentNode
+            [void]$parent.RemoveChild($node)
+            # Inside a WORKFLOW, a FIELD reference must carry at least one rule and
+            # a FIELDS block at least one FIELD - leaving one empty fails schema
+            # validation on re-import (TF237070), so prune emptied ancestors.
+            while ($parent -and $parent.LocalName -in @('FIELD', 'FIELDS') -and
+                -not $parent.HasChildNodes -and $parent.SelectSingleNode('ancestor::WORKFLOW')) {
+                $label = if ($parent.LocalName -eq 'FIELD') { " '$($parent.GetAttribute('refname'))'" } else { '' }
+                Write-FixStep "  removing now-empty <$($parent.LocalName)>$label"
+                $grandparent = $parent.ParentNode
+                [void]$grandparent.RemoveChild($parent)
+                $parent = $grandparent
+            }
         }
         Write-FixStep "  removed $($nodes.Count) rule(s)"
         $xml.Save($file)

@@ -19,4 +19,10 @@ function Invoke-WitAdminFix {
     if ($LASTEXITCODE -ne 0) {
         throw "witadmin failed with exit code $LASTEXITCODE. $(($output -join ' ').Trim())"
     }
+    # witadmin sometimes exits 0 despite failing (observed: importwitd TF237070
+    # schema rejection), so also treat TF/VS-coded errors in the output as failure.
+    $errorLines = @($output | Where-Object { "$_" -match '\b(TF|VS)\d{5,7}\b' -and "$_" -notmatch '(?i)warning' })
+    if ($errorLines) {
+        throw "witadmin reported an error despite exit code 0: $(($errorLines -join ' ').Trim())"
+    }
 }
