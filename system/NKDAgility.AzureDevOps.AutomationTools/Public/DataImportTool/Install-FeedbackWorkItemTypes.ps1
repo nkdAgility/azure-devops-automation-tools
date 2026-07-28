@@ -40,6 +40,11 @@ function Install-FeedbackWorkItemTypes {
     Import-WorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackResponse.xml') -WitAdminPath $WitAdminPath
     Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackRequestCategory' -Name 'Feedback Request Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
     Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackResponseCategory' -Name 'Feedback Response Category' -DefaultWorkItemType 'Feedback Response' -WitAdminPath $WitAdminPath
+    # Some projects lack Microsoft.HiddenCategory entirely (observed: MatteR4orn).
+    # Create it if missing; 'Feedback Request' was imported above so it always
+    # exists here, and it is a hidden type in the OOB template. Projects that
+    # already have the category keep their existing default type.
+    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -Name 'Hidden Types Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
     Add-WorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -WorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
     Add-WorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -WorkItemType 'Feedback Response' -WitAdminPath $WitAdminPath
     if (-not $KeepBugInRequirementCategory) {

@@ -13,6 +13,7 @@
         'Set-MigrationContext'
         'Clear-MigrationContext'
         'Invoke-FixStep'
+        'Write-FixSection'
         # DataImportTool - Migrator.exe
         'Invoke-DataImportPrepare'
         'Invoke-DataImportValidate'
