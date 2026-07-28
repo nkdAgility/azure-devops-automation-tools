@@ -38,6 +38,15 @@ function Remove-WitFieldRule {
         Write-FixStep "  removed $($nodes.Count) rule(s)"
         $xml.Save($file)
         Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('importwitd', "/collection:$Collection", "/p:$Project", "/f:$file")
+
+        # Verify the server actually took the change - witadmin has been observed
+        # reporting success while the import did not stick.
+        Invoke-WitAdminFix -WitAdminPath $WitAdminPath -Arguments @('exportwitd', "/collection:$Collection", "/p:$Project", "/n:$WorkItemType", "/f:$file")
+        $remaining = @(([xml](Get-Content -LiteralPath $file -Raw)).SelectNodes("//$Rule")).Count
+        if ($remaining -gt 0) {
+            throw "Verification failed: $remaining <$Rule> rule(s) still present in '$WorkItemType' after import."
+        }
+        Write-FixStep "  verified: no <$Rule> rules remain in '$WorkItemType'"
     }
     finally {
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue

@@ -111,4 +111,26 @@ function Repair-ProcessConfiguration {
         return
     }
     Import-ProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $Path -WitAdminPath $WitAdminPath
+
+    # Verify the server retained the repair rather than silently discarding
+    # elements: re-export and check the pieces this function is responsible for.
+    $verifyFile = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).ProcessConfig.xml"
+    try {
+        Export-ProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $verifyFile -WitAdminPath $WitAdminPath
+        $verify = [xml](Get-Content -LiteralPath $verifyFile -Raw)
+        $missing = @(
+            if (-not $verify.SelectSingleNode('/ProjectProcessConfiguration/TypeFields/TypeField')) { 'TypeFields' }
+            if (-not $verify.SelectSingleNode("/ProjectProcessConfiguration/RequirementBacklog[@category='Microsoft.RequirementCategory']")) { 'RequirementBacklog@category' }
+            if (-not $verify.SelectSingleNode("/ProjectProcessConfiguration/TaskBacklog[@category='Microsoft.TaskCategory']")) { 'TaskBacklog@category' }
+            if (-not $verify.SelectSingleNode('/ProjectProcessConfiguration/FeedbackRequestWorkItems/States/State')) { 'FeedbackRequestWorkItems' }
+            if (-not $verify.SelectSingleNode('/ProjectProcessConfiguration/FeedbackResponseWorkItems/States/State')) { 'FeedbackResponseWorkItems' }
+        )
+        if ($missing) {
+            throw "Verification failed: after import, '$Project' is still missing: $($missing -join ', ')."
+        }
+        Write-FixStep "  verified: re-export retains TypeFields, backlog categories and feedback elements"
+    }
+    finally {
+        Remove-Item -LiteralPath $verifyFile -Force -ErrorAction SilentlyContinue
+    }
 }
