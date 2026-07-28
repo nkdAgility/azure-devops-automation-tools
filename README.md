@@ -1,10 +1,27 @@
 # Azure DevOps Automation Tools
 
+A PowerShell automation wrapper around the common tasks used when migrating Azure DevOps data, whether that is with the [Azure DevOps Data Import Tool](https://learn.microsoft.com/en-us/azure/devops/migrate/migration-overview) from Microsoft, the [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools), or the Azure DevOps Migration Platform — depending on context.
+
 All these tools are built in PowerShell and have both a $data and a $output folder.
 
 The expectation is that you would create a new git repo just for the data and output folders and then use the scripts to generate the data and output content that you would then use as input into your migrations.
 
 A Sample data folder is provided in this repo.
+
+## Repository layout
+
+| Path | Purpose |
+| ---- | ------- |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, and session context commands |
+| `src/_includes/` | Legacy shared code dot-sourced by the scripts: `setup.ps1` (config + environment), `logging.ps1` (PoShLog wrappers), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (now a shim that imports the module) |
+| `src/DataImportTools/` | Assets supporting the Microsoft Azure DevOps Data Import Tool |
+| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, git repo mirroring, execution |
+| `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
+| `src/processMigrator/` | Wrapper around microsoft/process-migrator |
+| `src/powershell/` | Misc environment utilities |
+| `data/<environment>/` | Per-client data and runbooks — **not under source control**; holds customer data and credentials |
+| `data/sample/` | Committed examples of every expected data file |
+| `output/` | Generated output and logs — not under source control |
 
 ## Setting up the environment
 
@@ -29,17 +46,17 @@ The scripts use `config.json` in the root of this repo to determine where to fin
 
 ```
 
-Although you can use the default values, this will store your data in untracked files in the same repo as the scripts. You would ecperiance data loss if this folder were to be deleted. We recommend that you create a new git repo for your data and output folders and then use the scripts to generate the data and output content that you would then use as input into your migrations.
+Although you can use the default values, this will store your data in untracked files in the same repo as the scripts. You would experience data loss if this folder were to be deleted. We recommend that you create a new git repo for your data and output folders and then use the scripts to generate the data and output content that you would then use as input into your migrations.
 
-Once you have your config.json set up, you can run the follwoing scripts:
+Once you have your config.json set up, you can run the following scripts:
 
 - **Generate-ConfigurationsFromTemplates.ps1** - This will generate a configuration file for each template file in the data folder. Loaded from `migrationConfigSaples` folder and it will create a folder for each project on each organisation configured with the template populated for every project. This assumes that you are migrating many projects to a single organisation. If you are migrating a single project to many organisations, you will need to edit the output with the target locations.
-- **Delete-CustomField.ps1** - Woops, I deen to delete a field from an organisation. This will delete a field from all projects in an organisation.
+- **Delete-CustomField.ps1** - Whoops, I need to delete a field from an organisation. This will delete a field from all projects in an organisation.
 - **Generate-ProcessOutput.ps1** - This will populate the process, list, field, and work item configuration data from all of the processes in each org. It will create a folder for each organisation and populate it with the data. This is for reference and can be used to build the input for the other scripts.
-- **Generate-ProjectStats.ps1**- How big is my migration? Createa a CSV file with the number of work items, pipelines, builds, and other data in each project in each organisation.
+- **Generate-ProjectStats.ps1** - How big is my migration? Creates a CSV file with the number of work items, pipelines, builds, and other data in each project in each organisation.
 - **Install-CustomFields.ps1** - Adds all of the configured fields to the configured organisations and processes. Fields are enabled in `DataLocation\fields.json` and each field is configured in `DataLocation\fields\{field-name}.json`. This script will create the fields in the configured organisations and processes.
 - **Install-CustomPages.ps1** - Adds all of the configured pages to the configured organisations and processes. Each page is configured in `DataLocation\pages\{page-name}.json`. This script will create the pages in the configured organisations,  processes, & WorkItems.
-- **Install-ReflectedWorkItemID.ps1** - Adds the ReflectedWorkItemID field to all of the configured organisations and processes. This is a special field that is used by the [Azure DevOps Migration Tools(https://github.com/nkdAgility/azure-devops-migration-tools)] to track the work items as they are migrated. This script will create the field in the configured organisations and processes.
+- **Install-ReflectedWorkItemID.ps1** - Adds the ReflectedWorkItemID field to all of the configured organisations and processes. This is a special field that is used by the [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools) to track the work items as they are migrated. This script will create the field in the configured organisations and processes.
 - **Search-ProcessesWeCareAbout.ps1** - This will search all of the configured organisations for processes that contain the configured work item field. This is useful if you are looking for a process that you know contains a specific field. It will create a CSV file with the results, and update the `organisations.json` file.
 
 ## Data Folder
@@ -48,10 +65,10 @@ The data folder contains the data that is used to for each Script. You can check
 
 - `organisations.json` - This is a list of all of the organsaitions and PAT tokens used for access. They can be disabled, and the scripts will skip them. This is used by all of the scripts.
 - `ReflectedWorkItemId.json` - This contains the single field configuration for the ReflectedWorkItemId field. This is used by the `Install-ReflectedWorkItemID.ps1` script.
-- `fields.json` - This contains the list of fields to be created. This is used by the `Install-CustomFields.ps1` script, and each field can be enabled or disabled. It will load the indevidual field from the `fields` folder based on the `refname` peoperty.
+- `fields.json` - This contains the list of fields to be created. This is used by the `Install-CustomFields.ps1` script, and each field can be enabled or disabled. It will load the individual field from the `fields` folder based on the `refname` property.
 - `fields\{field-name}.json` - This contains the configuration for each field. This is used by the `Install-CustomFields.ps1` script. Each field definition contains all of the POST information needed to create and add them to a process.
 - `pages\{page-name}.json` - This contains the configuration for each page. This is used by the `Install-CustomPages.ps1` script. Each page definition contains all of the POST information needed to create and add them to a process. `Pages` are iterated over and you can use them to add `Groups` to existing `Pages`.
-- `templates\{template-name}.json` - This contains templates for diferent [Azure DevOps Migration Tools(https://github.com/nkdAgility/azure-devops-migration-tools)] configurations. This is used by the `Generate-ConfigurationsFromTemplates.ps1` script. Each configuration template will have the source updated to reflect the source organisation and project, the target will not be updated.
+- `templates\{template-name}.json` - This contains templates for different [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools) configurations. This is used by the `Generate-ConfigurationsFromTemplates.ps1` script. Each configuration template will have the source updated to reflect the source organisation and project, the target will not be updated.
 
 ## Documentation for POSTS
 
@@ -59,6 +76,47 @@ The data folder contains the data that is used to for each Script. You can check
 - [Create Picklist](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/lists/create?view=azure-devops-rest-7.0&tabs=HTTP)
 - [Add Field](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/fields/add?view=azure-devops-rest-7.0&tabs=HTTP)
 - [Add Control](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/controls/create?view=azure-devops-rest-7.0&tabs=HTTP)
+
+## Azure DevOps Data Import Tool (server → services)
+
+When lifting a TFS / Azure DevOps Server collection into Azure DevOps Services with Microsoft's Data Import Tool, the loop is: run `Migrator.exe` validate/prepare, read the validation log, fix the collection, repeat until clean. This repo supports that loop with:
+
+- **Per-client runbooks** in `data/<environment>/DataImportTools/` (untracked):
+  - `run.ps1` — invokes `Migrator.exe Prepare` against the client collection to produce the import specification and validation log.
+  - `fix.ps1` — a sectioned runbook, executed selection-by-selection, that resolves the validation errors using the functions below. Section comments record the error codes (TF400526, TF402538, VS237302, …) each block addresses and any ordering constraints.
+- **The `NKDAgility.AzureDevOps.AutomationTools` module** in `system/` — a library of Verb-Noun functions that wrap `Migrator.exe`, `witadmin.exe` (located automatically), and local XML editing. A typical runbook starts with:
+
+  ```powershell
+  Import-Module .\system\NKDAgility.AzureDevOps.AutomationTools -Force
+  Set-MigrationContext -Collection 'http://tfs:8080/tfs/DefaultCollection/'
+  ```
+
+  `Set-MigrationContext` sets session defaults (collection, project, tool paths) so individual fix lines stay short. Task-level commands collapse whole runbook sections into one call per project: `Install-FeedbackWorkItemTypes` (work item types + categories prerequisites) followed by `Repair-ProcessConfiguration` (export → repair → import of `ProjectProcessConfiguration`, with state mappings as parameters). `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` wrap `Migrator.exe`. The primitives remain available for one-off fixes:
+  - `Rename-Field` — resolve collection-level field name conflicts with Azure DevOps Services.
+  - `Import-WorkItemTypeFile`, `Add-WorkItemCategory`, `Add-WorkItemCategoryType`, `Remove-WorkItemCategoryType`, `Copy-WorkItemType` — get work item types and categories into the shape ProcessConfiguration requires.
+  - `Export-ProcessConfigurationFixFile` / `Import-ProcessConfigurationFixFile` plus `Add-ProcessConfigurationElement`, `Add-ProcessConfigurationTypeField`, `Set-ProcessConfigurationAttribute`, `Set-ProcessConfigurationStates`, `Set-ProcessConfigurationColumns`, `Set-ProcessConfigurationAddPanel` — export a project's `ProjectProcessConfiguration`, repair the XML locally, and push it back.
+  - `Find-WitRuleScope`, `Find-GlobalWorkflowRuleScope`, `Remove-WitRuleScope`, `Remove-GlobalWorkflowRuleScope` — locate and remove AD-scoped field rules (VS237302).
+  - `Remove-WitFieldRule` — strip unsupported field rules such as NOTSAMEAS / PROHIBITEDVALUES (TF402538).
+  - `Remove-WorkItemLinkType` — delete custom link types (TF402583). **Deleting a link type deletes every link of that type in the collection.**
+  - `Get-WorkItemType`, `Get-WorkItemTypeState` — inspection helpers used to verify state before applying fixes.
+
+The fix functions are designed to be idempotent where possible — re-running a fix that is already applied reports "no change" instead of failing — so a runbook section can be re-run safely after a partial pass.
+
+### Validating one step at a time
+
+Because the fixes mutate a live collection, runbooks are executed a bit at a time and each action verified before moving on. The module supports this loop directly:
+
+- **`Invoke-FixStep`** — wraps a runbook step with a name, an optional `-Verify` scriptblock, and a checkpoint file. Completed steps are skipped on re-run (`-Force` overrides), and the checkpoint is only written after verification passes, so the whole runbook can be safely re-run top-to-bottom after a partial pass. Set the checkpoint file once per client with `Set-MigrationContext -CheckpointPath ...`.
+- **`Get-DataImportValidationSummary`** — parses a validation run's `ProjectProcessesMap.log` into per-project error counts and per-error-code counts. Point it at the logs parent folder (e.g. `...\Logs\<Collection>`) and it picks the newest run. Capture a summary before fixing, re-run `Invoke-DataImportPrepare` after a batch of fixes, and compare — the error counts for the fixed projects should drop to zero.
+
+### Reference originals: process-customization-scripts
+
+When getting the local collection into shape for import, use Microsoft's [process-customization-scripts](https://github.com/Microsoft/process-customization-scripts) repository (cloned as a sibling of this repo) as the reference for what the out-of-the-box templates look like:
+
+- The `Import\<Template>\WorkItem Tracking` folders hold the OOB type definitions, categories, and process configuration — these are the "known good" shapes the Data Import Tool validates against. The fix functions take their values (TypeFields refnames, category names, feedback work item states) from here, and `Install-FeedbackWorkItemTypes` imports `FeedbackRequest.xml` / `FeedbackResponse.xml` directly from it.
+- The `Export\ExportProjectTemplate.ps1` script exports a project's full template the same way the migrator sees it — useful for diffing a customised project against the OOB originals to pinpoint exactly what a validation error refers to.
+
+The goal is always to change the minimum needed to satisfy validation while **maintaining the customer's customisations as much as possible** — check against the originals to see what's required, don't overwrite customised definitions wholesale with OOB ones.
 
 ## Git Repository Migration
 
