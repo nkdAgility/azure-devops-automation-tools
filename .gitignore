@@ -8,3 +8,5 @@
 !/data/sample
 # Dont commit config!
 /config.json
+# Local Claude memory - may reference client engagements
+/.claude/memory/

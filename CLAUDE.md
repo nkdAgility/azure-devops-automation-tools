@@ -67,6 +67,10 @@ The module's fix functions come in two layers:
 
 Keep new fix functions in the same style: Verb-Noun names, one function per file under `Public/`, idempotent where possible (report "no change" rather than throwing when the fix is already applied), and add each new public function to `FunctionsToExport` in the `.psd1`.
 
+## Memory
+
+Auto memory is disabled for this project (`.claude/settings.json`). Persistent memory lives in `.claude/memory/` instead — it is gitignored because it may reference client engagements. At the start of a session, read `.claude/memory/MEMORY.md` (if it exists) and follow its links for context; update those files the same way you would auto memory (one fact per file, index line in MEMORY.md).
+
 ## Conventions
 
 - PowerShell 7, Verb-Noun function names; prefer parameters over the setup globals in new code.
