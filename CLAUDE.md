@@ -42,7 +42,7 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 | `bootstrap.ps1` | Remote-runnable customer-workspace bootstrap (irm\|iex safe — no `$PSScriptRoot`; templates come from the cloned repo) |
 | `templates/customer-repo/` | Customer workspace scaffold (`init.ps1`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `secrets/secrets.example.json`, ...) |
 | `templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
-| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Private` (witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Public/WorkItemTracking` (REST-based work item and link queries), `Private` (transport invokers, witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
 | `src/_includes/` | Legacy shared code: `setup.ps1` (config + env), `logging.ps1` (PoShLog wrappers `Write-InfoLog` / `Write-DebugLog`), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
 | `src/DataImportTools/` | Assets supporting the Microsoft Data Import Tool (e.g. SQL helpers) |
 | `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, execute migrations, plus the reusable engines `Migrate-Repos.ps1` (git repos incl. LFS/segmented pushes) and `Migrate-Artifacts.ps1` (artifact feeds/packages) driven by customer-repo `Run-*` binders |
@@ -73,7 +73,24 @@ The module's fix functions come in two layers:
 
 **Reference originals:** Microsoft's [process-customization-scripts](https://github.com/Microsoft/process-customization-scripts) repo (cloned as a sibling of this repo, referenced by runbooks as `..\process-customization-scripts`) holds the OOB template shapes the Data Import Tool validates against; its `Export\ExportProjectTemplate.ps1` exports a project the way the migrator sees it for diffing. Fix values (TypeFields, categories, feedback states) come from there. Change the minimum needed to pass validation — preserve the customer's customisations; never wholesale-replace customised definitions with OOB ones.
 
+**Custom link types are destructive to remove.** `witadmin deletelinktype` deletes every link of the type along with the definition, and the relationships cannot be recovered. `Remove-WorkItemLinkType` therefore calls `Export-WorkItemLinkInventory` first and refuses to delete if that export fails (`-NoExport` overrides). The inventory is written as a `.json` record plus a readable `.csv` sibling into the export snapshot — it is both the customer conversation and the basis for re-creating the links as related links after the import.
+
 Keep new fix functions in the same style: Verb-Noun names, one function per file under `Public/`, idempotent where possible (report "no change" rather than throwing when the fix is already applied), and add each new public function to `FunctionsToExport` in the `.psd1`.
+
+## Module transport split: witadmin vs REST
+
+The module talks to collections two ways, and each has one private invoker that every command of that kind goes through. Do not call `witadmin.exe` or `Invoke-RestMethod` directly from a public function.
+
+| | witadmin / Migrator.exe | REST |
+| - | - | - |
+| Private invoker | `Invoke-WitAdminFix` (+ `Resolve-WitAdminPath`, `Resolve-MigratorPath`) | `Invoke-AzureDevOpsApi` (+ `Get-WorkItemDetailMap`) |
+| Auth | the process identity | `-Pat` when supplied, otherwise `-UseDefaultCredentials` (the normal on-premises case) |
+| Public folder | `Public/DataImportTool` | `Public/WorkItemTracking` |
+| Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries |
+
+`Public/` folders group by **what a command is for**, not by transport — the transport is an implementation detail behind the invoker. `Public/WorkItemTracking` is separate from `Public/DataImportTool` because reading work items and links is useful to every toolchain (a link inventory is as relevant when verifying an Azure DevOps Migration Tools run as when clearing a collection for the Data Import Tool), whereas `DataImportTool` is specifically the Migrator.exe/witadmin fix workflow. A command that composes both — like `Remove-WorkItemLinkType`, which inventories over REST then deletes with witadmin — belongs to the workflow it serves.
+
+REST commands default to `api-version=5.0`: the Data Import Tool runs against Azure DevOps Server, and 5.0 is available on every supported server version, unlike the `$queryString` 7.x defaults used for Services organisations.
 
 ## Memory
 

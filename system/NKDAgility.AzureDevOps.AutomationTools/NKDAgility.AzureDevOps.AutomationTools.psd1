@@ -63,6 +63,10 @@
         'Remove-GlobalWorkflowRuleScope'
         'Remove-WitFieldRule'
         'Remove-WorkItemLinkType'
+        # WorkItemTracking - REST
+        'Get-WorkItemLinkType'
+        'Get-WorkItemLink'
+        'Export-WorkItemLinkInventory'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

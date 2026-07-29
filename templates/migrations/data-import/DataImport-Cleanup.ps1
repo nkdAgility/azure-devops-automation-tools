@@ -34,3 +34,25 @@ Set-MigrationContext -Collection $collection -CheckpointPath $checkpointPath
 # } -Verify {
 #     # return $true when the fix is confirmed on the server
 # }
+
+# ===========================================================================
+# N. Custom link types - Azure DevOps Services rejects them.
+#
+# Deleting a link type also deletes every link of that type, permanently.
+# Review the inventory with the customer BEFORE running the removal step: it
+# is the only record of the relationships, and the basis for re-creating them
+# as related links after the import.
+# ===========================================================================
+# Write-FixSection 'N. Remove custom link types'
+#
+# # Read-only: what exists, and what would be lost.
+# Get-WorkItemLinkType -Collection $collection -CustomOnly | Format-Table Name, ReferenceName, Topology
+# Export-WorkItemLinkInventory -Collection $collection
+#
+# # Destructive. Inventories each type to the export snapshot first, and
+# # refuses to delete if that export fails.
+# Invoke-FixStep -Name 'remove-linktype-Custom.Affects' -Action {
+#     Remove-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects'
+# } -Verify {
+#     -not (Get-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects')
+# }
