@@ -54,7 +54,13 @@ function Get-WorkItemLink {
     $ends = @($ends)
 
     if ($ends.Count -eq 0) {
-        Write-FixStep "No custom work item link types found in the collection - nothing to enumerate"
+        if ($ReferenceName) {
+            # Every match was a reverse end, so the forward filter emptied the set.
+            Write-FixStep "'$($ReferenceName -join ', ')' matched only reverse link type ends - the forward end carries the links, so there is nothing to enumerate"
+        }
+        else {
+            Write-FixStep "No custom work item link types found in the collection - nothing to enumerate"
+        }
         return
     }
 

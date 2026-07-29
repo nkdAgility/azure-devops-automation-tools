@@ -1,9 +1,5 @@
-clear-host
-Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process
-Get-ChildItem .\src\_includes\ | Unblock-File
-
-. .\src\_includes\setup.ps1
-. .\src\_includes\ImportExcel.ps1
+. (Join-Path $PSScriptRoot '..\_includes\setup.ps1')
+. (Join-Path $PSScriptRoot '..\_includes\ImportExcel.ps1')
 
 BeginLoggerTitle "Generate-ProjectStats"
 

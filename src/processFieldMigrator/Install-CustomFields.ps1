@@ -1,9 +1,5 @@
-clear-host
-Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process
-Get-ChildItem .\src\_includes\ | Unblock-File
-
-. .\src\_includes\setup.ps1
-. .\src\_includes\methods.ps1
+. (Join-Path $PSScriptRoot '..\_includes\setup.ps1')
+. (Join-Path $PSScriptRoot '..\_includes\methods.ps1')
 
 BeginLoggerTitle "Install-CustomFields.ps1"
 

@@ -1,8 +1,4 @@
-clear-host
-Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process
-Get-ChildItem .\src\processFieldMigrator\ | Unblock-File
-
-. .\src\_includes\setup.ps1
+. (Join-Path $PSScriptRoot '..\_includes\setup.ps1')
 
 $config = Get-Content "$dataFolder\organisations.json" | Out-String | ConvertFrom-Json
 

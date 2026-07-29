@@ -37,6 +37,7 @@ The old standalone mode — running from this repo's root with `data/<environmen
 | `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator |
 | `src/powershell/` | Misc environment utilities |
+| `tests/` | Pester suite, run on every push by `.github/workflows/ci.yml`. Everything that talks to a collection is stubbed, so no PAT or network is needed: `Invoke-Pester -Path .\tests` |
 | `samples/` | Committed examples of every expected data file, placeholder values only — read-only reference, not a working data folder |
 | `output/` | Scratch output from ad-hoc local runs — not under source control. Real engagement output belongs in the client repo |
 

@@ -49,6 +49,7 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 | `src/processFieldMigrator/` | REST-API scripts: install custom fields/pages, delete fields, process discovery, project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator (inherited-process migration) |
 | `src/powershell/` | Misc environment utilities (downloads, TFS ISOs, policy tweaks) |
+| `tests/` | Pester suite — module hygiene, no-customer-data structural guards, and the REST link commands against a stubbed transport |
 | `samples/` | Committed examples of every expected data file, placeholder values only. Read-only reference — not a working data folder |
 | `output/` | Scratch output from ad-hoc local runs — untracked. Real engagement output belongs in the client repo |
 
@@ -75,6 +76,19 @@ The module's fix functions come in two layers:
 **Custom link types are destructive to remove.** `witadmin deletelinktype` deletes every link of the type along with the definition, and the relationships cannot be recovered. `Remove-WorkItemLinkType` therefore calls `Export-WorkItemLinkInventory` first and refuses to delete if that export fails (`-NoExport` overrides). The inventory is written as a `.json` record plus a readable `.csv` sibling into the export snapshot — it is both the customer conversation and the basis for re-creating the links as related links after the import.
 
 Keep new fix functions in the same style: Verb-Noun names, one function per file under `Public/`, idempotent where possible (report "no change" rather than throwing when the fix is already applied), and add each new public function to `FunctionsToExport` in the `.psd1`.
+
+## Tests
+
+Pester tests live in `tests/` and run on every push via `.github/workflows/ci.yml` (Windows, plus PSScriptAnalyzer gated on errors only — the module's warnings are deliberate house style). Run them locally with:
+
+```powershell
+Invoke-Pester -Path .\tests
+```
+
+- `Module.Tests.ps1` — manifest hygiene (every `Public/` file exported and vice versa), every `.ps1` parses, and structural guards that the toolkit holds no customer data: no `data/` folder, no `config.json`, `/data/` gitignored with no exception, and no script dot-sourcing includes relative to the current directory.
+- `WorkItemLink.Tests.ps1` — the REST link-inventory commands against a stubbed transport. The stub replaces the private `Invoke-AzureDevOpsApi` in the module's own scope (define it with `function script:` inside `& $module { }`, or it lands in a child scope and vanishes), so link type filtering, WIQL parsing, enrichment, comment matching and file output are all exercised without touching a collection.
+
+Anything that talks to a collection is stubbed — the suite needs no PAT, no server and no network. Keep it that way so CI can run it.
 
 ## Module transport split: witadmin vs REST
 

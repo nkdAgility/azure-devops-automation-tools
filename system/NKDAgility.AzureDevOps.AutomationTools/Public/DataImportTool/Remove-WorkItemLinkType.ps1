@@ -49,7 +49,11 @@ function Remove-WorkItemLinkType {
     $executable = Resolve-WitAdminPath -WitAdminPath $WitAdminPath
     $linkTypes = & $executable listlinktypes "/collection:$Collection"
     if ($LASTEXITCODE -ne 0) { throw "witadmin listlinktypes failed with exit code $LASTEXITCODE. $(($linkTypes -join ' ').Trim())" }
-    if (-not ($linkTypes | Where-Object { $_ -match [regex]::Escape($ReferenceName) })) {
+    # Anchored on word boundaries: a substring match would treat 'Custom.Affects'
+    # as present when only 'Custom.AffectsMore' exists, and go on to export and
+    # delete a link type that is not there.
+    $pattern = '(^|\s)' + [regex]::Escape($ReferenceName) + '(\s|$)'
+    if (-not ($linkTypes | Where-Object { $_ -match $pattern })) {
         Write-FixStep "  link type '$ReferenceName' not found - no change"
         return
     }
