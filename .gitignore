@@ -1,12 +1,15 @@
-﻿################################################################################
+################################################################################
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
 /.vs
 /output
-/data/*
-!/data/sample
-# Dont commit config!
+
+# This repo is the toolkit - customer data lives in the client workspace repo,
+# never here. /data and config.json belong to the retired local-data model; they
+# stay ignored so that anything dropped here by habit can never be committed.
+/data/
 /config.json
+
 # Local Claude memory - may reference client engagements
 /.claude/memory/

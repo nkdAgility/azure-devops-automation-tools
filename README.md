@@ -2,36 +2,32 @@
 
 A PowerShell automation wrapper around the common tasks used when migrating Azure DevOps data, whether that is with the [Azure DevOps Data Import Tool](https://learn.microsoft.com/en-us/azure/devops/migrate/migration-overview) from Microsoft, the [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools), or the Azure DevOps Migration Platform — depending on context.
 
-All these tools are built in PowerShell and have both a $data and a $output folder.
+All these tools are built in PowerShell and have both a $data and a $output folder. Those folders belong to the **client workspace repo** — this repo is the toolkit and never holds customer data. Placeholder examples of every expected data file are in `samples/`.
 
-A Sample data folder is provided in this repo.
+## How it works
 
-## Two modes
+Each engagement gets a **private client git repo** holding that customer's data, configs, runbooks and export snapshots under source control. The client repo loads this repo (cloned to `%USERPROFILE%\source\repos\azure-devops-automation-tools`) and imports the PowerShell module from it. Bootstrap a new (or empty) client repo by running this from its root:
 
-This repo works in two modes:
+```powershell
+irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex
+```
 
-1. **Customer workspace (recommended).** Each engagement gets a **private customer git repo** holding that customer's data, configs, runbooks and export snapshots under source control. The customer repo loads this repo (cloned to `%USERPROFILE%\source\repos\azure-devops-automation-tools`) and imports the PowerShell module from it. Bootstrap a new (or empty) customer repo by running this from its root:
+The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, then scaffolds the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, client `CLAUDE.md`) from `templates/customer-repo/` — copying each file **only if it does not already exist**, so re-running is always safe. In the client repo:
 
-   ```powershell
-   irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex
-   ```
+- `. .\init.ps1` starts every session: it pulls the latest tools (`-NoSync` to skip), imports the module and initialises the workspace.
+- `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from `templates/migrations/`.
+- `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
+- PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.
 
-   The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, then scaffolds the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, customer `CLAUDE.md`) from `templates/customer-repo/` — copying each file **only if it does not already exist**, so re-running is always safe. In the customer repo:
+Template co-maintenance note: the bootstrap never overwrites existing files, so changes to `templates/customer-repo/` reach already-bootstrapped client repos only when copied across manually.
 
-   - `. .\init.ps1` starts every session: it pulls the latest tools (`-NoSync` to skip), imports the module and initialises the workspace.
-   - `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from `templates/migrations/`.
-   - `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
-   - PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.
-
-   Template co-maintenance note: the bootstrap never overwrites existing files, so changes to `templates/customer-repo/` reach already-bootstrapped customer repos only when copied across manually.
-
-2. **Standalone (legacy).** Run from this repo's root with `data/<environment>/` folders selected by `config.json`, exactly as before — see [Run the Scripts with your own data](#run-the-scripts-with-your-own-data). Nothing about this mode has changed.
+The old standalone mode — running from this repo's root with `data/<environment>/` folders selected by `config.json` — is **retired**. This repo is the toolkit and never holds customer data: `/data/` and `/config.json` stay gitignored so anything dropped here by habit can never be committed, and `runmefirst.ps1` now just points at the bootstrap and lists the client workspaces on your machine.
 
 ## Repository layout
 
 | Path | Purpose |
 | ---- | ------- |
-| `bootstrap.ps1` | Remote-runnable bootstrap for customer workspaces (see [Two modes](#two-modes)) |
+| `bootstrap.ps1` | Remote-runnable bootstrap for client workspaces (see [How it works](#how-it-works)) |
 | `templates/customer-repo/` | Scaffold templates for a customer workspace (`init.ps1`, `workspace.json`, customer `CLAUDE.md`, ...) |
 | `templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`) |
 | `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, workspace/secrets/logging context, and scaffolding commands |
@@ -41,9 +37,8 @@ This repo works in two modes:
 | `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator |
 | `src/powershell/` | Misc environment utilities |
-| `data/<environment>/` | Per-client data and runbooks — **not under source control**; holds customer data and credentials |
-| `data/sample/` | Committed examples of every expected data file |
-| `output/` | Generated output and logs — not under source control |
+| `samples/` | Committed examples of every expected data file, placeholder values only — read-only reference, not a working data folder |
+| `output/` | Scratch output from ad-hoc local runs — not under source control. Real engagement output belongs in the client repo |
 
 ## Setting up the environment
 
@@ -54,25 +49,23 @@ This repo works in two modes:
 
 ## Run the Scripts with your own data
 
-The scripts use `config.json` in the root of this repo to determine where to find the data and where to put the output. It will be generated if it does not exist, and you can initiate it by running `runmefirst.ps1`. 
+Your data lives in a **client workspace repo**, never in this one. Bootstrap one as described above, then start every session from its root:
 
-### SAMPLE CONFIG.JSON
-
-```json
-{
-  "dataFolder": "..\\my-data-repo\\data\\",
-  "dataEnvironment": "debug",
-  "queryString": "api-version=7.0",
-  "outputFolder": "..\\my-data-repo\\output\\"
-}
-
+```powershell
+. .\init.ps1
 ```
 
-Although you can use the default values, this will store your data in untracked files in the same repo as the scripts. You would experience data loss if this folder were to be deleted. We recommend that you create a new git repo for your data and output folders and then use the scripts to generate the data and output content that you would then use as input into your migrations.
+`init.ps1` imports the module and calls `Initialize-AutomationWorkspace`, which reads `workspace.json` and resolves the workspace's `data`, `output` and `exports` folders. The legacy scripts below additionally dot-source `src/_includes/setup.ps1` from the toolkit, which resolves `$dataFolder` and `$outputFolder` from that workspace:
 
-Once you have your config.json set up, you can run the following scripts:
+```powershell
+. $env:USERPROFILE\source\repos\azure-devops-automation-tools\src\_includes\setup.ps1
+```
 
-- **Generate-ConfigurationsFromTemplates.ps1** - This will generate a configuration file for each template file in the data folder. Loaded from `migrationConfigSaples` folder and it will create a folder for each project on each organisation configured with the template populated for every project. This assumes that you are migrating many projects to a single organisation. If you are migrating a single project to many organisations, you will need to edit the output with the target locations. Note: this script probes peer `sample`/`debug` folders next to the active data folder, so it is **standalone-mode only** until parameterised.
+If no workspace has been initialised, `setup.ps1` throws rather than falling back to a folder inside the toolkit — that fallback is what the client-workspace model exists to prevent.
+
+With the workspace initialised, you can run the following scripts:
+
+- **Generate-ConfigurationsFromTemplates.ps1** - This will generate a configuration file for each template file in the data folder. Loaded from `migrationConfigSaples` folder and it will create a folder for each project on each organisation configured with the template populated for every project. This assumes that you are migrating many projects to a single organisation. If you are migrating a single project to many organisations, you will need to edit the output with the target locations. Note: it looks for `templates` in the workspace data folder first, falling back to this repo's committed `samples/templates`.
 - **Delete-CustomField.ps1** - Whoops, I need to delete a field from an organisation. This will delete a field from all projects in an organisation.
 - **Generate-ProcessOutput.ps1** - This will populate the process, list, field, and work item configuration data from all of the processes in each org. It will create a folder for each organisation and populate it with the data. This is for reference and can be used to build the input for the other scripts.
 - **Generate-ProjectStats.ps1** - How big is my migration? Creates a CSV file with the number of work items, pipelines, builds, and other data in each project in each organisation.
@@ -83,7 +76,7 @@ Once you have your config.json set up, you can run the following scripts:
 
 ## Data Folder
 
-The data folder contains the data that is used to for each Script. You can check the `.\data\sample\*` folder for examples of the data required.
+The client workspace's `data` folder contains the data used by each script. You can check the `.\samples\*` folder in this repo for examples of the data required.
 
 - `organisations.json` - This is a list of all of the organsaitions and PAT tokens used for access. They can be disabled, and the scripts will skip them. This is used by all of the scripts.
 - `ReflectedWorkItemId.json` - This contains the single field configuration for the ReflectedWorkItemId field. This is used by the `Install-ReflectedWorkItemID.ps1` script.

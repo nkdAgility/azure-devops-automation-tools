@@ -1,50 +1,32 @@
-enum dataEnvironments {
-    debug
-    sample
-    release
-}
-. .\src\_includes\logging.ps1
+# Legacy shim - this repo holds no customer data and no config.json.
+#
+# Every engagement now runs from its own client workspace repo, scaffolded by
+# bootstrap.ps1 (see the README). This file used to create .\data\<environment>\
+# inside the tools repo and generate config.json; it no longer does either.
+# Instead it resolves the session variables the older src\** scripts expect from
+# the initialised workspace, so those scripts read the CLIENT repo's data folder.
+#
+# Dot-source it after the client repo's init.ps1:
+#
+#     cd <client repo>
+#     . .\init.ps1
+#     . $env:USERPROFILE\source\repos\azure-devops-automation-tools\src\_includes\setup.ps1
 
-$setupConfigFile = ".\config.json"
-if ((Test-Path $setupConfigFile) -eq $false) {
-
-    $setupConfig = @{
-        dataEnvironment    = [dataEnvironments]::debug
-        queryString        = "api-version=7.0"
-        queryStringPreview = "api-version=7.1-preview.3"
-        outputFolder       = "C:\temp\output"
-        dataFolder         = ".\data\"
-    }
-    Out-File -FilePath ".\config.json" -InputObject ($setupConfig | ConvertTo-Json -Depth 100 -EnumsAsStrings) -Encoding ascii
+$modulePath = Join-Path $PSScriptRoot '..\..\system\NKDAgility.AzureDevOps.AutomationTools\NKDAgility.AzureDevOps.AutomationTools.psd1'
+if (-not (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools')) {
+    Import-Module $modulePath -ErrorAction Stop
 }
 
-$setupConfig = Get-Content -Path $setupConfigFile | ConvertFrom-Json
+. (Join-Path $PSScriptRoot 'logging.ps1')
 
-# VALRIABLES
-$queryString = $setupConfig.queryString
-$queryStringPreview = $setupConfig.queryStringPreview
-$dataEnvironment = $setupConfig.dataEnvironment
-$outputFolder = $setupConfig.outputFolder
-$dataFolder = "$($setupConfig.dataFolder)\$dataEnvironment\"
+# Throws with instructions when no workspace is initialised, so a legacy script
+# can never silently fall back to a data folder inside the tools repo.
+$workspace = Get-AutomationWorkspace
 
-# Create any folders that don't exist
-if (Test-Path $outputFolder) {
-    Write-DebugLog "Output folder {outputFolder} exists" -PropertyValues $outputFolder
-}
-else {
-    Write-DebugLog "Output folder {outputFolder} does not exist" -PropertyValues $outputFolder
-    $outputFolderCreated = New-item $outputFolder -ItemType Directory -force
-    Write-DebugLog "Created {outputFolder}" -PropertyValues $outputFolderCreated
-}
-Write-InfoLog "Output folder {outputFolder}" -PropertyValues $outputFolder
-# Data Folder
+$queryString = $workspace.QueryString
+$queryStringPreview = $workspace.QueryStringPreview
+$dataFolder = $workspace.DataFolder
+$outputFolder = $workspace.OutputFolder
 
-if (Test-Path $dataFolder) {
-    Write-DebugLog "Data folder {dataFolder} exists" -PropertyValues $dataFolder
-}
-else {
-    Write-DebugLog "Data folder {dataFolder} does not exist" -PropertyValues $dataFolder
-    $dataFolderCreated = New-item $dataFolder -ItemType Directory -force
-    Write-DebugLog "Created {dataFolder}" -PropertyValues $dataFolder
-}
 Write-InfoLog "Data folder {dataFolder}" -PropertyValues $dataFolder
+Write-InfoLog "Output folder {outputFolder}" -PropertyValues $outputFolder

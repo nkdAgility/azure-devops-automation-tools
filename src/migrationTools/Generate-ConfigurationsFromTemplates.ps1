@@ -16,14 +16,11 @@ foreach ($organisation in $config.organisations) {
     $sanitisedOrgname = $($organisation.url).Replace("https://dev.azure.com/", "").Replace("visualstudio.com/", "").Replace("/", "")
 
     # Determine template folder with fallbacks:
-    # 1. Environment specific (current data folder)
-    # 2. 'sample' environment
-    # 3. 'debug' environment
-    # 4. Root data folder 'templates' (if ever added later)
+    # 1. The client workspace's own templates, so a customer can override them
+    # 2. The toolkit's committed samples\templates
     $candidateTemplatePaths = @(
         (Join-Path $dataFolder 'templates'),
-        (Join-Path (Join-Path (Split-Path -Path $dataFolder -Parent) 'sample') 'templates'),
-        (Join-Path (Join-Path (Split-Path -Path $dataFolder -Parent) 'debug') 'templates')
+        (Join-Path $PSScriptRoot '..\..\samples\templates')
     ) | Select-Object -Unique
 
     $configLocation = $null

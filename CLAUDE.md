@@ -10,28 +10,28 @@ PowerShell automation wrappers around the tasks Naked Agility (nkdAgility) uses 
 - **Azure DevOps Migration Tools** (nkdAgility) — work-item-level migration between organisations/projects.
 - **Azure DevOps Migration Platform** — the newer nkdAgility tooling.
 
-The scripts in `src/` are generic and committed. Everything customer-specific — organisation URLs, PAT tokens, exported process XML, per-client runbooks — lives OUTSIDE this repo in **private customer workspace repos** (preferred, e.g. `NKDAClient-<Customer>` repos), or in the legacy gitignored `data/`/`output/` folders (only `data/sample/` is committed).
+The scripts in `src/` are generic and committed. Everything customer-specific — organisation URLs, PAT tokens, exported process XML, per-client runbooks — lives OUTSIDE this repo in **private client workspace repos** (`NKDAClient-<Customer>`). This repo is the toolkit; it is never a workspace.
 
-## Two modes
+## This repo never holds customer data
 
-1. **Customer workspace (preferred).** A private customer repo scaffolded by `bootstrap.ps1` (runnable remotely: `irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex`). The customer repo's `init.ps1` syncs this repo + `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module, and calls `Initialize-AutomationWorkspace`. Engagements are numbered `migrations/NN-<Name>/` folders scaffolded by `New-Migration -Type DataImport|MigrationTools|MigrationPlatform`; pristine server exports go in `exports/<source>/<yyyyMMdd>/{xml,json}/` via `New-ExportSnapshot`; PATs live only in the customer repo's gitignored `secrets/secrets.json` (consumed by `Set-AutomationSecrets` env-var export and `Get-Organisation` merge). Scaffold sources are `templates/customer-repo/` and `templates/migrations/` here — bootstrap copies only-if-missing, so template changes reach existing customer repos manually.
-2. **Standalone (legacy).** `runmefirst.ps1` + `config.json` + `data/<environment>/` from this repo's root, unchanged. `Generate-ConfigurationsFromTemplates.ps1` is standalone-only (it probes peer environment folders).
+There is one mode: a private client repo scaffolded by `bootstrap.ps1` (runnable remotely: `irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex`). The client repo's `init.ps1` syncs this repo + `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module, and calls `Initialize-AutomationWorkspace`. Engagements are numbered `migrations/NN-<Name>/` folders scaffolded by `New-Migration -Type DataImport|MigrationTools|MigrationPlatform`; pristine server exports go in `exports/<source>/<yyyyMMdd>/{xml,json}/` via `New-ExportSnapshot`; PATs live only in the client repo's gitignored `secrets/secrets.json` (consumed by `Set-AutomationSecrets` env-var export and `Get-Organisation` merge). Scaffold sources are `templates/customer-repo/` and `templates/migrations/` here — bootstrap copies only-if-missing, so template changes reach existing client repos manually.
+
+The old standalone mode — `runmefirst.ps1` + `config.json` + `data/<environment>/` inside this repo — is **retired**. `runmefirst.ps1` now just points at the bootstrap and lists the client workspaces on the machine, and `/data/` and `/config.json` stay gitignored so anything dropped here by habit can never be committed.
 
 ## Critical rules
 
-- `data/*` (except `data/sample`), `output/`, and `config.json` are gitignored because they contain **customer data and PAT credentials**. Never commit them, never copy their contents into committed files, and never print PATs into logs, console output, or chat.
-- When creating example/test data, put it in `data/sample/` with placeholder values only.
+- **Never create a `data/` folder or write customer data in this repo.** It belongs in the client workspace repo. `/data/` and `/config.json` are gitignored precisely so a mistake here cannot become a commit.
+- `output/` is gitignored, and client repos gitignore their own `output/` and `secrets/`. Never commit customer data or PATs, never copy their contents into committed files, and never print PATs into logs, console output, or chat.
+- When creating example/test data, put it in `samples/` with placeholder values only.
 - Many scripts here mutate live customer TFS/Azure DevOps instances (rename fields, delete link types, import process config). Treat anything that writes to a `-Collection` or organisation URL as destructive: do not run it unprompted.
 
 ## How the scripts run
 
-Everything runs from the **repo root** with PowerShell 7 (`pwsh`):
+Everything runs from the **client repo root** with PowerShell 7 (`pwsh`):
 
-1. `runmefirst.ps1` sets execution policy for the process, unblocks the include files, and dot-sources `src/_includes/setup.ps1`.
-2. `setup.ps1` creates/reads `config.json` in the repo root and sets session variables used by most scripts: `$queryString`, `$queryStringPreview`, `$dataEnvironment`, `$dataFolder` (resolves to `<dataFolder>\<dataEnvironment>\`), and `$outputFolder`.
-3. Scripts under `src/**` dot-source what they need from `src/_includes/` and read inputs from `$dataFolder` (e.g. `organisations.json`).
-
-`dataEnvironment` in `config.json` selects which `data/<environment>/` folder the session works against (`debug`, `sample`, `release`) — effectively "which client/context is active".
+1. The client repo's `init.ps1` imports the module and calls `Initialize-AutomationWorkspace`, which reads `workspace.json` and resolves the data, output and exports folders against the client repo.
+2. Legacy `src/**` scripts additionally dot-source `src/_includes/setup.ps1`, which no longer creates folders or writes `config.json`. It resolves `$queryString`, `$queryStringPreview`, `$dataFolder` and `$outputFolder` from the initialised workspace, and **throws** if there is no workspace — so a legacy script can never silently fall back to a data folder inside the toolkit.
+3. Those scripts read their inputs from `$dataFolder` (e.g. `organisations.json`), which now points at the client repo.
 
 Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.AutomationTools`** PowerShell module (Data Import Tool fix functions, Migrator.exe wrappers, session context), and the legacy dot-sourced `.ps1` files under `src/_includes/` (setup, logging, REST helpers). `src/_includes/DataImportFixes.ps1` is now just a shim that imports the module, so older runbooks keep working. New shared code goes in the module.
 
@@ -43,24 +43,23 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 | `templates/customer-repo/` | Customer workspace scaffold (`init.ps1`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `secrets/secrets.example.json`, ...) |
 | `templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
 | `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Public/WorkItemTracking` (REST-based work item and link queries), `Private` (transport invokers, witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
-| `src/_includes/` | Legacy shared code: `setup.ps1` (config + env), `logging.ps1` (PoShLog wrappers `Write-InfoLog` / `Write-DebugLog`), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
+| `src/_includes/` | Legacy shared code: `setup.ps1` (shim → workspace-resolved session variables), `logging.ps1` (`BeginLoggerTitle` + PoShLog availability), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
 | `src/DataImportTools/` | Assets supporting the Microsoft Data Import Tool (e.g. SQL helpers) |
 | `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, execute migrations, plus the reusable engines `Migrate-Repos.ps1` (git repos incl. LFS/segmented pushes) and `Migrate-Artifacts.ps1` (artifact feeds/packages) driven by customer-repo `Run-*` binders |
 | `src/processFieldMigrator/` | REST-API scripts: install custom fields/pages, delete fields, process discovery, project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator (inherited-process migration) |
 | `src/powershell/` | Misc environment utilities (downloads, TFS ISOs, policy tweaks) |
-| `data/<env>/` | Per-client data and runbooks — untracked. e.g. `data/debug/DataImportTools/run.ps1` and `fix.ps1` |
-| `data/sample/` | Committed examples of every expected data file |
-| `output/` | Generated output and logs — untracked |
+| `samples/` | Committed examples of every expected data file, placeholder values only. Read-only reference — not a working data folder |
+| `output/` | Scratch output from ad-hoc local runs — untracked. Real engagement output belongs in the client repo |
 
 ## Data Import Tool workflow (current pattern)
 
-Per-client runbooks live in `data/<env>/DataImportTools/`:
+Per-client runbooks live in the client repo at `migrations/NN-<Name>/`, scaffolded from `templates/migrations/data-import/`:
 
-- `run.ps1` — invokes `Migrator.exe Prepare` (and validate) against the client collection to produce the import specification and the validation log. New runbooks should call `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` from the module instead.
-- `fix.ps1` — a sectioned runbook that calls the module's fix functions to resolve the validation errors: rename conflicting fields, add missing work item types/categories, repair `ProjectProcessConfiguration` XML, remove unsupported field rules and custom link types. Section comments record the witadmin/migrator error codes (TF400526, TF402538, VS237302, …) each block addresses.
+- `DataImport-Scratchbook.ps1` — invokes `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` against the client collection to produce the import specification and the validation log.
+- `DataImport-Cleanup.ps1` — a sectioned runbook that calls the module's fix functions to resolve the validation errors: rename conflicting fields, add missing work item types/categories, repair `ProjectProcessConfiguration` XML, remove unsupported field rules and custom link types. Section comments record the witadmin/migrator error codes (TF400526, TF402538, VS237302, …) each block addresses.
 
-`fix.ps1`-style runbooks are executed **selection-by-selection in VS Code, not top-to-bottom**. Preserve their sectioned, independently-runnable structure; each section notes its ordering constraints in comments.
+Cleanup runbooks are executed **selection-by-selection in VS Code, not top-to-bottom**. Preserve their sectioned, independently-runnable structure; each section notes its ordering constraints in comments.
 
 The module's fix functions come in two layers:
 
