@@ -1,0 +1,31 @@
+{
+  "MigrationPlatform": {
+    "ConfigVersion": "1.0",
+    "Mode": "Inventory",
+    "Policies": {
+      "Retries": {
+        "Max": 8
+      },
+      "Throttle": {
+        "MaxConcurrency": 4
+      },
+      "Checkpoints": {
+        "Interval": 60
+      }
+    },
+    "Package": {
+      "WorkingDirectory": null
+    },
+    "Organisations": [
+      {
+        "Type": "AzureDevOpsServices",
+        "Url": "https://dev.azure.com/your-source-org",
+        "Projects": ["SourceProject"],
+        "Authentication": {
+          "Type": "AccessToken",
+          "AccessToken": "$ENV:AZDO_PAT_YOUR_SOURCE_ORG"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+# Generated output, logs and checkpoints - never commit
+/output/
+*.checkpoint.json
+
+# Secrets - never commit
+/secrets/*
+!/secrets/secrets.example.json
+
+# Machine-specific overrides
+workspace.local.json

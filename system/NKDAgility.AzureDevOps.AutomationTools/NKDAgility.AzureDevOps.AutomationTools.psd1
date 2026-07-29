@@ -1,6 +1,6 @@
 @{
     RootModule        = 'NKDAgility.AzureDevOps.AutomationTools.psm1'
-    ModuleVersion     = '0.1.0'
+    ModuleVersion     = '0.2.0'
     GUID              = '691d41a2-3ab0-4105-86cd-d66496c014f3'
     Author            = 'Martin Hinshelwood'
     CompanyName       = 'naked Agility Limited'
@@ -14,6 +14,21 @@
         'Clear-MigrationContext'
         'Invoke-FixStep'
         'Write-FixSection'
+        # Common - logging
+        'Initialize-AutomationLogging'
+        'Write-InfoLog'
+        'Write-DebugLog'
+        'Write-ErrorLog'
+        # Common - organisations and secrets
+        'Get-Organisation'
+        'Get-AzureDevOpsAuthHeader'
+        'Set-AutomationSecrets'
+        # Common - workspace
+        'Initialize-AutomationWorkspace'
+        'Get-AutomationWorkspace'
+        # Common - scaffolding
+        'New-Migration'
+        'New-ExportSnapshot'
         # DataImportTool - Migrator.exe
         'Invoke-DataImportPrepare'
         'Invoke-DataImportValidate'

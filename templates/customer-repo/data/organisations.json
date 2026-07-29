@@ -1,0 +1,9 @@
+{
+  "organisations": [
+    {
+      "enabled": true,
+      "url": "https://dev.azure.com/your-org",
+      "processMatch": []
+    }
+  ]
+}

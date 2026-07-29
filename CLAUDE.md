@@ -10,7 +10,12 @@ PowerShell automation wrappers around the tasks Naked Agility (nkdAgility) uses 
 - **Azure DevOps Migration Tools** (nkdAgility) — work-item-level migration between organisations/projects.
 - **Azure DevOps Migration Platform** — the newer nkdAgility tooling.
 
-The scripts in `src/` are generic and committed. Everything customer-specific — organisation URLs, PAT tokens, exported process XML, per-client runbooks — lives under `data/` and `output/`, which are **not under source control** (only `data/sample/` is committed).
+The scripts in `src/` are generic and committed. Everything customer-specific — organisation URLs, PAT tokens, exported process XML, per-client runbooks — lives OUTSIDE this repo in **private customer workspace repos** (preferred, e.g. `NKDAClient-<Customer>` repos), or in the legacy gitignored `data/`/`output/` folders (only `data/sample/` is committed).
+
+## Two modes
+
+1. **Customer workspace (preferred).** A private customer repo scaffolded by `bootstrap.ps1` (runnable remotely: `irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex`). The customer repo's `init.ps1` syncs this repo + `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module, and calls `Initialize-AutomationWorkspace`. Engagements are numbered `migrations/NN-<Name>/` folders scaffolded by `New-Migration -Type DataImport|MigrationTools|MigrationPlatform`; pristine server exports go in `exports/<source>/<yyyyMMdd>/{xml,json}/` via `New-ExportSnapshot`; PATs live only in the customer repo's gitignored `secrets/secrets.json` (consumed by `Set-AutomationSecrets` env-var export and `Get-Organisation` merge). Scaffold sources are `templates/customer-repo/` and `templates/migrations/` here — bootstrap copies only-if-missing, so template changes reach existing customer repos manually.
+2. **Standalone (legacy).** `runmefirst.ps1` + `config.json` + `data/<environment>/` from this repo's root, unchanged. `Generate-ConfigurationsFromTemplates.ps1` is standalone-only (it probes peer environment folders).
 
 ## Critical rules
 
@@ -34,10 +39,13 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 
 | Path | Purpose |
 | ---- | ------- |
-| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Private` (witadmin/Migrator path resolution). One function per file; `.psm1` dot-sources and exports `Public/**` only |
+| `bootstrap.ps1` | Remote-runnable customer-workspace bootstrap (irm\|iex safe — no `$PSScriptRoot`; templates come from the cloned repo) |
+| `templates/customer-repo/` | Customer workspace scaffold (`init.ps1`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `secrets/secrets.example.json`, ...) |
+| `templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Private` (witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
 | `src/_includes/` | Legacy shared code: `setup.ps1` (config + env), `logging.ps1` (PoShLog wrappers `Write-InfoLog` / `Write-DebugLog`), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
 | `src/DataImportTools/` | Assets supporting the Microsoft Data Import Tool (e.g. SQL helpers) |
-| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, mirror git repos, execute migrations |
+| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, execute migrations, plus the reusable engines `Migrate-Repos.ps1` (git repos incl. LFS/segmented pushes) and `Migrate-Artifacts.ps1` (artifact feeds/packages) driven by customer-repo `Run-*` binders |
 | `src/processFieldMigrator/` | REST-API scripts: install custom fields/pages, delete fields, process discovery, project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator (inherited-process migration) |
 | `src/powershell/` | Misc environment utilities (downloads, TFS ISOs, policy tweaks) |

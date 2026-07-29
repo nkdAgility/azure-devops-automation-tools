@@ -4,18 +4,40 @@ A PowerShell automation wrapper around the common tasks used when migrating Azur
 
 All these tools are built in PowerShell and have both a $data and a $output folder.
 
-The expectation is that you would create a new git repo just for the data and output folders and then use the scripts to generate the data and output content that you would then use as input into your migrations.
-
 A Sample data folder is provided in this repo.
+
+## Two modes
+
+This repo works in two modes:
+
+1. **Customer workspace (recommended).** Each engagement gets a **private customer git repo** holding that customer's data, configs, runbooks and export snapshots under source control. The customer repo loads this repo (cloned to `%USERPROFILE%\source\repos\azure-devops-automation-tools`) and imports the PowerShell module from it. Bootstrap a new (or empty) customer repo by running this from its root:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex
+   ```
+
+   The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, then scaffolds the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, customer `CLAUDE.md`) from `templates/customer-repo/` — copying each file **only if it does not already exist**, so re-running is always safe. In the customer repo:
+
+   - `. .\init.ps1` starts every session: it pulls the latest tools (`-NoSync` to skip), imports the module and initialises the workspace.
+   - `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from `templates/migrations/`.
+   - `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
+   - PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.
+
+   Template co-maintenance note: the bootstrap never overwrites existing files, so changes to `templates/customer-repo/` reach already-bootstrapped customer repos only when copied across manually.
+
+2. **Standalone (legacy).** Run from this repo's root with `data/<environment>/` folders selected by `config.json`, exactly as before — see [Run the Scripts with your own data](#run-the-scripts-with-your-own-data). Nothing about this mode has changed.
 
 ## Repository layout
 
 | Path | Purpose |
 | ---- | ------- |
-| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, and session context commands |
+| `bootstrap.ps1` | Remote-runnable bootstrap for customer workspaces (see [Two modes](#two-modes)) |
+| `templates/customer-repo/` | Scaffold templates for a customer workspace (`init.ps1`, `workspace.json`, customer `CLAUDE.md`, ...) |
+| `templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`) |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, workspace/secrets/logging context, and scaffolding commands |
 | `src/_includes/` | Legacy shared code dot-sourced by the scripts: `setup.ps1` (config + environment), `logging.ps1` (PoShLog wrappers), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (now a shim that imports the module) |
 | `src/DataImportTools/` | Assets supporting the Microsoft Azure DevOps Data Import Tool |
-| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, git repo mirroring, execution |
+| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, execution, and the reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` engines (repo + artifact-feed migration; `Migrate-GitRepos.ps1` is the older repo mirroring script) |
 | `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator |
 | `src/powershell/` | Misc environment utilities |
@@ -50,7 +72,7 @@ Although you can use the default values, this will store your data in untracked 
 
 Once you have your config.json set up, you can run the following scripts:
 
-- **Generate-ConfigurationsFromTemplates.ps1** - This will generate a configuration file for each template file in the data folder. Loaded from `migrationConfigSaples` folder and it will create a folder for each project on each organisation configured with the template populated for every project. This assumes that you are migrating many projects to a single organisation. If you are migrating a single project to many organisations, you will need to edit the output with the target locations.
+- **Generate-ConfigurationsFromTemplates.ps1** - This will generate a configuration file for each template file in the data folder. Loaded from `migrationConfigSaples` folder and it will create a folder for each project on each organisation configured with the template populated for every project. This assumes that you are migrating many projects to a single organisation. If you are migrating a single project to many organisations, you will need to edit the output with the target locations. Note: this script probes peer `sample`/`debug` folders next to the active data folder, so it is **standalone-mode only** until parameterised.
 - **Delete-CustomField.ps1** - Whoops, I need to delete a field from an organisation. This will delete a field from all projects in an organisation.
 - **Generate-ProcessOutput.ps1** - This will populate the process, list, field, and work item configuration data from all of the processes in each org. It will create a folder for each organisation and populate it with the data. This is for reference and can be used to build the input for the other scripts.
 - **Generate-ProjectStats.ps1** - How big is my migration? Creates a CSV file with the number of work items, pipelines, builds, and other data in each project in each organisation.
