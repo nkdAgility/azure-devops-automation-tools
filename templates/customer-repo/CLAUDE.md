@@ -15,7 +15,7 @@ OOB process shapes) is a sibling clone at `%USERPROFILE%\source\repos\process-cu
 
 | Path | Purpose |
 | ---- | ------- |
-| `init.ps1` | Per-session loader: syncs the tools repos, imports the module, initialises the workspace. Runbooks dot-source it. `-NoSync` for offline work |
+| `init.ps1` | Per-session loader: syncs the tools repos, refreshes the framework-owned files, creates any missing `*.example.*` sibling (e.g. `secrets/secrets.json`) with placeholders, imports the module, initialises the workspace. Runbooks dot-source it. `-NoSync` for offline work |
 | `workspace.json` | Committed machine-independent config (data/output/exports folders, API versions) |
 | `workspace.local.json` | Gitignored machine overrides (e.g. `toolsPath`) |
 | `secrets/secrets.json` | Gitignored PATs; `secrets.example.json` shows the shape |
@@ -34,6 +34,11 @@ OOB process shapes) is a sibling clone at `%USERPROFILE%\source\repos\process-cu
 
 ## Critical rules
 
+- **Framework-owned files:** `init.ps1` and `secrets/secrets.example.json` are copies of
+  `templates/customer-repo/` in the tools repo, and `init.ps1` overwrites them from there on every
+  run. Never edit them here — the change is lost next session. Edit the template in the tools repo
+  instead (a new secret key goes in the template's example, then into `secrets/secrets.json` by hand).
+  Everything else in this repo is customer-owned and is copied once, at scaffold time.
 - **Secrets:** `secrets/secrets.json` is gitignored and must stay so. NEVER print, log, echo or
   commit PATs; never add a `pat` value to `data/organisations.json`. When debugging auth, report
   header/variable *presence*, not values.

@@ -17,9 +17,15 @@
       2. 'toolsPath' in workspace.local.json (gitignored)
       3. %USERPROFILE%\source\repos\azure-devops-automation-tools
 
+    Framework-owned files ($managedFiles below - init.ps1 and the secrets
+    example) are refreshed from templates\customer-repo on every run, so they
+    must be edited in the tools repo rather than in the customer workspace.
+    When init.ps1 itself is refreshed it hands over to the new copy.
+
 .PARAMETER NoSync
     Skip the git clone/pull step (offline work, or when iterating on local
-    tools changes).
+    tools changes). Framework-owned files are still refreshed from whatever
+    the local tools clone currently holds.
 #>
 [CmdletBinding()]
 param(
@@ -62,6 +68,68 @@ if (-not $NoSync) {
             if ($LASTEXITCODE -ne 0) { Write-Warning "$name pull failed (offline?); continuing with the existing clone." }
         }
     }
+}
+
+# --- Refresh framework-owned files from the tools repo ---------------------
+# These files belong to templates\customer-repo in the tools repo, not to the
+# customer: edit them THERE, never here, or the next session overwrites them.
+# Copying them down every session is what keeps every workspace in step.
+$managedFiles = @('init.ps1', 'secrets\secrets.example.json')
+$templateRoot = Join-Path $toolsPath 'templates\customer-repo'
+$selfUpdated = $false
+$sameContent = { param($a, $b)
+    ((Get-Content -LiteralPath $a -Raw) -replace "`r`n", "`n") -eq
+    ((Get-Content -LiteralPath $b -Raw) -replace "`r`n", "`n")
+}
+if (-not (Test-Path -LiteralPath $templateRoot)) {
+    Write-Warning "No customer-repo template at $templateRoot; skipping the refresh."
+}
+else {
+    foreach ($relative in $managedFiles) {
+        $source = Join-Path $templateRoot $relative
+        $target = Join-Path $workspaceRoot $relative
+        if (-not (Test-Path -LiteralPath $source)) {
+            Write-Warning "Template has no $relative; leaving the local copy alone."
+            continue
+        }
+        if ((Test-Path -LiteralPath $target) -and (& $sameContent $source $target)) { continue }
+        New-Item -Path (Split-Path -Parent $target) -ItemType Directory -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+        Write-Host "==> Updated $relative from the tools repo template" -ForegroundColor Cyan
+        if ($relative -eq 'init.ps1') { $selfUpdated = $true }
+    }
+}
+# This running copy is now the stale one, so hand over to the new file. The
+# env guard stops a bad template turning the handover into a loop.
+if ($selfUpdated -and -not $env:AZDO_INIT_RELOADED) {
+    $env:AZDO_INIT_RELOADED = '1'
+    try { . $PSCommandPath -NoSync }
+    finally { Remove-Item Env:\AZDO_INIT_RELOADED -ErrorAction SilentlyContinue }
+    return
+}
+
+# --- Scaffold missing local files from their examples ----------------------
+# Every committed '<name>.example.<ext>' has a gitignored '<name>.<ext>' sibling
+# that each machine owns (secrets/secrets.json, and any per-migration equivalent).
+# Create the missing ones from the example so a fresh clone has the right shape,
+# with the placeholders left in - never a real value.
+$examples = Get-ChildItem -LiteralPath $workspaceRoot -Recurse -File -Filter '*.example.*' -Force |
+    Where-Object { $_.FullName -notmatch '\\(\.git|output)\\' }
+$needsValues = [System.Collections.Generic.List[string]]::new()
+foreach ($example in $examples) {
+    $target = Join-Path $example.DirectoryName ($example.Name -replace '\.example(\.[^.]+)$', '$1')
+    $relative = if ($target.StartsWith($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $target.Substring($workspaceRoot.Length).TrimStart('\', '/')
+    } else { $target }
+    if (-not (Test-Path -LiteralPath $target)) {
+        Copy-Item -LiteralPath $example.FullName -Destination $target
+        Write-Host "==> Created $relative from $($example.Name)" -ForegroundColor Yellow
+    }
+    # Unedited '<placeholder>' markers mean the file has no real values yet.
+    if ((Get-Content -LiteralPath $target -Raw) -match '"<[^">\r\n]+>"') { $needsValues.Add($relative) }
+}
+if ($needsValues.Count) {
+    Write-Warning "Placeholders still to fill in: $($needsValues -join ', ')"
 }
 
 # --- Import the module and initialise the workspace ------------------------
