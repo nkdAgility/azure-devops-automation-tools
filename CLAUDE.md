@@ -14,7 +14,7 @@ The scripts in `src/` are generic and committed. Everything customer-specific �
 
 ## This repo never holds customer data
 
-There is one mode: a private client repo scaffolded by `bootstrap.ps1` (runnable remotely: `irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex`). The client repo's `init.ps1` syncs this repo + `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module, and calls `Initialize-AutomationWorkspace`. Engagements are numbered `migrations/NN-<Name>/` folders scaffolded by `New-Migration -Type DataImport|MigrationTools|MigrationPlatform`; pristine server exports go in `exports/<source>/<yyyyMMdd>/{xml,json}/` via `New-ExportSnapshot`; PATs live only in the client repo's gitignored `secrets/secrets.json` (consumed by `Set-AutomationSecrets` env-var export and `Get-Organisation` merge). Scaffold sources are `templates/customer-repo/` and `templates/migrations/` here — bootstrap copies only-if-missing, so template changes reach existing client repos manually.
+There is one mode: a private client repo scaffolded by `bootstrap.ps1` (runnable remotely: `irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex`). The client repo's `init.ps1` syncs this repo + `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module, and calls `Initialize-AutomationWorkspace`. Engagements are numbered `migrations/NN-<Name>/` folders scaffolded by `New-Migration -Type DataImport|MigrationTools|MigrationPlatform`; pristine server exports go in `exports/<source>/<yyyyMMdd>/{xml,json}/` via `New-ExportSnapshot`; PATs live only in the client repo's gitignored `secrets/secrets.json` (consumed by `Set-AutomationSecrets` env-var export and `Get-Organisation` merge). Scaffold sources live INSIDE the module, under `system/NKDAgility.AzureDevOps.AutomationTools/Templates/` — `customer-repo/` (scaffolded by `New-AutomationWorkspace`, which `bootstrap.ps1` calls) and `migrations/` (scaffolded by `New-Migration`). Both copy only-if-missing, so seeded files never reach existing client repos again; the framework-owned subset is refreshed every session by the client's `init.ps1` instead.
 
 The old standalone mode — `runmefirst.ps1` + `config.json` + `data/<environment>/` inside this repo — is **retired**. `runmefirst.ps1` now just points at the bootstrap and lists the client workspaces on the machine, and `/data/` and `/config.json` stay gitignored so anything dropped here by habit can never be committed.
 
@@ -39,10 +39,10 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 
 | Path | Purpose |
 | ---- | ------- |
-| `bootstrap.ps1` | Remote-runnable customer-workspace bootstrap (irm\|iex safe — no `$PSScriptRoot`; templates come from the cloned repo) |
-| `templates/customer-repo/` | Customer workspace scaffold (`init.ps1`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `secrets/secrets.example.json`, ...) |
-| `templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
-| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Public/WorkItemTracking` (REST-based work item and link queries), `Private` (transport invokers, witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
+| `bootstrap.ps1` | Remote-runnable customer-workspace bootstrap (irm\|iex safe — no `$PSScriptRoot`). Clones the repo, imports the module from it, then calls `New-AutomationWorkspace`; it knows nothing about templates |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-AutomationWorkspace`/`New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Public/WorkItemTracking` (REST-based work item and link queries), `Private` (transport invokers, witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
+| `system/…/Templates/customer-repo/` | Customer workspace scaffold (`init.ps1`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `CLAUDE.managed.md`, `secrets/secrets.example.json`, ...) |
+| `system/…/Templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
 | `src/_includes/` | Legacy shared code: `setup.ps1` (shim → workspace-resolved session variables), `logging.ps1` (`BeginLoggerTitle` + PoShLog availability), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
 | `src/DataImportTools/` | Assets supporting the Microsoft Data Import Tool (e.g. SQL helpers) |
 | `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, execute migrations, plus the reusable engines `Migrate-Repos.ps1` (git repos incl. LFS/segmented pushes) and `Migrate-Artifacts.ps1` (artifact feeds/packages) driven by customer-repo `Run-*` binders |
@@ -55,7 +55,7 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 
 ## Data Import Tool workflow (current pattern)
 
-Per-client runbooks live in the client repo at `migrations/NN-<Name>/`, scaffolded from `templates/migrations/data-import/`:
+Per-client runbooks live in the client repo at `migrations/NN-<Name>/`, scaffolded from the module's `Templates/migrations/data-import/`:
 
 - `DataImport-Scratchbook.ps1` — invokes `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` against the client collection to produce the import specification and the validation log.
 - `DataImport-Cleanup.ps1` — a sectioned runbook that calls the module's fix functions to resolve the validation errors: rename conflicting fields, add missing work item types/categories, repair `ProjectProcessConfiguration` XML, remove unsupported field rules and custom link types. Section comments record the witadmin/migrator error codes (TF400526, TF402538, VS237302, …) each block addresses.
@@ -76,6 +76,39 @@ The module's fix functions come in two layers:
 **Custom link types are destructive to remove.** `witadmin deletelinktype` deletes every link of the type along with the definition, and the relationships cannot be recovered. `Remove-WorkItemLinkType` therefore calls `Export-WorkItemLinkInventory` first and refuses to delete if that export fails (`-NoExport` overrides). The inventory is written as a `.json` record plus a readable `.csv` sibling into the export snapshot — it is both the customer conversation and the basis for re-creating the links as related links after the import.
 
 Keep new fix functions in the same style: Verb-Noun names, one function per file under `Public/`, idempotent where possible (report "no change" rather than throwing when the fix is already applied), and add each new public function to `FunctionsToExport` in the `.psd1`.
+
+## The module is self-contained
+
+The module is **copied**, not referenced: a client workspace gets its own copy under
+`.system/`, so anything above the module root does not exist at runtime. Two rules follow, and
+`tests/Module.Tests.ps1` enforces both:
+
+- **Never walk up out of the module.** Resolve files the module ships from `$script:ModuleRoot`
+  (set in the `.psm1`). No `Split-Path -Parent (Split-Path …)`, no `..` joined to `$PSScriptRoot`
+  or `ModuleBase`. Reaching *outward* is fine when it goes through a parameter or session context
+  — `Resolve-MigratorPath` (parameter → `PATH` → throw) is the pattern to copy.
+- **Bootstrap may reach; runtime must not.** `bootstrap.ps1` runs once, with a human and a
+  network, so cloning is its job. `New-Migration` may run offline a year later against a pinned
+  old engine, so it must carry everything it needs.
+
+The contract test copies the module to a temp folder unrelated to this repo and runs
+`New-AutomationWorkspace` + `New-Migration` from it. If that test passes, the copy is complete.
+
+## Seed files versus managed files
+
+| Kind | Lifecycle | Examples |
+| ---- | --------- | -------- |
+| **Seed** | copied once at scaffold time, then owned by the customer | engagement runbooks, `workspace.json`, `data/organisations.json`, the customer's own `CLAUDE.md` prose |
+| **Managed** | overwritten from the module on every client `init.ps1` | `init.ps1`, `secrets/secrets.example.json`, the `<!-- BEGIN managed: automation-tools -->` block in the customer `CLAUDE.md` |
+
+Managed files carry a header saying so. Seeds carry nothing — but `New-Migration` stamps
+`.template.json` (type, module version, timestamp) into each engagement folder, because seeds
+never get updates and you need to know what produced one years later.
+
+`CLAUDE.md` in a client repo is **co-owned**: the customer's prose is a seed, and only the marked
+block is refreshed. Never make it a whole managed file — that deletes the customer's notes. The
+hard safety rules are deliberately duplicated into the seed portion so they are present in a
+fresh clone before `init.ps1` has ever run.
 
 ## Tests
 

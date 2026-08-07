@@ -52,6 +52,59 @@ Describe 'Script files parse' {
     }
 }
 
+Describe 'Module is self-contained' {
+
+    # The module is COPIED out of this repo into a client workspace's .system\ folder.
+    # Anything it reaches for above its own root does not exist at runtime, so these
+    # guard the copy contract rather than the docs.
+
+    It 'has no upward path arithmetic' {
+        $offenders = @(Get-ChildItem $script:ModuleRoot -Filter *.ps1 -Recurse -File |
+                Where-Object { $_.FullName -notmatch '\\Templates\\' } |
+                Select-String -Pattern 'Split-Path\s+-Parent\s+\(Split-Path', 'Join-Path\s+\$[\w:]*(ModuleRoot|ModuleBase|PSScriptRoot)\s+\S*\.\.' |
+                ForEach-Object { "$($_.Filename):$($_.LineNumber)" })
+        $offenders -join ', ' | Should -BeNullOrEmpty -Because 'the module must resolve its own files from $script:ModuleRoot, never by walking up out of it'
+    }
+
+    It 'ships the templates it scaffolds from' {
+        foreach ($folder in 'customer-repo', 'migrations\data-import', 'migrations\migration-tools', 'migrations\migration-platform') {
+            Join-Path $script:ModuleRoot (Join-Path 'Templates' $folder) |
+                Should -Exist -Because 'New-AutomationWorkspace and New-Migration resolve templates from inside the module'
+        }
+    }
+
+    It 'scaffolds correctly when copied out of the repo' {
+        # The contract test: copy just the module somewhere with no relationship to this
+        # repo, and prove both scaffold commands still work.
+        $sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("adoat-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $moduleCopy = Join-Path $sandbox 'NKDAgility.AzureDevOps.AutomationTools'
+        $workspace = Join-Path $sandbox 'workspace'
+        $sandboxModule = $null
+        try {
+            New-Item -Path $sandbox -ItemType Directory -Force | Out-Null
+            Copy-Item -LiteralPath $script:ModuleRoot -Destination $moduleCopy -Recurse
+
+            $sandboxModule = Import-Module (Join-Path $moduleCopy 'NKDAgility.AzureDevOps.AutomationTools.psd1') -Force -PassThru
+            New-AutomationWorkspace -Path $workspace | Out-Null
+            Join-Path $workspace 'workspace.json' | Should -Exist
+            Join-Path $workspace '.gitignore' | Should -Exist
+
+            Initialize-AutomationWorkspace -Path $workspace -NoLogging | Out-Null
+            New-Migration -Name 'Contract' -Type DataImport -Path $workspace | Out-Null
+            Join-Path $workspace 'migrations\01-Contract\DataImport-Cleanup.ps1' | Should -Exist
+            Join-Path $workspace 'migrations\01-Contract\.template.json' | Should -Exist
+        }
+        finally {
+            # Unload the sandbox copy explicitly: it shares this module's name, so leaving
+            # it loaded makes Get-Module return two and breaks every later test that
+            # resolves the module by name.
+            if ($sandboxModule) { Remove-Module -ModuleInfo $sandboxModule -Force -ErrorAction SilentlyContinue }
+            Import-Module $script:ManifestPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'Toolkit holds no customer data' {
 
     # The client-workspace model only holds if the toolkit cannot accumulate

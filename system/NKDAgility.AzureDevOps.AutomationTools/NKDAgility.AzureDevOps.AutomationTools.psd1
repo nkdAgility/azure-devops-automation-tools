@@ -27,6 +27,7 @@
         'Initialize-AutomationWorkspace'
         'Get-AutomationWorkspace'
         # Common - scaffolding
+        'New-AutomationWorkspace'
         'New-Migration'
         'New-ExportSnapshot'
         # DataImportTool - Migrator.exe

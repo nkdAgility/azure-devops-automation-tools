@@ -13,9 +13,10 @@
       2. Clones (or fast-forward pulls) the azure-devops-automation-tools repo
          and Microsoft's process-customization-scripts repo into the repos root
          (%USERPROFILE%\source\repos by default).
-      3. Scaffolds the customer workspace in the current directory from the
-         tools repo's templates\customer-repo - copying each file ONLY if it
-         does not already exist, so re-running never overwrites your work.
+      3. Imports the module from that clone and calls New-AutomationWorkspace,
+         which scaffolds the current directory from the templates shipped INSIDE
+         the module - copying each file ONLY if it does not already exist, so
+         re-running never overwrites your work.
       4. Prints the next steps.
 
     Safe to re-run at any time: it updates the tools clones and reports every
@@ -90,40 +91,19 @@ function Invoke-AutomationToolsBootstrap {
     }
 
     # --- 3. Scaffold the customer workspace ---------------------------------
-    $templateRoot = Join-Path $toolsPath 'templates\customer-repo'
-    if (-not (Test-Path -LiteralPath $templateRoot)) {
-        throw "Templates not found at $templateRoot - the tools clone looks incomplete."
+    # The module owns every template, so bootstrap knows nothing about them: import it
+    # from the clone and let New-AutomationWorkspace do the scaffolding. That keeps one
+    # scaffold path whether it runs from here or from a workspace's .system\ copy.
+    $modulePath = Join-Path $toolsPath 'system\NKDAgility.AzureDevOps.AutomationTools'
+    if (-not (Test-Path -LiteralPath $modulePath)) {
+        throw "Module not found at $modulePath - the tools clone looks incomplete."
     }
 
+    Write-Step 'Importing the automation tools module'
+    Import-Module $modulePath -Force
+
+    New-AutomationWorkspace -Path $Path -InitialiseGit | Out-Null
     $Path = (Resolve-Path -LiteralPath $Path).Path
-    Write-Step "Scaffolding customer workspace in $Path"
-
-    # gitignore.template is renamed to .gitignore on copy (a real dot-file in
-    # the templates folder would hide the template files from the tools repo).
-    $renameMap = @{ 'gitignore.template' = '.gitignore' }
-
-    foreach ($template in (Get-ChildItem -Path $templateRoot -Recurse -File)) {
-        $relative = $template.FullName.Substring((Get-Item -LiteralPath $templateRoot).FullName.Length + 1)
-        if ($renameMap.ContainsKey($relative)) { $relative = $renameMap[$relative] }
-        $destination = Join-Path $Path $relative
-
-        if (Test-Path -LiteralPath $destination) {
-            Write-Host "    Skipped  $relative (already exists)" -ForegroundColor DarkGray
-            continue
-        }
-        New-Item -Path (Split-Path -Parent $destination) -ItemType Directory -Force | Out-Null
-        Copy-Item -LiteralPath $template.FullName -Destination $destination
-        Write-Host "    Created  $relative" -ForegroundColor Green
-    }
-
-    foreach ($folder in 'data', 'exports', 'migrations', 'output', 'secrets') {
-        New-Item -Path (Join-Path $Path $folder) -ItemType Directory -Force | Out-Null
-    }
-
-    if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {
-        Write-Step 'Initialising git repository'
-        git -C $Path init | Out-Null
-    }
 
     # --- 4. Record a non-default tools location ------------------------------
     $defaultReposRoot = Join-Path $env:USERPROFILE 'source\repos'

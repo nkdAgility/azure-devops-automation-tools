@@ -1,3 +1,9 @@
+# ============================================================================
+#  MANAGED FILE - DO NOT EDIT IN THE CUSTOMER WORKSPACE
+#  Source: Templates\customer-repo\init.ps1 inside the
+#          NKDAgility.AzureDevOps.AutomationTools module.
+#  This file is overwritten from that template on every run. Edit it there.
+# ============================================================================
 <#
 .SYNOPSIS
     Initialises this customer workspace: syncs the nkdAgility automation tools,
@@ -70,12 +76,13 @@ if (-not $NoSync) {
     }
 }
 
-# --- Refresh framework-owned files from the tools repo ---------------------
-# These files belong to templates\customer-repo in the tools repo, not to the
+# --- Refresh framework-owned files from the module -------------------------
+# These files belong to Templates\customer-repo INSIDE the module, not to the
 # customer: edit them THERE, never here, or the next session overwrites them.
 # Copying them down every session is what keeps every workspace in step.
+$modulePath = Join-Path $toolsPath 'system\NKDAgility.AzureDevOps.AutomationTools'
 $managedFiles = @('init.ps1', 'secrets\secrets.example.json')
-$templateRoot = Join-Path $toolsPath 'templates\customer-repo'
+$templateRoot = Join-Path $modulePath 'Templates\customer-repo'
 $selfUpdated = $false
 $sameContent = { param($a, $b)
     ((Get-Content -LiteralPath $a -Raw) -replace "`r`n", "`n") -eq
@@ -99,6 +106,34 @@ else {
         if ($relative -eq 'init.ps1') { $selfUpdated = $true }
     }
 }
+# --- Refresh the managed block inside CLAUDE.md ----------------------------
+# CLAUDE.md is CO-owned: the prose above the markers is the customer's and is never
+# touched, while the block between them is framework guidance refreshed from the module
+# every session. That is why it is a block and not a managed file - a whole-file refresh
+# would delete the customer's own notes.
+$blockSource = Join-Path $templateRoot 'CLAUDE.managed.md'
+$claudeFile = Join-Path $workspaceRoot 'CLAUDE.md'
+$blockStart = '<!-- BEGIN managed: automation-tools -->'
+$blockEnd = '<!-- END managed: automation-tools -->'
+if ((Test-Path -LiteralPath $blockSource) -and (Test-Path -LiteralPath $claudeFile)) {
+    $blockBody = (Get-Content -LiteralPath $blockSource -Raw).TrimEnd()
+    $block = "$blockStart`n$blockBody`n$blockEnd"
+    $current = Get-Content -LiteralPath $claudeFile -Raw
+    $pattern = [regex]::Escape($blockStart) + '.*?' + [regex]::Escape($blockEnd)
+    $updated = if ($current -match $pattern) {
+        [regex]::Replace($current, $pattern, { $block }, 'Singleline')
+    }
+    else {
+        # No markers yet (a workspace scaffolded before this mechanism existed): append
+        # the block rather than rewriting the file, so nothing the customer wrote is lost.
+        $current.TrimEnd() + "`n`n" + $block + "`n"
+    }
+    if (($updated -replace "`r`n", "`n") -ne ($current -replace "`r`n", "`n")) {
+        Set-Content -LiteralPath $claudeFile -Value $updated -NoNewline
+        Write-Host '==> Refreshed the managed block in CLAUDE.md' -ForegroundColor Cyan
+    }
+}
+
 # This running copy is now the stale one, so hand over to the new file. The
 # env guard stops a bad template turning the handover into a loop.
 if ($selfUpdated -and -not $env:AZDO_INIT_RELOADED) {
@@ -133,7 +168,7 @@ if ($needsValues.Count) {
 }
 
 # --- Import the module and initialise the workspace ------------------------
-$modulePath = Join-Path $toolsPath 'system\NKDAgility.AzureDevOps.AutomationTools'
+# $modulePath was resolved above, alongside the template root it ships.
 if (-not (Test-Path -LiteralPath $modulePath)) {
     throw "Automation tools not found at '$toolsPath'. Bootstrap this machine with: irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex"
 }
