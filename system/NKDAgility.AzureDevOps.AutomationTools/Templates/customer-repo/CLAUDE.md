@@ -30,6 +30,13 @@ in a fresh clone. Never rely on the managed block below for a safety rule.
   debugging auth, report header/variable *presence*, never values.
 - **Exports are pristine.** Never modify anything under `exports/` — edit copies in the
   owning migration's `fix-work/`.
+- **`.system/` is generated — never edit it.** It holds engine code copied in by
+  `init.ps1` and is overwritten on every run, so an edit there is destroyed without
+  trace. Make the change in the tools clone
+  (`%USERPROFILE%\source\repos\azure-devops-automation-tools`, or the `toolsPath` in
+  `workspace.local.json`) and re-run `. .\init.ps1`. The files are read-only, a hook
+  refuses writes into the folder, and `init.ps1` stops rather than discarding a
+  hand-edit — but do not rely on being caught.
 
 <!-- BEGIN managed: automation-tools -->
 <!-- END managed: automation-tools -->

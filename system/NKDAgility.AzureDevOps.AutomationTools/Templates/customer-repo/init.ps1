@@ -14,8 +14,8 @@
 
 .DESCRIPTION
     Keeps the two supporting repos current (clone if missing, fast-forward pull
-    if clean, warn-and-continue if dirty or offline), then imports the
-    NKDAgility.AzureDevOps.AutomationTools module and calls
+    if clean, warn-and-continue if dirty or offline), COPIES the module out of
+    the tools clone into .system\, then imports that copy and calls
     Initialize-AutomationWorkspace against this folder.
 
     The tools location is resolved in order:
@@ -23,10 +23,18 @@
       2. 'toolsPath' in workspace.local.json (gitignored)
       3. %USERPROFILE%\source\repos\azure-devops-automation-tools
 
+    .system\ is GENERATED and read-only. Never edit it: the next run overwrites
+    it, and init.ps1 stops with an error if it notices a hand-edit rather than
+    discarding the work silently. Change the module in the tools clone instead
+    and re-run - the copy takes uncommitted edits, so that is the normal way to
+    test a module change against a real workspace. .system\<module>\.source.json
+    records the clone path, commit, dirty flag and content hash of what was
+    copied.
+
     Framework-owned files ($managedFiles below - init.ps1 and the secrets
-    example) are refreshed from templates\customer-repo on every run, so they
-    must be edited in the tools repo rather than in the customer workspace.
-    When init.ps1 itself is refreshed it hands over to the new copy.
+    example) are refreshed from the module's Templates\customer-repo on every
+    run, so they must be edited in the tools repo rather than in the customer
+    workspace. When init.ps1 itself is refreshed it hands over to the new copy.
 
 .PARAMETER NoSync
     Skip the git clone/pull step (offline work, or when iterating on local
@@ -76,12 +84,81 @@ if (-not $NoSync) {
     }
 }
 
+# --- Materialise the module into .system\ ----------------------------------
+# The workspace does not run the module out of the tools clone: it takes a COPY into
+# .system\ and runs that. The copy is what makes a workspace self-describing (one
+# uniform place for every capability's code and agent guidance) and it is where the
+# provenance record is written.
+#
+# The copy is taken from whatever the sync above left in the tools clone - including
+# uncommitted edits. That is deliberate: editing the module and re-running init.ps1
+# here is the normal way to test a change against a real workspace. .source.json
+# records exactly what was copied, dirty working tree and all, so the record is
+# always the truth rather than an intention.
+$moduleName = 'NKDAgility.AzureDevOps.AutomationTools'
+$moduleSource = Join-Path $toolsPath (Join-Path 'system' $moduleName)
+$systemRoot = Join-Path $workspaceRoot '.system'
+$modulePath = Join-Path $systemRoot $moduleName
+
+if (-not (Test-Path -LiteralPath $moduleSource)) {
+    throw "Automation tools not found at '$toolsPath'. Bootstrap this machine with: irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex"
+}
+
+# Hash of a folder's contents: relative path + file hash for every file, sorted so the
+# result is stable. Used to notice a hand-edited .system\ before it gets overwritten.
+$treeHash = {
+    param([string]$Root)
+    if (-not (Test-Path -LiteralPath $Root)) { return $null }
+    $rootLength = (Get-Item -LiteralPath $Root).FullName.Length + 1
+    $lines = Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
+        Where-Object { $_.Name -ne '.source.json' } |
+        ForEach-Object { "$($_.FullName.Substring($rootLength))|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)" } |
+        Sort-Object
+    $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
+    (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash
+}
+
+# .system\ is generated and read-only. If it has been edited by hand, that edit is
+# about to be destroyed - stop and say so rather than silently discarding the work.
+$recordPath = Join-Path $modulePath '.source.json'
+if ((Test-Path -LiteralPath $modulePath) -and (Test-Path -LiteralPath $recordPath)) {
+    $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+    if ($record.treeHash -and (& $treeHash $modulePath) -ne $record.treeHash) {
+        throw ".system\$moduleName has been modified since it was copied. It is generated and must not be edited - move your change into '$moduleSource' and re-run. To discard the local edit, delete '$modulePath' and re-run."
+    }
+}
+
+$sourceSha = (git -C $toolsPath rev-parse HEAD 2>$null)
+$sourceDirty = [bool](git -C $toolsPath status --porcelain 2>$null)
+if (Test-Path -LiteralPath $modulePath) {
+    Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }
+    Remove-Item -LiteralPath $modulePath -Recurse -Force
+}
+New-Item -Path $systemRoot -ItemType Directory -Force | Out-Null
+Copy-Item -LiteralPath $moduleSource -Destination $modulePath -Recurse
+Write-Host "==> Copied $moduleName into .system\" -ForegroundColor Cyan
+
+@{
+    module    = $moduleName
+    source    = $toolsPath
+    sha       = if ($sourceSha) { $sourceSha } else { 'unknown' }
+    dirty     = $sourceDirty
+    treeHash  = (& $treeHash $modulePath)
+    copiedAt  = (Get-Date).ToString('o')
+} | ConvertTo-Json | Set-Content -LiteralPath $recordPath
+if ($sourceDirty) {
+    Write-Warning "The tools clone at $toolsPath has uncommitted changes; .system\ holds them. Commit them before relying on this run being reproducible."
+}
+# Read-only so an accidental save in the editor fails loudly instead of being lost.
+Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $true }
+
 # --- Refresh framework-owned files from the module -------------------------
 # These files belong to Templates\customer-repo INSIDE the module, not to the
 # customer: edit them THERE, never here, or the next session overwrites them.
 # Copying them down every session is what keeps every workspace in step.
-$modulePath = Join-Path $toolsPath 'system\NKDAgility.AzureDevOps.AutomationTools'
-$managedFiles = @('init.ps1', 'secrets\secrets.example.json')
+# .claude\settings.json is deliberately NOT here: it is a seed, so a workspace can add
+# its own hooks and permissions without them being overwritten every session.
+$managedFiles = @('init.ps1', 'secrets\secrets.example.json', '.claude\hooks\deny-system-edits.ps1')
 $templateRoot = Join-Path $modulePath 'Templates\customer-repo'
 $selfUpdated = $false
 $sameContent = { param($a, $b)
@@ -119,9 +196,13 @@ if ((Test-Path -LiteralPath $blockSource) -and (Test-Path -LiteralPath $claudeFi
     $blockBody = (Get-Content -LiteralPath $blockSource -Raw).TrimEnd()
     $block = "$blockStart`n$blockBody`n$blockEnd"
     $current = Get-Content -LiteralPath $claudeFile -Raw
-    $pattern = [regex]::Escape($blockStart) + '.*?' + [regex]::Escape($blockEnd)
-    $updated = if ($current -match $pattern) {
-        [regex]::Replace($current, $pattern, { $block }, 'Singleline')
+    # Spliced by index rather than regex: the block spans newlines and can contain '$'
+    # and other regex-replacement metacharacters, both of which silently corrupt a
+    # -replace here.
+    $startAt = $current.IndexOf($blockStart)
+    $endAt = $current.IndexOf($blockEnd)
+    $updated = if ($startAt -ge 0 -and $endAt -gt $startAt) {
+        $current.Substring(0, $startAt) + $block + $current.Substring($endAt + $blockEnd.Length)
     }
     else {
         # No markers yet (a workspace scaffolded before this mechanism existed): append
@@ -149,7 +230,7 @@ if ($selfUpdated -and -not $env:AZDO_INIT_RELOADED) {
 # Create the missing ones from the example so a fresh clone has the right shape,
 # with the placeholders left in - never a real value.
 $examples = Get-ChildItem -LiteralPath $workspaceRoot -Recurse -File -Filter '*.example.*' -Force |
-    Where-Object { $_.FullName -notmatch '\\(\.git|output)\\' }
+    Where-Object { $_.FullName -notmatch '\\(\.git|\.system|output)\\' }
 $needsValues = [System.Collections.Generic.List[string]]::new()
 foreach ($example in $examples) {
     $target = Join-Path $example.DirectoryName ($example.Name -replace '\.example(\.[^.]+)$', '$1')
@@ -168,9 +249,6 @@ if ($needsValues.Count) {
 }
 
 # --- Import the module and initialise the workspace ------------------------
-# $modulePath was resolved above, alongside the template root it ships.
-if (-not (Test-Path -LiteralPath $modulePath)) {
-    throw "Automation tools not found at '$toolsPath'. Bootstrap this machine with: irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex"
-}
+# From .system\, never from the tools clone: the workspace runs the copy it recorded.
 Import-Module $modulePath -Force
 Initialize-AutomationWorkspace -Path $workspaceRoot | Out-Null

@@ -53,7 +53,7 @@ function New-AutomationWorkspace {
     $doNotScaffold = @('CLAUDE.managed.md')
 
     $templateRootLength = (Get-Item -LiteralPath $templateRoot).FullName.Length + 1
-    foreach ($template in (Get-ChildItem -LiteralPath $templateRoot -Recurse -File)) {
+    foreach ($template in (Get-ChildItem -LiteralPath $templateRoot -Recurse -File -Force)) {
         $relative = $template.FullName.Substring($templateRootLength)
         if ($relative -in $doNotScaffold) { continue }
         if ($renameMap.ContainsKey($relative)) { $relative = $renameMap[$relative] }
