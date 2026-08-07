@@ -66,6 +66,26 @@ Describe 'Module is self-contained' {
         $offenders -join ', ' | Should -BeNullOrEmpty -Because 'the module must resolve its own files from $script:ModuleRoot, never by walking up out of it'
     }
 
+    It 'has no template that walks up out of the module' {
+        # Templates legitimately use '..' relative to their own folder in the workspace
+        # (e.g. ..\..\init.ps1), so they are exempt from the rule above. What they must
+        # never do is walk up from ModuleBase: in a workspace that lands in the
+        # customer's own repo. This exact bug shipped once - the binders located their
+        # engine at <module>\..\..\src\migrationTools, which broke the moment the module
+        # started being copied into .system\.
+        $offenders = @(Get-ChildItem (Join-Path $script:ModuleRoot 'Templates') -Filter *.ps1 -Recurse -File |
+                Select-String -Pattern 'Split-Path\s+-Parent\s+\(Split-Path.*ModuleBase', 'Join-Path\s+\$\w*[Mm]odule(Base|Root)\s+\S*\.\.' |
+                ForEach-Object { "$($_.Filename):$($_.LineNumber)" })
+        $offenders -join ', ' | Should -BeNullOrEmpty -Because 'a template must resolve module files from ModuleBase downwards; above it is the customer workspace'
+    }
+
+    It 'ships the engines its binder templates invoke' {
+        foreach ($engine in 'Migrate-Repos.ps1', 'Migrate-Artifacts.ps1') {
+            Join-Path $script:ModuleRoot (Join-Path 'Engines' $engine) |
+                Should -Exist -Because 'Run-Migrate-*.ps1 resolves it from ModuleBase\Engines, so it must travel with the module'
+        }
+    }
+
     It 'ships the templates it scaffolds from' {
         foreach ($folder in 'customer-repo', 'migrations\data-import', 'migrations\migration-tools', 'migrations\migration-platform') {
             Join-Path $script:ModuleRoot (Join-Path 'Templates' $folder) |

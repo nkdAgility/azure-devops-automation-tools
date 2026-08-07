@@ -33,7 +33,8 @@ The old standalone mode — running from this repo's root with `data/<environmen
 | `system/…/Templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`) |
 | `src/_includes/` | Legacy shared code dot-sourced by the scripts: `setup.ps1` (config + environment), `logging.ps1` (PoShLog wrappers), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (now a shim that imports the module) |
 | `src/DataImportTools/` | Assets supporting the Microsoft Azure DevOps Data Import Tool |
-| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, execution, and the reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` engines (repo + artifact-feed migration; `Migrate-GitRepos.ps1` is the older repo mirroring script) |
+| `system/…/Engines/` | The reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` engines (repo + artifact-feed migration), invoked by the `Run-Migrate-*.ps1` binders in an engagement folder |
+| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, execution, and the older `Migrate-GitRepos.ps1` repo mirroring script |
 | `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator |
 | `src/powershell/` | Misc environment utilities |

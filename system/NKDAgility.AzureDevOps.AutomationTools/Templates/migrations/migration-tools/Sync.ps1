@@ -20,6 +20,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Proven on the United-Machine engagement: strict mode turns a typo'd or unset
+# variable into an error instead of a silent empty string mid-migration.
+Set-StrictMode -Version Latest
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $true
 }
@@ -73,7 +76,11 @@ function Invoke-RunScript {
 
     $script:stepNumber++
     Write-Host ("==> [{0}/{1}] {2}" -f $stepNumber, $totalSteps, $Label) -ForegroundColor Cyan
-    & (Join-Path $here $ScriptName) @Arguments
+    $scriptPath = Join-Path $here $ScriptName
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        throw "Step script not found: $scriptPath"
+    }
+    & $scriptPath @Arguments
 }
 
 try {

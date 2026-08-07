@@ -7,7 +7,7 @@
 .DESCRIPTION
     Reads the JSON configuration next to this script, converts it into
     parameter splatting for the Migrate-Artifacts.ps1 engine in the automation
-    tools repo (src\migrationTools) and invokes it once per entry in the
+    module's own Engines\ folder and invokes it once per entry in the
     'Runs' array. Only properties that map to a parameter on the engine are
     forwarded, so repository-only settings in the shared config (e.g.
     KeepClones) are ignored. Null/empty values are omitted so the engine falls
@@ -39,6 +39,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Proven on the United-Machine engagement: strict mode turns a typo'd or unset
+# variable into an error instead of a silent empty string mid-migration.
+Set-StrictMode -Version Latest
 
 if (-not (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools')) {
     . "$PSScriptRoot\..\..\init.ps1"
@@ -48,10 +51,11 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
 }
 
-# The engine lives in the automation tools repo; locate it from the imported
-# module (<tools>\system\<module> -> <tools>\src\migrationTools).
-$toolsRoot = Split-Path -Parent (Split-Path -Parent (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools').ModuleBase)
-$migrateScript = Join-Path $toolsRoot 'src\migrationTools\Migrate-Artifacts.ps1'
+# The engine ships INSIDE the module, so it travels with it into .system\ and stays
+# locked to the module version that drives it. Resolve it from ModuleBase - never
+# by walking up, because above the module is the customer's own repo.
+$moduleBase = (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools').ModuleBase
+$migrateScript = Join-Path $moduleBase 'Engines\Migrate-Artifacts.ps1'
 if (-not (Test-Path -LiteralPath $migrateScript)) {
     throw "Migrate-Artifacts.ps1 not found at: $migrateScript"
 }
