@@ -5,7 +5,7 @@ function New-Migration {
 
     .DESCRIPTION
     Creates migrations\NN-<Name>\ (NN = next free number) in the workspace and copies the
-    matching template from the tools repo's templates\migrations\<type>\ folder:
+    matching template from the module's own Templates\migrations\<type>\ folder:
 
       DataImport        - Microsoft Data Import Tool (Migrator.exe) collection lift-and-shift:
                           DataImport-Scratchbook.ps1 + DataImport-Cleanup.ps1
@@ -46,11 +46,10 @@ function New-Migration {
         MigrationTools    = 'migration-tools'
         MigrationPlatform = 'migration-platform'
     }
-    # templates\migrations\<type> lives in the tools repo root, two levels above the module
-    # base (<tools>\system\<module>).
-    $moduleBase = (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools').ModuleBase
-    $toolsRoot = Split-Path -Parent (Split-Path -Parent $moduleBase)
-    $templatePath = Join-Path $toolsRoot (Join-Path 'templates\migrations' $templateFolderNames[$Type])
+    # Templates ship inside the module so they travel with it when it is copied into a
+    # client workspace, and stay locked to the engine version that consumes them. Never
+    # resolve them by walking up from the module root - above it is the client's repo.
+    $templatePath = Join-Path $script:ModuleRoot (Join-Path 'Templates\migrations' $templateFolderNames[$Type])
     if (-not (Test-Path -LiteralPath $templatePath)) {
         throw "Migration template not found: $templatePath"
     }
@@ -69,6 +68,17 @@ function New-Migration {
     }
 
     Copy-Item -Path $templatePath -Destination $migrationFolder -Recurse
+
+    # Seed provenance. Engagement folders are copied once and then owned and edited by
+    # the engagement, so template improvements never reach them. Recording what produced
+    # this one is what lets you tell, years later, why it does not match today's template.
+    @{
+        type          = $Type
+        template      = $templateFolderNames[$Type]
+        moduleVersion = [string]$MyInvocation.MyCommand.Module.Version
+        scaffoldedAt  = (Get-Date).ToString('o')
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $migrationFolder '.template.json')
+
     Write-FixStep "Created $migrationFolder ($Type)"
     Get-ChildItem -Path $migrationFolder -Recurse -File -Name | ForEach-Object {
         Write-Host "    $_" -ForegroundColor DarkGray

@@ -12,10 +12,10 @@ Each engagement gets a **private client git repo** holding that customer's data,
 irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex
 ```
 
-The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, then scaffolds the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, client `CLAUDE.md`) from `templates/customer-repo/` — copying each file **only if it does not already exist**, so re-running is always safe. In the client repo:
+The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module from that clone, then calls `New-AutomationWorkspace` to scaffold the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, client `CLAUDE.md`) from the templates shipped **inside the module** — copying each file **only if it does not already exist**, so re-running is always safe. In the client repo:
 
-- `. .\init.ps1` starts every session: it pulls the latest tools (`-NoSync` to skip), imports the module and initialises the workspace.
-- `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from `templates/migrations/`.
+- `. .\init.ps1` starts every session: for each engine in the workspace's `capabilities.json` it pulls the clone (`-NoSync` to skip), copies the module into `.system/`, refreshes the framework-owned files, renders the agent guidance, then imports and initialises. Add the governance engine to `capabilities.json` and the same workspace gains `Invoke-GovernancePlan` alongside the migration commands.
+- `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from the module's `Templates/migrations/`, stamping `.template.json` with what produced it.
 - `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
 - PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.
 
@@ -28,9 +28,9 @@ The old standalone mode — running from this repo's root with `data/<environmen
 | Path | Purpose |
 | ---- | ------- |
 | `bootstrap.ps1` | Remote-runnable bootstrap for client workspaces (see [How it works](#how-it-works)) |
-| `templates/customer-repo/` | Scaffold templates for a customer workspace (`init.ps1`, `workspace.json`, customer `CLAUDE.md`, ...) |
-| `templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`) |
-| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, workspace/secrets/logging context, and scaffolding commands |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, workspace/secrets/logging context, and scaffolding commands. Self-contained: it is copied into client workspaces, so it never resolves anything above its own root |
+| `system/…/Templates/customer-repo/` | Scaffold templates for a customer workspace, used by `New-AutomationWorkspace` (`init.ps1`, `workspace.json`, customer `CLAUDE.md`, ...) |
+| `system/…/Templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`) |
 | `src/_includes/` | Legacy shared code dot-sourced by the scripts: `setup.ps1` (config + environment), `logging.ps1` (PoShLog wrappers), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (now a shim that imports the module) |
 | `src/DataImportTools/` | Assets supporting the Microsoft Azure DevOps Data Import Tool |
 | `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, execution, and the reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` engines (repo + artifact-feed migration; `Migrate-GitRepos.ps1` is the older repo mirroring script) |

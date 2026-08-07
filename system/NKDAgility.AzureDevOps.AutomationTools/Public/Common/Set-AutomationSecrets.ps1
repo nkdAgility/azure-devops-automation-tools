@@ -25,15 +25,24 @@ function Set-AutomationSecrets {
     Where to set the variables: Process (default), User, or Machine (Machine requires elevation).
     User/Machine also set the current process so values are usable immediately.
 
+    .PARAMETER NoClobber
+    Leave any variable that is already set. This is what init.ps1 uses, so a CI-provided
+    secret or a deliberate per-shell override always wins over the workspace secrets file.
+
     .EXAMPLE
     Set-AutomationSecrets
+
+    .EXAMPLE
+    Set-AutomationSecrets -NoClobber
     #>
     [CmdletBinding()]
     param(
         [string]$SecretsPath,
 
         [ValidateSet('Process', 'User', 'Machine')]
-        [string]$Scope = 'Process'
+        [string]$Scope = 'Process',
+
+        [switch]$NoClobber
     )
 
     if (-not $SecretsPath) {
@@ -49,6 +58,7 @@ function Set-AutomationSecrets {
     $entries = Get-AutomationSecrets -SecretsPath $SecretsPath
     $scopeEnum = [System.EnvironmentVariableTarget]::$Scope
     $setNames = [System.Collections.Generic.List[string]]::new()
+    $keptNames = [System.Collections.Generic.List[string]]::new()
 
     foreach ($entry in $entries) {
         if (-not $entry.Org) { continue }
@@ -65,6 +75,10 @@ function Set-AutomationSecrets {
         if (-not $names.Contains($derived)) { $names.Add($derived) }
 
         foreach ($name in $names) {
+            if ($NoClobber -and -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                if (-not $keptNames.Contains($name)) { $keptNames.Add($name) }
+                continue
+            }
             Set-Item -Path ("Env:{0}" -f $name) -Value $entry.AccessToken
             if ($Scope -ne 'Process') {
                 [System.Environment]::SetEnvironmentVariable($name, $entry.AccessToken, $scopeEnum)
@@ -73,6 +87,9 @@ function Set-AutomationSecrets {
         }
     }
 
+    if ($keptNames.Count) {
+        Write-FixStep "Left $($keptNames.Count) environment variable(s) already set (CI secrets and shell overrides win): $($keptNames -join ', ')"
+    }
     Write-FixStep "Loaded $($setNames.Count) environment variable(s) from secrets (scope: $Scope)."
     $setNames | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 
