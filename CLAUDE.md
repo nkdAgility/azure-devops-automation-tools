@@ -41,8 +41,9 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 | ---- | ------- |
 | `bootstrap.ps1` | Remote-runnable customer-workspace bootstrap (irm\|iex safe — no `$PSScriptRoot`). Clones the repo, imports the module from it, then calls `New-AutomationWorkspace`; it knows nothing about templates |
 | `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module: `Public/Common` (migration context, workspace, secrets/orgs, logging, `New-AutomationWorkspace`/`New-Migration`/`New-ExportSnapshot` scaffolding), `Public/DataImportTool` (Migrator.exe wrappers, task-level and primitive fix functions), `Public/WorkItemTracking` (REST-based work item and link queries), `Private` (transport invokers, witadmin/Migrator path resolution, secrets cache). One function per file; `.psm1` dot-sources and exports `Public/**` only |
-| `system/…/Templates/customer-repo/` | Customer workspace scaffold (`init.ps1`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `CLAUDE.managed.md`, `secrets/secrets.example.json`, ...) |
+| `system/…/Templates/customer-repo/` | Customer workspace scaffold, laid out relative to the workspace root (`init.ps1`, `capabilities.json`, `workspace.json`, `gitignore.template` → `.gitignore`, customer `CLAUDE.md`, `CLAUDE.managed.md`, `.claude/`, `secrets/secrets.example.json`). `.managed` lists which of them this engine owns and overwrites every session; everything else is a seed |
 | `system/…/Templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
+| `system/…/Agents/CAPABILITY.md` | Guidance for agents *using* this capability in a workspace. Rendered into the workspace's `CLAUDE.md`, `AGENTS.md` and `.github/copilot-instructions.md`. Contrast with this file, which is for agents *building* the toolkit |
 | `src/_includes/` | Legacy shared code: `setup.ps1` (shim → workspace-resolved session variables), `logging.ps1` (`BeginLoggerTitle` + PoShLog availability), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
 | `src/DataImportTools/` | Assets supporting the Microsoft Data Import Tool (e.g. SQL helpers) |
 | `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, execute migrations, plus the reusable engines `Migrate-Repos.ps1` (git repos incl. LFS/segmented pushes) and `Migrate-Artifacts.ps1` (artifact feeds/packages) driven by customer-repo `Run-*` binders |
@@ -76,6 +77,44 @@ The module's fix functions come in two layers:
 **Custom link types are destructive to remove.** `witadmin deletelinktype` deletes every link of the type along with the definition, and the relationships cannot be recovered. `Remove-WorkItemLinkType` therefore calls `Export-WorkItemLinkInventory` first and refuses to delete if that export fails (`-NoExport` overrides). The inventory is written as a `.json` record plus a readable `.csv` sibling into the export snapshot — it is both the customer conversation and the basis for re-creating the links as related links after the import.
 
 Keep new fix functions in the same style: Verb-Noun names, one function per file under `Public/`, idempotent where possible (report "no change" rather than throwing when the fix is already applied), and add each new public function to `FunctionsToExport` in the `.psd1`.
+
+## Capabilities: how a workspace loads engines
+
+A customer workspace declares the nkdAgility engines it uses in its own `capabilities.json`:
+
+```json
+{ "capabilities": [
+    { "name": "automation",  "module": "NKDAgility.AzureDevOps.AutomationTools",  "repo": "…automation-tools.git" },
+    { "name": "governance",  "module": "NKDAgility.AzureDevOps.Governance",       "repo": "…governance-as-code.git" } ] }
+```
+
+The registry belongs to the **workspace**, not to either engine — that is what lets a
+workspace take on governance without this toolkit knowing governance exists. For each
+entry the workspace's `init.ps1` clones-or-pulls the engine, copies `system/<Module>` into
+`.system/<Module>`, scaffolds that engine's `Templates/customer-repo/**` relative to the
+workspace root, renders its `Agents/CAPABILITY.md` into the agent files, and dot-sources
+`<name>/init.ps1` if the engine ships one.
+
+Every engine therefore presents the same surface, asserted by the `Engine shape` tests
+here and the identical block in `azure-devops-governance-as-code` — **change one, change
+both**:
+
+| Ships | For |
+| ----- | --- |
+| `system/<Module>/` named for the module | the copy into `.system/` |
+| `Templates/customer-repo/**` | scaffolding, laid out relative to the workspace root |
+| `Templates/customer-repo/.managed` | which of those files the engine owns and overwrites |
+| `Agents/CAPABILITY.md` | rendered into the workspace's agent guidance |
+
+Engine clones resolve as `$env:AZDO_ENGINE_<NAME>` → `enginePaths.<name>` in
+`workspace.local.json` → `%USERPROFILE%\source\repos\<repo-name>`. The copy takes whatever
+that clone holds, uncommitted edits included: editing an engine and re-running the
+workspace's `init.ps1` is the normal way to test a change. `.source.json` records the
+clone path, HEAD, dirty flag and content hash of what was actually copied.
+
+`.system/` is generated and read-only, guarded three ways: read-only file attributes, a
+`PreToolUse` hook in the workspace's `.claude/settings.json` that refuses agent writes into
+it, and `init.ps1` throwing rather than overwriting a folder whose hash has moved.
 
 ## The module is self-contained
 

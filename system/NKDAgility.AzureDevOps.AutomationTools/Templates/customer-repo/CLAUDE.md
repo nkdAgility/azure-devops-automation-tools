@@ -38,5 +38,5 @@ in a fresh clone. Never rely on the managed block below for a safety rule.
   refuses writes into the folder, and `init.ps1` stops rather than discarding a
   hand-edit — but do not rely on being caught.
 
-<!-- BEGIN managed: automation-tools -->
-<!-- END managed: automation-tools -->
+<!-- BEGIN managed: nkdagility -->
+<!-- END managed: nkdagility -->

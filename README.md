@@ -14,7 +14,7 @@ irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/m
 
 The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module from that clone, then calls `New-AutomationWorkspace` to scaffold the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, client `CLAUDE.md`) from the templates shipped **inside the module** — copying each file **only if it does not already exist**, so re-running is always safe. In the client repo:
 
-- `. .\init.ps1` starts every session: it pulls the latest tools (`-NoSync` to skip), imports the module and initialises the workspace.
+- `. .\init.ps1` starts every session: for each engine in the workspace's `capabilities.json` it pulls the clone (`-NoSync` to skip), copies the module into `.system/`, refreshes the framework-owned files, renders the agent guidance, then imports and initialises. Add the governance engine to `capabilities.json` and the same workspace gains `Invoke-GovernancePlan` alongside the migration commands.
 - `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from the module's `Templates/migrations/`, stamping `.template.json` with what produced it.
 - `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
 - PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.

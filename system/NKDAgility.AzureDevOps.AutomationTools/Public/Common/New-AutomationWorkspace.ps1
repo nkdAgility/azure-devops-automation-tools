@@ -50,7 +50,7 @@ function New-AutomationWorkspace {
     # Source material for the managed block that init.ps1 writes into the workspace's
     # CLAUDE.md. It stays in the module - copying it into the workspace would put a
     # second, immediately-stale copy of the same guidance in the customer's repo.
-    $doNotScaffold = @('CLAUDE.managed.md')
+    $doNotScaffold = @('CLAUDE.managed.md', '.managed')
 
     $templateRootLength = (Get-Item -LiteralPath $templateRoot).FullName.Length + 1
     foreach ($template in (Get-ChildItem -LiteralPath $templateRoot -Recurse -File -Force)) {
