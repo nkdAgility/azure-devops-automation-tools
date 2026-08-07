@@ -66,6 +66,9 @@ function New-AutomationWorkspace {
         if (-not $PSCmdlet.ShouldProcess($destination, 'Create from template')) { continue }
         New-Item -Path (Split-Path -Parent $destination) -ItemType Directory -Force | Out-Null
         Copy-Item -LiteralPath $template.FullName -Destination $destination
+        # When this module is itself running from a workspace's read-only .system\ copy,
+        # Copy-Item carries the attribute across; the scaffolded file is the workspace's own.
+        (Get-Item -LiteralPath $destination).IsReadOnly = $false
         Write-Host "    Created  $relative" -ForegroundColor Green
     }
 

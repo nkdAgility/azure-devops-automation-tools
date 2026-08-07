@@ -211,7 +211,11 @@ foreach ($capability in $capabilities) {
                 if (& $sameContent $template.FullName $target) { continue }
             }
             New-Item -Path (Split-Path -Parent $target) -ItemType Directory -Force | Out-Null
+            if (Test-Path -LiteralPath $target) { (Get-Item -LiteralPath $target).IsReadOnly = $false }
             Copy-Item -LiteralPath $template.FullName -Destination $target -Force
+            # The template is read from .system\, which is read-only; the workspace's copy
+            # is the workspace's own, so clear the attribute Copy-Item carried across.
+            (Get-Item -LiteralPath $target).IsReadOnly = $false
             $verb = if ($isManaged) { 'Updated' } else { 'Created' }
             Write-Host "    $verb  $relative" -ForegroundColor $(if ($isManaged) { 'Cyan' } else { 'Green' })
             if ($relative -eq 'init.ps1') { $selfUpdated = $true }
@@ -323,6 +327,15 @@ if (-not $automation) {
 }
 Import-Module $automation.ModulePath -Force
 Initialize-AutomationWorkspace -Path $workspaceRoot | Out-Null
+
+# --- Export the workspace secrets as environment variables ------------------
+# One secrets file serves every capability: the migration tools bind them into .NET
+# config, and a governance manifest.yaml names one as its accessToken. -NoClobber means
+# a CI-provided secret or a deliberate per-shell override always wins over the file.
+$secretsPath = (Get-AutomationWorkspace).SecretsPath
+if (Test-Path -LiteralPath $secretsPath) {
+    Set-AutomationSecrets -SecretsPath $secretsPath -NoClobber | Out-Null
+}
 
 # --- Load each capability ---------------------------------------------------
 foreach ($loaded in $loadedCapabilities) {
