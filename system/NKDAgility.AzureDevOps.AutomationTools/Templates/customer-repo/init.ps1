@@ -101,7 +101,7 @@ $treeHash = {
 $resolveEnginePath = { param($capability)
     $repoName = [System.IO.Path]::GetFileNameWithoutExtension(($capability.repo -split '/')[-1])
     $envName = "AZDO_ENGINE_$($capability.name.ToUpperInvariant() -replace '[^A-Z0-9]', '_')"
-    $candidates = @(
+    $candidates = @(@(
         [Environment]::GetEnvironmentVariable($envName)
         if ($capability.name -eq 'automation') { $env:AZDO_AUTOMATION_TOOLS }
         if ($local -and $local.PSObject.Properties['enginePaths'] -and $local.enginePaths.PSObject.Properties[$capability.name]) {
@@ -109,7 +109,11 @@ $resolveEnginePath = { param($capability)
         }
         if ($capability.name -eq 'automation' -and $local -and $local.PSObject.Properties['toolsPath']) { $local.toolsPath }
         (Join-Path $env:USERPROFILE (Join-Path 'source\repos' $repoName))
-    ) | Where-Object { $_ }
+    ) | Where-Object { $_ })
+    # The @() around the whole pipeline matters: piping to Where-Object unwraps a
+    # single survivor to a bare string, and [0] on a string is its first CHARACTER.
+    # With no workspace.local.json - the normal case on a fresh clone - only the
+    # default candidate survives, and the engine path resolved to 'C'.
     @{ Path = $candidates[0]; RepoName = $repoName }
 }
 

@@ -94,6 +94,58 @@ Describe 'Module is self-contained' {
     }
 }
 
+Describe 'Workspace init.ps1' {
+
+    # The client init.ps1 is a template, so it is never dot-sourced by these tests. The
+    # engine-path resolver is worth testing directly anyway: it decides where every
+    # capability's module is copied from, and it shipped broken.
+
+    BeforeAll {
+        $template = Join-Path $script:ModuleRoot 'Templates\customer-repo\init.ps1'
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($template, [ref]$null, [ref]$null)
+        $assignment = $ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$resolveEnginePath'
+            }, $true)
+        $assignment | Should -Not -BeNullOrEmpty -Because 'the resolver must still be named $resolveEnginePath for this test to reach it'
+        $script:ResolveEnginePath = [scriptblock]::Create($assignment.Right.Extent.Text.Trim('{}'))
+    }
+
+    It 'resolves a rooted path when nothing overrides it' {
+        # The single-candidate case: no workspace.local.json, no environment override, so
+        # only the default survives the filter. Piping to Where-Object unwraps a lone
+        # survivor to a bare string, and [0] on a string is its first character - this
+        # returned 'C' and broke every fresh clone.
+        $local = $null
+        $capability = [pscustomobject]@{
+            name   = 'automation'
+            module = 'NKDAgility.AzureDevOps.AutomationTools'
+            repo   = 'https://github.com/nkdAgility/azure-devops-automation-tools.git'
+        }
+        $resolved = & $script:ResolveEnginePath $capability
+
+        $resolved.RepoName | Should -BeExactly 'azure-devops-automation-tools'
+        $resolved.Path.Length | Should -BeGreaterThan 3 -Because 'a single-character path means the array was unwrapped to a string'
+        [System.IO.Path]::IsPathRooted($resolved.Path) | Should -BeTrue
+        $resolved.Path | Should -BeLike '*azure-devops-automation-tools'
+    }
+
+    It 'prefers an explicit environment override' {
+        $local = $null
+        $capability = [pscustomobject]@{
+            name   = 'governance'
+            module = 'NKDAgility.AzureDevOps.Governance'
+            repo   = 'https://github.com/nkdAgility/azure-devops-governance-as-code.git'
+        }
+        try {
+            $env:AZDO_ENGINE_GOVERNANCE = 'D:\somewhere\else'
+            (& $script:ResolveEnginePath $capability).Path | Should -BeExactly 'D:\somewhere\else'
+        }
+        finally { Remove-Item Env:\AZDO_ENGINE_GOVERNANCE -ErrorAction SilentlyContinue }
+    }
+}
+
 Describe 'Engine shape' {
 
     # Every nkdAgility engine presents the same surface to a customer workspace, so the
