@@ -35,13 +35,19 @@
     permissions) are reported in the unresolved CSV and their links are left
     unchanged, so a later re-run can pick them up.
 
-    The scan also HEALS half-fixed comments left by a run made before the
-    format fix: links already rewritten to the target, but the comment saved as
-    html so its markdown renders literally. That state is detected without any
-    CSV - format says html, the text has no HTML tags, but it carries a
-    markdown-syntax attachment link - and the comment is re-marked as markdown.
-    Running the script twice therefore converges: the second run finds nothing
-    left to do.
+    The scan also HEALS comments damaged by earlier states of this problem,
+    detected without any CSV, so pointing the engine at a work item fixes it
+    whatever state it is in and a second run converges to a no-op:
+
+      * Half-fixed: links already rewritten but the comment saved as html, so
+        its markdown renders literally (format html, no HTML tags, carries a
+        markdown attachment link). Re-marked as markdown.
+      * Escaped: converted through the ADO convert-to-markdown button, which
+        escapes what it sees as literal punctuation - !\[image.png\](...\_apis)
+        - markdown turned into text ABOUT markdown. Detected by the escaped
+        attachment link signature, which never occurs naturally; the whole
+        comment is unescaped (the button escaped the whole comment) and saved
+        as markdown.
 
     PATs: in a customer workspace, run Set-AutomationSecrets (from the
     NKDAgility.AzureDevOps.AutomationTools module) first; -SourcePat and
@@ -238,6 +244,16 @@ $targetBase = '{0}/{1}' -f $TargetOrgUrl.TrimEnd('/'), [uri]::EscapeDataString($
 $sourceRoot = [regex]::Escape($SourceOrgUrl.TrimEnd('/'))
 $attachmentPattern = "(?i)$sourceRoot/[^)\s`"'<>\]]*_apis/wit/attachments/(?<guid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[^)\s`"'<>\]]*"
 
+# A real html comment references attachments as <a href>/<img>; the presence of these
+# tags is what separates genuine html from markdown mis-flagged or mangled as html.
+$htmlTagPattern = '(?i)<(?:div|p|br|span|a|img|table|ul|ol|li)\b'
+
+# ADO's convert-to-markdown button escapes what it sees as literal punctuation, so a
+# comment converted through the UI ends up as !\[image.png\](...\_apis/...): markdown
+# syntax turned into text ABOUT markdown syntax, rendering as literal characters. An
+# ESCAPED image/link wrapped around an attachments URL never occurs naturally.
+$escapedSignature = '!\\\[[^\]]*\\\]\([^)]*(?:\\_|_)apis/wit/attachments/[^)]*\)'
+
 New-Item -Path $OutputFolder -ItemType Directory -Force | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $changesCsv = Join-Path $OutputFolder "$stamp-comment-attachment-changes.csv"
@@ -269,7 +285,7 @@ if ($RepairFormatCsv) {
             Write-Host "  WI $wi comment ${cid}: already markdown - nothing to do" -ForegroundColor DarkGray
             continue
         }
-        if ([string]$comment.text -match '(?i)<(?:div|p|br|span|a|img|table|ul|ol|li)\b') {
+        if ([string]$comment.text -match $htmlTagPattern) {
             $skipped++
             Write-Warning "WI $wi comment ${cid}: text contains HTML tags; may genuinely be html - review it by hand."
             continue
@@ -336,14 +352,32 @@ foreach ($id in $ids) {
     foreach ($comment in $comments) {
         $scannedComments++
         $text = [string]$comment.text
-        # Not named $matches: -match below writes the automatic $Matches variable,
-        # and shadowing it invites exactly that collision.
-        $linkMatches = @([regex]::Matches($text, $attachmentPattern))
+        $newText = $text
+
+        # Escaped-markdown healing: undo the convert-to-markdown button's escaping when
+        # the comment carries the escaped-attachment signature. The button escaped the
+        # whole comment, so the whole comment is unescaped - the standard CommonMark
+        # inverse, backslash before any ASCII punctuation. A comment that mixes the
+        # signature with real HTML tags is a hybrid for eyes, not automation.
+        $unescaped = $false
+        if ($newText -match $escapedSignature) {
+            if ($newText -match $htmlTagPattern) {
+                Write-Warning "WI ${id} comment $($comment.id): escaped markdown AND html tags together - review by hand."
+            }
+            else {
+                $newText = [regex]::Replace($newText, '\\([!-/:-@\[-`{-~])', '$1')
+                $unescaped = $true
+            }
+        }
+
+        # Not named $matches: -match above writes the automatic $Matches variable,
+        # and shadowing it invites exactly that collision. Matched against the
+        # UNESCAPED text, so an escaped source link is found and rewritten too.
+        $linkMatches = @([regex]::Matches($newText, $attachmentPattern))
 
         # NO early continue when nothing matches: a half-fixed comment has no source
         # links left by definition - its links were already rewritten - and skipping
         # here is exactly how the format-repair detection below never ran.
-        $newText = $text
         $rewrittenHere = 0
         foreach ($match in ($linkMatches | Sort-Object { $_.Value } -Unique)) {
             $sourceUrl = $match.Value
@@ -404,20 +438,23 @@ foreach ($id in $ids) {
         # the text has NO html tags, but it DOES carry a markdown-syntax attachment link -
         # genuine html comments reference attachments as <a href>/<img>, never as ![](...).
         $format = Get-CommentFormat $comment
-        $formatRepair = $format -eq 'html' -and
-            $newText -notmatch '(?i)<(?:div|p|br|span|a|img|table|ul|ol|li)\b' -and
-            $newText -match '!?\[[^\]]*\]\([^)]*_apis/wit/attachments/[^)]*\)'
+        $formatRepair = $unescaped -or ($format -eq 'html' -and
+            $newText -notmatch $htmlTagPattern -and
+            $newText -match '!?\[[^\]]*\]\([^)]*_apis/wit/attachments/[^)]*\)')
 
-        if (($rewrittenHere -and $newText -ne $text) -or $formatRepair) {
+        if ($newText -ne $text -or $formatRepair) {
             $editedComments++
-            $writeFormat = if ($formatRepair) { $formatRepairs++; 'markdown' } else { $format }
-            $note = if ($formatRepair) { '; re-marking html -> markdown' } else { '' }
+            $writeFormat = if ($formatRepair) { 'markdown' } else { $format }
+            $note = if ($unescaped) { $formatRepairs++; '; unescaping mangled markdown' }
+            elseif ($formatRepair) { $formatRepairs++; '; re-marking html -> markdown' }
+            else { '' }
             Write-Host ("  WI {0} comment {1}: {2} link(s){3}" -f $id, $comment.id, $rewrittenHere, $note) -ForegroundColor DarkGray
             if ($formatRepair) {
                 $changes.Add([pscustomobject]@{
-                        WorkItemId = $id; CommentId = $comment.id; FileName = '(format repair)'
+                        WorkItemId = $id; CommentId = $comment.id
+                        FileName = if ($unescaped) { '(markdown unescape)' } else { '(format repair)' }
                         SourceUrl = ''; TargetUrl = ''
-                        CommentFormat = 'html -> markdown'
+                        CommentFormat = "$format -> markdown"
                         Applied = [bool]$Commit
                     })
             }
@@ -435,7 +472,7 @@ $unresolved | Export-Csv -LiteralPath $unresolvedCsv -NoTypeInformation
 
 $verb = if ($Commit) { 'rewrote' } else { 'would rewrite' }
 $repairVerb = if ($Commit) { 're-marked' } else { 'would re-mark' }
-$linkCount = @($changes | Where-Object { $_.FileName -ne '(format repair)' }).Count
+$linkCount = @($changes | Where-Object { $_.FileName -notin '(format repair)', '(markdown unescape)' }).Count
 Write-Host ''
 Write-Host ("==> Scanned {0} comment(s) across {1} work item(s); {2} {3} link(s) in {4} comment(s); {5} distinct attachment(s); {6} {7} half-fixed comment(s) as markdown; {8} unresolved." -f `
         $scannedComments, @($ids).Count, $verb, $linkCount, $editedComments, $attachmentMap.Count, $repairVerb, $formatRepairs, $unresolved.Count) -ForegroundColor $(if ($unresolved.Count) { 'Yellow' } else { 'Green' })
