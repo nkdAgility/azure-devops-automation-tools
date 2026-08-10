@@ -52,6 +52,44 @@ Describe 'Script files parse' {
     }
 }
 
+Describe 'Documentation covers the surface' {
+
+    # Ten exported functions - including the entire REST WorkItemTracking surface - once
+    # went undocumented, and the transport table described auth that had since changed.
+    # Docs drift silently; a test does not.
+
+    BeforeAll {
+        $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $script:DocText = (Get-Content (Join-Path $script:RepoRoot 'CLAUDE.md') -Raw) +
+        (Get-Content (Join-Path $script:RepoRoot 'README.md') -Raw)
+    }
+
+    It 'names every exported command in CLAUDE.md or README.md' {
+        $missing = @($script:Manifest.FunctionsToExport | Where-Object { $script:DocText -notmatch [regex]::Escape($_) })
+        $missing -join ', ' | Should -BeNullOrEmpty -Because 'a command nobody can find is a command nobody uses; add it to the command reference'
+    }
+
+    It 'names every engine' {
+        $engines = @(Get-ChildItem (Join-Path $script:ModuleRoot 'Engines') -Filter *.ps1 -File | ForEach-Object Name)
+        $missing = @($engines | Where-Object { $script:DocText -notmatch [regex]::Escape($_) })
+        $missing -join ', ' | Should -BeNullOrEmpty -Because 'engines are invoked by path, so they are only discoverable through the docs'
+    }
+
+    It 'documents the REST authentication default' {
+        # This one was actively WRONG for two commits: the table still said auth fell
+        # through to the process identity after Entra became the default.
+        $claude = Get-Content (Join-Path $script:RepoRoot 'CLAUDE.md') -Raw
+        $claude | Should -Match 'Entra' -Because 'Entra is the default REST auth and the on-premises consequence must be written down'
+        $claude | Should -Match 'UseDefaultCredentials'
+    }
+
+    It 'documents the Wit naming convention' {
+        # (?s) so the match survives the line wrap between 'Wit' and 'noun-prefix'.
+        (Get-Content (Join-Path $script:RepoRoot 'CLAUDE.md') -Raw) |
+            Should -Match '(?s)(Wit.{0,30}noun-prefix|noun-prefix.{0,30}Wit)' -Because 'the convention is the only way to tell transport from a runbook line'
+    }
+}
+
 Describe 'Transport is visible in the command name' {
 
     # The module talks to a collection two ways and will keep needing both, so a command

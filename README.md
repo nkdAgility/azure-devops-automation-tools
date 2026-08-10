@@ -19,9 +19,25 @@ The bootstrap clones/updates this repo and Microsoft's `process-customization-sc
 - `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
 - PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.
 
-Template co-maintenance note: the bootstrap never overwrites existing files, so changes to `templates/customer-repo/` reach already-bootstrapped client repos only when copied across manually.
+Seed files are copied once and then belong to the workspace; the framework-owned subset listed in each engine's `Templates/customer-repo/.managed` is refreshed from the module on every `init.ps1`.
 
 The old standalone mode — running from this repo's root with `data/<environment>/` folders selected by `config.json` — is **retired**. This repo is the toolkit and never holds customer data: `/data/` and `/config.json` stay gitignored so anything dropped here by habit can never be committed, and `runmefirst.ps1` now just points at the bootstrap and lists the client workspaces on your machine.
+
+## What the module gives you
+
+61 exported commands plus five standalone engines. **`CLAUDE.md` holds the full command reference**; the shape is:
+
+| Group | For |
+| ----- | --- |
+| `Public/Common` | Workspace and session context, secrets, logging, and the `New-*` scaffolding commands |
+| `Public/DataImportTool` | The Microsoft Data Import Tool fix workflow — `Migrator.exe` wrappers, and the `witadmin` primitives and task-level commands that clear a collection's validation errors |
+| `Public/WorkItemTracking` | REST reads useful to every toolchain: work item types, link types, links, link inventories |
+| `Engines/` | Standalone scripts invoked by path: git repo + wiki migration, artifact feeds, wiki work item link rewriting, comment attachment link repair, work item ID counter alignment |
+
+Two conventions worth knowing before you read any runbook:
+
+- **The command name says the transport.** `Get-WitWorkItemType` shells out to `witadmin.exe` against an on-premises collection; `Get-WorkItemType` is REST against a Services organisation. Every witadmin command carries the `Wit` noun-prefix, and every pre-rename name survives as an exported alias.
+- **REST authenticates with Entra by default.** `-Pat` wins if supplied, then `-UseDefaultCredentials`; otherwise the module discovers the collection's tenant and signs in. An on-premises Server collection has no Entra tenant, so it needs `-UseDefaultCredentials` explicitly.
 
 ## Repository layout
 
@@ -76,7 +92,12 @@ With the workspace initialised, you can run the following scripts:
 - **Install-ReflectedWorkItemID.ps1** - Adds the ReflectedWorkItemID field to all of the configured organisations and processes. This is a special field that is used by the [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools) to track the work items as they are migrated. This script will create the field in the configured organisations and processes.
 - **Search-ProcessesWeCareAbout.ps1** - This will search all of the configured organisations for processes that contain the configured work item field. This is useful if you are looking for a process that you know contains a specific field. It will create a CSV file with the results, and update the `organisations.json` file.
 
-## Data Folder
+## Legacy `src/**` scripts and their data files
+
+The sections from here down describe the older dot-sourced scripts under `src/**`, which
+predate the module and are still used by some engagements. They read their inputs from the
+client workspace's `data` folder; `samples/` has a placeholder example of every file. New
+shared code goes in the module, not here.
 
 The client workspace's `data` folder contains the data used by each script. You can check the `.\samples\*` folder in this repo for examples of the data required.
 

@@ -170,13 +170,125 @@ The module talks to collections two ways, and each has one private invoker that 
 | | witadmin / Migrator.exe | REST |
 | - | - | - |
 | Private invoker | `Invoke-WitAdminFix` (+ `Resolve-WitAdminPath`, `Resolve-MigratorPath`) | `Invoke-AzureDevOpsApi` (+ `Get-WorkItemDetailMap`) |
-| Auth | the process identity | `-Pat` when supplied, otherwise `-UseDefaultCredentials` (the normal on-premises case) |
+| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra** (see below) |
+| Command name | `<Verb>-Wit<Noun>` — the prefix IS the signal | plain noun |
 | Public folder | `Public/DataImportTool` | `Public/WorkItemTracking` |
 | Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries |
+
+**The name says the transport.** A command that shells out to `witadmin.exe` carries a `Wit`
+noun-prefix; a REST command does not. So `Get-WitWorkItemType` (witadmin, on-premises
+collection, needs `witadmin.exe` on PATH) and `Get-WorkItemType` (REST, Services
+organisation, needs a credential) are the same question over different transports, and you
+can tell which a runbook line needs without opening the function. Three tests hold the line:
+every witadmin command is prefixed, no REST command claims the prefix, every alias resolves.
+
+Thirteen commands were renamed into this convention and **every old name remains an exported
+alias** (`Rename-Field` → `Rename-WitField`, `Remove-WorkItemLinkType` →
+`Remove-WitWorkItemLinkType`, and so on — see `AliasesToExport` in the `.psd1`). Engagement
+runbooks were written against the old names and a workspace pins nothing, so breaking them
+mid-engagement is not acceptable. New code uses the `Wit` names. The one exception is
+`Get-WorkItemType`, deliberately **not** aliased: that name now belongs to the REST command,
+and aliasing it would silently send a runbook line to a different transport.
 
 `Public/` folders group by **what a command is for**, not by transport — the transport is an implementation detail behind the invoker. `Public/WorkItemTracking` is separate from `Public/DataImportTool` because reading work items and links is useful to every toolchain (a link inventory is as relevant when verifying an Azure DevOps Migration Tools run as when clearing a collection for the Data Import Tool), whereas `DataImportTool` is specifically the Migrator.exe/witadmin fix workflow. A command that composes both — like `Remove-WitWorkItemLinkType`, which inventories over REST then deletes with witadmin — belongs to the workflow it serves.
 
 REST commands default to `api-version=5.0`: the Data Import Tool runs against Azure DevOps Server, and 5.0 is available on every supported server version, unlike the `$queryString` 7.x defaults used for Services organisations.
+
+### REST authentication: Entra is the default
+
+Precedence in `Invoke-AzureDevOpsApi`, and therefore in every REST command:
+
+1. `-Pat` — an explicit token wins.
+2. `-UseDefaultCredentials` — authenticate as the process identity.
+3. Otherwise **Entra**. Not a fallback: the other two are opt-outs.
+
+`Get-AzureDevOpsTenantId` discovers the tenant from the `X-VSS-ResourceTenant` header on an
+unauthenticated `connectionData` probe and caches it; `Get-EntraAccessToken` signs in pinned
+to that tenant and caches the token until five minutes before expiry. Pinning matters —
+without it Az enumerates every tenant the user can see and fails MFA on the ones they cannot
+complete. `Initialize-AzAccounts` installs `Az.Accounts` for the current user on demand; it
+is deliberately **not** in `RequiredModules`, because witadmin and PAT work must keep running
+on a machine that has never signed in to Azure.
+
+> **On-premises consequence.** An Azure DevOps Server collection has no Entra tenant, so a
+> REST call that used to fall through to the process identity must now say
+> `-UseDefaultCredentials`. `Get-EntraAccessToken` throws naming that switch when the
+> collection returns no tenant header. Every public REST command takes and forwards it.
+
+Secrets follow the same shape: `Set-AutomationSecrets -NoClobber` leaves any variable that is
+already set, so a CI-provided secret or a deliberate per-shell override always beats the
+workspace secrets file. The client `init.ps1` uses `-NoClobber`.
+
+## Command reference
+
+Everything the module exports, by folder. `Wit` in a name means witadmin; a plain noun means
+REST or local. Every `Wit*` command also answers to its pre-rename name (see the alias note
+above). Engines are scripts, not commands — invoke them by path from `ModuleBase\Engines`.
+
+### `Public/Common` — workspace, context, secrets, logging, scaffolding
+
+| Command | Does |
+| ------- | ---- |
+| `Initialize-AutomationWorkspace` | Reads `workspace.json` (+ `workspace.local.json`), resolves the data/output/exports folders, starts logging. Every session begins here |
+| `Get-AutomationWorkspace` | Returns that resolved context — root, folders, API query strings |
+| `New-AutomationWorkspace` | Scaffolds a customer workspace from the module's `Templates/customer-repo` |
+| `New-Migration` | Scaffolds `migrations/NN-<Name>/` from `Templates/migrations/<type>`, stamping `.template.json` |
+| `New-ExportSnapshot` | Creates a dated `exports/<source>/<yyyyMMdd>/{xml,json}/` pair for pristine server exports |
+| `Set-MigrationContext` | Sets session defaults (collection, project, tool paths) via `$Global:PSDefaultParameterValues` |
+| `Get-MigrationContext` / `Clear-MigrationContext` | Read it back / undo it |
+| `Set-AutomationSecrets` | Exports PATs from `secrets/secrets.json` as `AZDO_PAT_<ORG>` plus any explicit `EnvVars` names. `-NoClobber` leaves variables already set |
+| `Get-Organisation` | Organisation entries from `organisations.json` with PATs merged in from secrets |
+| `Get-AzureDevOpsAuthHeader` | Basic-auth header hashtable from a PAT |
+| `Invoke-FixStep` | Runs a named runbook step once — optional `-Verify` scriptblock, checkpoint JSON, SKIPs on re-run, `-Force` overrides |
+| `Write-FixSection` | Console banner marking which runbook section is running |
+| `Initialize-AutomationLogging` | Starts the PoShLog file sink under `output/log` |
+| `Write-InfoLog` / `Write-DebugLog` / `Write-ErrorLog` | Log at a level. **Never log secrets** |
+
+### `Public/DataImportTool` — the Migrator.exe / witadmin fix workflow
+
+| Command | Does |
+| ------- | ---- |
+| `Invoke-DataImportPrepare` | `Migrator.exe Prepare` — produces the import specification |
+| `Invoke-DataImportValidate` | `Migrator.exe Validate` against a collection |
+| `Get-DataImportValidationSummary` | Parses a validation run's logs into per-project/per-code error counts. The baseline for the fix loop |
+| `Install-FeedbackWorkItemTypes` | Task-level: adds the types + categories `ProjectProcessConfiguration` requires (TF400526/TF400517 prerequisites) |
+| `Repair-ProcessConfiguration` | Task-level: export → fix TypeFields/backlogs/feedback → import. State mappings are parameters — verify against `Get-WitWorkItemTypeState` first |
+| `Get-WitWorkItemType` | Lists a project's work item types |
+| `Get-WitWorkItemTypeState` | Lists the states of one work item type |
+| `Copy-WitWorkItemType` | Copies a work item type definition between projects |
+| `Import-WitWorkItemTypeFile` | Imports a work item type definition XML |
+| `Add-WitWorkItemCategory` | Adds a category with its default work item type |
+| `Add-WitWorkItemCategoryType` / `Remove-WitWorkItemCategoryType` | Adds/removes a type within a category |
+| `Rename-WitField` | Renames a field by reference name — the TF400526 conflict fix |
+| `Remove-WitFieldRule` | Removes an unsupported rule from a work item type |
+| `Find-WitRuleScope` / `Remove-WitRuleScope` | Finds/strips `for=`/`not=` identity scoping from rules and workflow transitions. `-All` strips every scope |
+| `Find-WitGlobalWorkflowRuleScope` / `Remove-WitGlobalWorkflowRuleScope` | The same, for global workflow rules |
+| `Remove-WitWorkItemLinkType` | **Destructive and irreversible.** Deletes a custom link type *and every link of it*. Exports an inventory first and refuses if that fails (`-NoExport` overrides) |
+| `Export-WitProcessConfigurationFixFile` / `Import-WitProcessConfigurationFixFile` | Export a project's `ProjectProcessConfiguration` XML for local editing, and import it back |
+| `Update-ProcessConfigurationFixFile` | Applies a mutation scriptblock to an exported fix file |
+| `Add-ProcessConfigurationElement` | Adds an element under an XPath in the fix file |
+| `Add-ProcessConfigurationTypeField` | Adds/updates a `TypeField` (with `Format` and picklist `Values`) |
+| `Set-ProcessConfigurationAttribute` | Sets an attribute at an XPath |
+| `Set-ProcessConfigurationStates` / `Set-ProcessConfigurationColumns` / `Set-ProcessConfigurationAddPanel` | Replace a backlog element's states, columns or add-panel fields |
+
+### `Public/WorkItemTracking` — REST, useful to every toolchain
+
+| Command | Does |
+| ------- | ---- |
+| `Get-WorkItemType` | Lists a project's work item types over REST. `-Name` checks for specific types and throws when any is missing, so it can gate a migration step |
+| `Get-WorkItemLinkType` | Lists link types in a collection, flagging which are custom |
+| `Get-WorkItemLink` | Enumerates every link of the given types with both endpoints resolved |
+| `Export-WorkItemLinkInventory` | Writes that inventory as `.json` + readable `.csv` — the record that makes link-type deletion recoverable as related links |
+
+### `Engines/` — standalone scripts, invoked by path
+
+| Engine | Does |
+| ------ | ---- |
+| `Migrate-Repos.ps1` | Git repos incl. LFS and segmented pushes for repos over the push limit, **and project wikis** (`-SkipWiki`, `-SkipWikiLinkRewrite`, `-CloneDir`, `-SourceRemote`, `-TargetRemote`) |
+| `Migrate-Artifacts.ps1` | Artifact feeds and packages (NuGet, npm, PyPI, Maven, Universal), upstreams and permissions. `-SkipArtifacts` for a feed-only sync, `-Inventory` for read-only discovery |
+| `Update-WikiWorkItemLinks.ps1` | Repoints wiki work item links through `Custom.ReflectedWorkItemId`. Preview by default, `-Commit` to write, never pushes |
+| `Update-CommentAttachmentLinks.ps1` | Migrates attachments referenced by **markdown** links in work item comments (the migration fixes HTML, not markdown) and rewrites the comments. Heals comments left html-flagged or escaped by the convert-to-markdown button. Preview by default; `[n/total]` progress with rate and ETA; a `-Commit` run checkpoints and resumes (`-Restart` starts over) |
+| `Set-WorkItemStartId.ps1` | Advances an organisation's work item ID counter by creating and permanently destroying throwaway items, so migrated ids line up with the source |
 
 ## Memory
 
