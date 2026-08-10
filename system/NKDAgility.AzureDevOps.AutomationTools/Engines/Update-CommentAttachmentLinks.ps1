@@ -26,7 +26,10 @@
     anything or editing any comment. Pass -Commit to perform the migration.
     Comments are updated via the comments REST API, which preserves the
     original author but stamps the comment as modified by the identity behind
-    the token - the same trade the migration itself already made.
+    the token - the same trade the migration itself already made. The comment's
+    format (markdown or html) is preserved via the API's format QUERY parameter;
+    the update body only carries text, and PATCHing without the parameter saves
+    the comment as html regardless of what it was.
 
     Attachments whose download fails (deleted at source, source already gone,
     permissions) are reported in the unresolved CSV and their links are left
@@ -67,6 +70,15 @@
     run, timestamped: *-comment-attachment-changes.csv and
     *-comment-attachment-unresolved.csv.
 
+.PARAMETER RepairFormatCsv
+    Remedial mode for runs made BEFORE the format fix, which saved markdown
+    comments back as html (text intact, but the UI renders the markdown syntax
+    literally). Pass that run's *-comment-attachment-changes.csv: each comment
+    it lists is re-marked as markdown with its current text. Comments whose
+    text contains HTML tags are skipped for hand review - they may genuinely
+    have been html. Preview by default; -Commit applies. No links are scanned
+    or attachments moved in this mode.
+
 .EXAMPLE
     .\Update-CommentAttachmentLinks.ps1 -SourceOrgUrl https://dev.azure.com/georgfischer `
         -TargetOrgUrl https://dev.azure.com/machining -TargetProject UM-MIKRON-Milling
@@ -79,6 +91,13 @@
         -WorkItemId 1204, 1381 -Commit
 
     Migrate and rewrite on two known-affected work items first.
+
+.EXAMPLE
+    .\Update-CommentAttachmentLinks.ps1 -SourceOrgUrl https://dev.azure.com/georgfischer `
+        -TargetOrgUrl https://dev.azure.com/machining -TargetProject UM-S3R-WSM `
+        -RepairFormatCsv .\output\20260810-120000-comment-attachment-changes.csv -Commit
+
+    Restore markdown format on comments a pre-fix run saved as html.
 #>
 [CmdletBinding()]
 param(
@@ -100,7 +119,12 @@ param(
 
     [switch]$Commit,
 
-    [string]$OutputFolder = (Join-Path (Get-Location).Path 'output')
+    [string]$OutputFolder = (Join-Path (Get-Location).Path 'output'),
+
+    # Remedial mode: a changes CSV from a run made BEFORE the format fix, whose comment
+    # edits saved markdown comments back as html. Re-marks those comments as markdown
+    # (same text, format=markdown) instead of scanning for links. See .PARAMETER help.
+    [string]$RepairFormatCsv
 )
 
 $ErrorActionPreference = 'Stop'
@@ -169,6 +193,28 @@ function Invoke-AdoRest {
     }
 }
 
+function Get-CommentFormat {
+    # The comment's format as the API reports it (markdown | html). Comments predating
+    # the markdown feature may not carry the property; they are html.
+    param($Comment)
+    if ($Comment.PSObject.Properties['format'] -and $Comment.format) { [string]$Comment.format } else { 'html' }
+}
+
+function Set-TargetComment {
+    # PATCH a comment preserving its format. The CommentUpdate body carries ONLY text;
+    # format goes as a QUERY parameter ('Update Work Item Comment'), and omitting it
+    # saves the comment as html - which is precisely the bug this engine exists to fix,
+    # re-inflicted on the comment's own rendering.
+    param(
+        [int]$Id,
+        [int]$CommentId,
+        [string]$Text,
+        [ValidateSet('markdown', 'html')] [string]$Format
+    )
+    $uri = "$targetBase/_apis/wit/workItems/$Id/comments/$CommentId`?format=$Format&api-version=7.1-preview.4"
+    Invoke-AdoRest -Uri $uri -Headers $targetHeaders -Method Patch -Body (@{ text = $Text } | ConvertTo-Json) | Out-Null
+}
+
 # ─── Setup ───────────────────────────────────────────────────────────────────
 
 $sourceOrg = Get-OrgName -Url $SourceOrgUrl
@@ -191,6 +237,48 @@ $unresolvedCsv = Join-Path $OutputFolder "$stamp-comment-attachment-unresolved.c
 
 $mode = if ($Commit) { 'COMMIT' } else { 'PREVIEW (no uploads, no comment edits - pass -Commit to apply)' }
 Write-Host "==> Comment attachment link fix: $sourceOrg -> $targetOrg/$TargetProject  [$mode]" -ForegroundColor Cyan
+
+# ─── Remedial mode: restore markdown format flipped by a pre-fix run ─────────
+# An earlier version of this engine PATCHed comments without the format query
+# parameter, which saves a markdown comment back as html: the text is fine but the
+# UI renders the markdown syntax literally until someone clicks convert-to-markdown.
+# Given that run's changes CSV, re-mark those comments. Guard: a comment whose text
+# contains HTML tags is skipped - it may genuinely have been html, and re-marking it
+# markdown would mangle it; those few are for eyes, not automation.
+if ($RepairFormatCsv) {
+    if (-not (Test-Path -LiteralPath $RepairFormatCsv)) { throw "Changes CSV not found: $RepairFormatCsv" }
+    $rows = Import-Csv -LiteralPath $RepairFormatCsv |
+        Where-Object { $_.WorkItemId -and $_.CommentId } |
+        Group-Object WorkItemId, CommentId | ForEach-Object { $_.Group[0] }
+    Write-Host "==> Format repair: $(@($rows).Count) comment(s) from $RepairFormatCsv" -ForegroundColor Cyan
+
+    $repaired = 0; $skipped = 0
+    foreach ($row in $rows) {
+        $wi = [int]$row.WorkItemId; $cid = [int]$row.CommentId
+        $comment = Invoke-AdoRest -Uri "$targetBase/_apis/wit/workItems/$wi/comments/$cid`?api-version=7.1-preview.4" -Headers $targetHeaders
+        $format = Get-CommentFormat $comment
+        if ($format -eq 'markdown') {
+            Write-Host "  WI $wi comment ${cid}: already markdown - nothing to do" -ForegroundColor DarkGray
+            continue
+        }
+        if ([string]$comment.text -match '(?i)<(?:div|p|br|span|a|img|table|ul|ol|li)\b') {
+            $skipped++
+            Write-Warning "WI $wi comment ${cid}: text contains HTML tags; may genuinely be html - review it by hand."
+            continue
+        }
+        $repaired++
+        Write-Host "  WI $wi comment ${cid}: html -> markdown" -ForegroundColor DarkGray
+        if ($Commit) {
+            Set-TargetComment -Id $wi -CommentId $cid -Text ([string]$comment.text) -Format 'markdown'
+        }
+    }
+    $verb = if ($Commit) { 're-marked' } else { 'would re-mark' }
+    Write-Host "==> Format repair: $verb $repaired comment(s) as markdown; $skipped skipped for hand review." -ForegroundColor $(if ($skipped) { 'Yellow' } else { 'Green' })
+    if (-not $Commit -and $repaired) {
+        Write-Host '    Preview only - re-run with -Commit to apply.' -ForegroundColor Yellow
+    }
+    return
+}
 
 # ─── 1. Work items with comments ─────────────────────────────────────────────
 
@@ -294,6 +382,7 @@ foreach ($id in $ids) {
             $changes.Add([pscustomobject]@{
                     WorkItemId = $id; CommentId = $comment.id; FileName = $fileName
                     SourceUrl = $sourceUrl; TargetUrl = $newUrl
+                    CommentFormat = (Get-CommentFormat $comment)
                     Applied = [bool]$Commit
                 })
         }
@@ -302,11 +391,7 @@ foreach ($id in $ids) {
             $editedComments++
             Write-Host ("  WI {0} comment {1}: {2} link(s)" -f $id, $comment.id, $rewrittenHere) -ForegroundColor DarkGray
             if ($Commit) {
-                # format is preserved when the API reports it (markdown comments do).
-                $body = @{ text = $newText }
-                if ($comment.PSObject.Properties['format'] -and $comment.format) { $body.format = $comment.format }
-                Invoke-AdoRest -Uri "$targetBase/_apis/wit/workItems/$id/comments/$($comment.id)?api-version=7.1-preview.4" `
-                    -Headers $targetHeaders -Method Patch -Body ($body | ConvertTo-Json) | Out-Null
+                Set-TargetComment -Id $id -CommentId $comment.id -Text $newText -Format (Get-CommentFormat $comment)
             }
         }
     }
