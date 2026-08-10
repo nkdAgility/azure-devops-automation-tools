@@ -1,4 +1,4 @@
-function Rename-Field {
+function Rename-WitField {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]

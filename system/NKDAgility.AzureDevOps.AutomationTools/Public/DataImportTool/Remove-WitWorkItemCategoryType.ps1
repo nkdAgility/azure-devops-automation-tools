@@ -1,4 +1,4 @@
-function Remove-WorkItemCategoryType {
+function Remove-WitWorkItemCategoryType {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

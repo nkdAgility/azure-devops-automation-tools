@@ -1,4 +1,4 @@
-function Get-WorkItemTypeState {
+function Get-WitWorkItemTypeState {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,
@@ -8,7 +8,7 @@ function Get-WorkItemTypeState {
     )
 
     $executable = Resolve-WitAdminPath -WitAdminPath $WitAdminPath
-    $types = if ($WorkItemType) { @($WorkItemType) } else { Get-WorkItemType -Collection $Collection -Project $Project -WitAdminPath $executable }
+    $types = if ($WorkItemType) { @($WorkItemType) } else { Get-WitWorkItemType -Collection $Collection -Project $Project -WitAdminPath $executable }
     foreach ($type in $types) {
         $file = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).Witd.xml"
         try {

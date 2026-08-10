@@ -1,4 +1,4 @@
-function Find-GlobalWorkflowRuleScope {
+function Find-WitGlobalWorkflowRuleScope {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

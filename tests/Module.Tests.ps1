@@ -52,6 +52,48 @@ Describe 'Script files parse' {
     }
 }
 
+Describe 'Transport is visible in the command name' {
+
+    # The module talks to a collection two ways and will keep needing both, so a command
+    # name has to say which. witadmin commands carry a Wit noun-prefix
+    # (Get-WitWorkItemType); REST commands do not (Get-WorkItemLink). Without this you
+    # cannot tell from a runbook line whether it needs witadmin.exe on PATH and an
+    # on-premises collection, or a token and a Services organisation.
+
+    BeforeAll {
+        $script:PublicFiles = @(Get-ChildItem (Join-Path $script:ModuleRoot 'Public') -Filter *.ps1 -Recurse -File)
+        # Strip comment-based help and # comments so a doc mention is not a false positive.
+        $script:BodyOf = {
+            param($file)
+            (Get-Content -LiteralPath $file.FullName) -replace '^\s*#.*$', '' -join "`n" -replace '(?s)<#.*?#>', ''
+        }
+    }
+
+    It 'every witadmin command carries the Wit noun-prefix' {
+        $offenders = @($script:PublicFiles | Where-Object {
+                (& $script:BodyOf $_) -match 'Invoke-WitAdminFix|Resolve-WitAdminPath'
+            } | Where-Object { $_.BaseName -notmatch '^[A-Za-z]+-Wit' } | ForEach-Object BaseName)
+        $offenders -join ', ' | Should -BeNullOrEmpty -Because 'a command that shells out to witadmin.exe must be named <Verb>-Wit<Noun>'
+    }
+
+    It 'no REST command carries the Wit noun-prefix' {
+        $offenders = @($script:PublicFiles | Where-Object {
+                $body = & $script:BodyOf $_
+                $body -match 'Invoke-AzureDevOpsApi' -and $body -notmatch 'Invoke-WitAdminFix|Resolve-WitAdminPath'
+            } | Where-Object { $_.BaseName -match '^[A-Za-z]+-Wit' } | ForEach-Object BaseName)
+        $offenders -join ', ' | Should -BeNullOrEmpty -Because 'Wit means witadmin; a REST command must not claim it'
+    }
+
+    It 'keeps a working alias for every renamed witadmin command' {
+        Import-Module $script:ManifestPath -Force
+        foreach ($old in $script:Manifest.AliasesToExport) {
+            $alias = Get-Alias -Name $old -ErrorAction SilentlyContinue
+            $alias | Should -Not -BeNullOrEmpty -Because "'$old' is used by engagement runbooks written before the rename"
+            $alias.ResolvedCommand.Name | Should -Match '^[A-Za-z]+-Wit'
+        }
+    }
+}
+
 Describe 'Module is self-contained' {
 
     # The module is COPIED out of this repo into a client workspace's .system\ folder.

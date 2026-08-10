@@ -109,13 +109,13 @@ When lifting a TFS / Azure DevOps Server collection into Azure DevOps Services w
   ```
 
   `Set-MigrationContext` sets session defaults (collection, project, tool paths) so individual fix lines stay short. Task-level commands collapse whole runbook sections into one call per project: `Install-FeedbackWorkItemTypes` (work item types + categories prerequisites) followed by `Repair-ProcessConfiguration` (export → repair → import of `ProjectProcessConfiguration`, with state mappings as parameters). `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` wrap `Migrator.exe`. The primitives remain available for one-off fixes:
-  - `Rename-Field` — resolve collection-level field name conflicts with Azure DevOps Services.
-  - `Import-WorkItemTypeFile`, `Add-WorkItemCategory`, `Add-WorkItemCategoryType`, `Remove-WorkItemCategoryType`, `Copy-WorkItemType` — get work item types and categories into the shape ProcessConfiguration requires.
-  - `Export-ProcessConfigurationFixFile` / `Import-ProcessConfigurationFixFile` plus `Add-ProcessConfigurationElement`, `Add-ProcessConfigurationTypeField`, `Set-ProcessConfigurationAttribute`, `Set-ProcessConfigurationStates`, `Set-ProcessConfigurationColumns`, `Set-ProcessConfigurationAddPanel` — export a project's `ProjectProcessConfiguration`, repair the XML locally, and push it back.
-  - `Find-WitRuleScope`, `Find-GlobalWorkflowRuleScope`, `Remove-WitRuleScope`, `Remove-GlobalWorkflowRuleScope` — locate and remove AD-scoped field rules (VS237302).
+  - `Rename-WitField` — resolve collection-level field name conflicts with Azure DevOps Services.
+  - `Import-WitWorkItemTypeFile`, `Add-WitWorkItemCategory`, `Add-WitWorkItemCategoryType`, `Remove-WitWorkItemCategoryType`, `Copy-WitWorkItemType` — get work item types and categories into the shape ProcessConfiguration requires.
+  - `Export-WitProcessConfigurationFixFile` / `Import-WitProcessConfigurationFixFile` plus `Add-ProcessConfigurationElement`, `Add-ProcessConfigurationTypeField`, `Set-ProcessConfigurationAttribute`, `Set-ProcessConfigurationStates`, `Set-ProcessConfigurationColumns`, `Set-ProcessConfigurationAddPanel` — export a project's `ProjectProcessConfiguration`, repair the XML locally, and push it back.
+  - `Find-WitRuleScope`, `Find-WitGlobalWorkflowRuleScope`, `Remove-WitRuleScope`, `Remove-WitGlobalWorkflowRuleScope` — locate and remove AD-scoped field rules (VS237302).
   - `Remove-WitFieldRule` — strip unsupported field rules such as NOTSAMEAS / PROHIBITEDVALUES (TF402538).
-  - `Remove-WorkItemLinkType` — delete custom link types (TF402583). **Deleting a link type deletes every link of that type in the collection.**
-  - `Get-WorkItemType`, `Get-WorkItemTypeState` — inspection helpers used to verify state before applying fixes.
+  - `Remove-WitWorkItemLinkType` — delete custom link types (TF402583). **Deleting a link type deletes every link of that type in the collection.**
+  - `Get-WitWorkItemType`, `Get-WitWorkItemTypeState` — inspection helpers used to verify state before applying fixes.
 
 The fix functions are designed to be idempotent where possible — re-running a fix that is already applied reports "no change" instead of failing — so a runbook section can be re-run safely after a partial pass.
 

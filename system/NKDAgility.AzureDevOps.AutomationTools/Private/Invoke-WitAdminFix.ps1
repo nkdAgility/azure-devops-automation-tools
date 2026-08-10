@@ -11,7 +11,7 @@ function Invoke-WitAdminFix {
     Write-FixStep "witadmin $($Arguments -join ' ')"
     # Capture stdout/stderr rather than emitting it: callers use this for side
     # effects only, and witadmin chatter must not pollute the output stream of
-    # object-emitting functions like Get-WorkItemTypeState.
+    # object-emitting functions like Get-WitWorkItemTypeState.
     $output = & $executable @Arguments 2>&1
     foreach ($line in $output) {
         if ("$line".Trim()) { Write-FixStep "  $line" }

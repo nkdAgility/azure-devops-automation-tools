@@ -6,12 +6,12 @@ function Set-MigrationContext {
     .DESCRIPTION
     Values are applied via $Global:PSDefaultParameterValues so runbook lines do not need to
     repeat -Collection etc. on every call. -Project is only defaulted on commands where it
-    is mandatory, so commands with an optional -Project (e.g. Find-GlobalWorkflowRuleScope)
+    is mandatory, so commands with an optional -Project (e.g. Find-WitGlobalWorkflowRuleScope)
     keep their collection-scope behaviour unless -Project is passed explicitly.
 
     .EXAMPLE
     Set-MigrationContext -Collection 'http://tfs:8080/tfs/DefaultCollection/' -MigratorPath 'C:\tools\DataMigrationTool\Migrator.exe'
-    Rename-Field -ReferenceName 'System.AreaId' -NewName 'Area ID'
+    Rename-WitField -ReferenceName 'System.AreaId' -NewName 'Area ID'
     #>
     [CmdletBinding()]
     param(

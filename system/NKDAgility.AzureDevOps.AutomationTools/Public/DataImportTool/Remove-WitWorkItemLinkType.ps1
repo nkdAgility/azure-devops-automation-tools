@@ -1,4 +1,4 @@
-function Remove-WorkItemLinkType {
+function Remove-WitWorkItemLinkType {
     <#
     .SYNOPSIS
     Deletes a custom work item link type from the collection, recording its links first.
@@ -29,10 +29,10 @@ function Remove-WorkItemLinkType {
     identity, which is the normal case on-premises.
 
     .EXAMPLE
-    Remove-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects'
+    Remove-WitWorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects'
 
     .EXAMPLE
-    Remove-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects' -ExportPath "$snapshot\json\affects-links.json"
+    Remove-WitWorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects' -ExportPath "$snapshot\json\affects-links.json"
     #>
     [CmdletBinding()]
     param(

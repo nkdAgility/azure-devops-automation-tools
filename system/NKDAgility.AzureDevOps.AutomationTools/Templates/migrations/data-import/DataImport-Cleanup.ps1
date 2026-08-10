@@ -30,7 +30,7 @@ Set-MigrationContext -Collection $collection -CheckpointPath $checkpointPath
 # ===========================================================================
 # Write-FixSection '1. Example: rename a conflicting field (TF400526)'
 # Invoke-FixStep -Name 'rename-System.AreaId' -Action {
-#     Rename-Field -ReferenceName 'System.AreaId' -NewName 'Area ID'
+#     Rename-WitField -ReferenceName 'System.AreaId' -NewName 'Area ID'
 # } -Verify {
 #     # return $true when the fix is confirmed on the server
 # }
@@ -52,7 +52,7 @@ Set-MigrationContext -Collection $collection -CheckpointPath $checkpointPath
 # # Destructive. Inventories each type to the export snapshot first, and
 # # refuses to delete if that export fails.
 # Invoke-FixStep -Name 'remove-linktype-Custom.Affects' -Action {
-#     Remove-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects'
+#     Remove-WitWorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects'
 # } -Verify {
 #     -not (Get-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects')
 # }

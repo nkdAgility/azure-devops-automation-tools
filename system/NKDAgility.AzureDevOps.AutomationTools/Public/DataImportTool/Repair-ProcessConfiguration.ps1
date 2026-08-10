@@ -9,14 +9,14 @@ function Repair-ProcessConfiguration {
     Wraps the full export -> edit -> import sequence that otherwise takes ~40 runbook
     lines per project. The state mappings default to an Agile-derived set; they MUST match
     the actual workflow states of the project's work item types or witadmin will reject
-    the import - check with Get-WorkItemTypeState first and override -RequirementStates /
+    the import - check with Get-WitWorkItemTypeState first and override -RequirementStates /
     -TaskStates where they differ.
 
     Run Install-FeedbackWorkItemTypes for the project first: the feedback categories
     referenced here must already exist.
 
     Use -SkipImport to stop after editing the local XML so it can be reviewed before
-    pushing it back with Import-ProcessConfigurationFixFile.
+    pushing it back with Import-WitProcessConfigurationFixFile.
     #>
     [CmdletBinding()]
     param(
@@ -45,7 +45,7 @@ function Repair-ProcessConfiguration {
     )
 
     Write-FixStep "Repairing process configuration for '$Project' via '$Path'"
-    Export-ProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $Path -WitAdminPath $WitAdminPath
+    Export-WitProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $Path -WitAdminPath $WitAdminPath
 
     # TypeFields (refnames taken from the OOB Agile template)
     Add-ProcessConfigurationElement -Path $Path -ParentXPath '/ProjectProcessConfiguration' -ElementName 'TypeFields'
@@ -107,16 +107,16 @@ function Repair-ProcessConfiguration {
     )
 
     if ($SkipImport) {
-        Write-FixStep "SkipImport set - review '$Path' then run Import-ProcessConfigurationFixFile to apply it"
+        Write-FixStep "SkipImport set - review '$Path' then run Import-WitProcessConfigurationFixFile to apply it"
         return
     }
-    Import-ProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $Path -WitAdminPath $WitAdminPath
+    Import-WitProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $Path -WitAdminPath $WitAdminPath
 
     # Verify the server retained the repair rather than silently discarding
     # elements: re-export and check the pieces this function is responsible for.
     $verifyFile = Join-Path ([System.IO.Path]::GetTempPath()) "$([guid]::NewGuid()).ProcessConfig.xml"
     try {
-        Export-ProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $verifyFile -WitAdminPath $WitAdminPath
+        Export-WitProcessConfigurationFixFile -Collection $Collection -Project $Project -Path $verifyFile -WitAdminPath $WitAdminPath
         $verify = [xml](Get-Content -LiteralPath $verifyFile -Raw)
         $missing = @(
             if (-not $verify.SelectSingleNode('/ProjectProcessConfiguration/TypeFields/TypeField')) { 'TypeFields' }

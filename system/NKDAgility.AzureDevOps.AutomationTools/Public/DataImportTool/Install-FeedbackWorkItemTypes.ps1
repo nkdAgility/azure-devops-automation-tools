@@ -32,22 +32,22 @@ function Install-FeedbackWorkItemTypes {
     }
 
     Write-FixStep "Installing feedback work item types and categories in '$Project'"
-    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.TaskCategory' -Name 'Task Category' -DefaultWorkItemType 'Task' -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.TaskCategory' -Name 'Task Category' -DefaultWorkItemType 'Task' -WitAdminPath $WitAdminPath
     # The RequirementCategory is required by the process configuration import and
     # is absent from some projects (observed: sparse Scrum-derived category files).
-    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.RequirementCategory' -Name 'Requirement Category' -DefaultWorkItemType $RequirementWorkItemType -WitAdminPath $WitAdminPath
-    Import-WorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackRequest.xml') -WitAdminPath $WitAdminPath
-    Import-WorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackResponse.xml') -WitAdminPath $WitAdminPath
-    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackRequestCategory' -Name 'Feedback Request Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
-    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackResponseCategory' -Name 'Feedback Response Category' -DefaultWorkItemType 'Feedback Response' -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.RequirementCategory' -Name 'Requirement Category' -DefaultWorkItemType $RequirementWorkItemType -WitAdminPath $WitAdminPath
+    Import-WitWorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackRequest.xml') -WitAdminPath $WitAdminPath
+    Import-WitWorkItemTypeFile -Collection $Collection -Project $Project -Path (Join-Path $TypeDefinitionsPath 'FeedbackResponse.xml') -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackRequestCategory' -Name 'Feedback Request Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.FeedbackResponseCategory' -Name 'Feedback Response Category' -DefaultWorkItemType 'Feedback Response' -WitAdminPath $WitAdminPath
     # Some projects lack Microsoft.HiddenCategory entirely (observed: MatteR4orn).
     # Create it if missing; 'Feedback Request' was imported above so it always
     # exists here, and it is a hidden type in the OOB template. Projects that
     # already have the category keep their existing default type.
-    Add-WorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -Name 'Hidden Types Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
-    Add-WorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -WorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
-    Add-WorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -WorkItemType 'Feedback Response' -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategory -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -Name 'Hidden Types Category' -DefaultWorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -WorkItemType 'Feedback Request' -WitAdminPath $WitAdminPath
+    Add-WitWorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.HiddenCategory' -WorkItemType 'Feedback Response' -WitAdminPath $WitAdminPath
     if (-not $KeepBugInRequirementCategory) {
-        Remove-WorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.RequirementCategory' -WorkItemType 'Bug' -WitAdminPath $WitAdminPath
+        Remove-WitWorkItemCategoryType -Collection $Collection -Project $Project -ReferenceName 'Microsoft.RequirementCategory' -WorkItemType 'Bug' -WitAdminPath $WitAdminPath
     }
 }

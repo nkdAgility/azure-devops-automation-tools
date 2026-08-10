@@ -1,4 +1,4 @@
-function Copy-WorkItemType {
+function Copy-WitWorkItemType {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

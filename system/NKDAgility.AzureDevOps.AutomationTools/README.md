@@ -11,7 +11,7 @@ Import-Module .\system\NKDAgility.AzureDevOps.AutomationTools -Force
 Set-MigrationContext -Collection 'http://tfs:8080/tfs/DefaultCollection/' -MigratorPath 'C:\tools\DataMigrationTool\Migrator.exe'
 ```
 
-`Set-MigrationContext` stores session defaults and applies them via `$Global:PSDefaultParameterValues`, so subsequent calls don't need to repeat `-Collection` etc. `-Project` is only defaulted on commands where it is mandatory, so commands with an optional `-Project` (e.g. `Find-GlobalWorkflowRuleScope`) keep collection scope unless told otherwise. `Clear-MigrationContext` undoes it.
+`Set-MigrationContext` stores session defaults and applies them via `$Global:PSDefaultParameterValues`, so subsequent calls don't need to repeat `-Collection` etc. `-Project` is only defaulted on commands where it is mandatory, so commands with an optional `-Project` (e.g. `Find-WitGlobalWorkflowRuleScope`) keep collection scope unless told otherwise. `Clear-MigrationContext` undoes it.
 
 Typical per-project fix sequence, wrapped in checkpointed steps so each action is validated once and skipped on re-run:
 
@@ -22,12 +22,12 @@ Set-MigrationContext -CheckpointPath '.\data\debug\DataImportTools\fix-steps.che
 Get-DataImportValidationSummary -Path '.\data\debug\DataImportTools\output\Logs\MyCollection' | Select-Object -Expand Projects
 
 # Check the actual workflow states first - Repair-ProcessConfiguration's defaults must match them
-Get-WorkItemTypeState -Project 'MyProject' -WorkItemType 'User Story' | Format-Table -AutoSize
-Get-WorkItemTypeState -Project 'MyProject' -WorkItemType 'Task' | Format-Table -AutoSize
+Get-WitWorkItemTypeState -Project 'MyProject' -WorkItemType 'User Story' | Format-Table -AutoSize
+Get-WitWorkItemTypeState -Project 'MyProject' -WorkItemType 'Task' | Format-Table -AutoSize
 
 Invoke-FixStep -Name 'myproject-feedback-types' -Action {
     Install-FeedbackWorkItemTypes -Project 'MyProject' -TypeDefinitionsPath '..\process-customization-scripts\Import\Agile\WorkItem Tracking\TypeDefinitions'
-} -Verify { (Get-WorkItemType -Project 'MyProject') -contains 'Feedback Request' }
+} -Verify { (Get-WitWorkItemType -Project 'MyProject') -contains 'Feedback Request' }
 
 Invoke-FixStep -Name 'myproject-process-config' -Action {
     Repair-ProcessConfiguration -Project 'MyProject' -Path '.\fix-work\MyProject.ProcessConfiguration.xml'

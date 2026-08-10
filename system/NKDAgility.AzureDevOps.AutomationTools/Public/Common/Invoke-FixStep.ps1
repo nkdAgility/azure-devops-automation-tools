@@ -18,7 +18,7 @@ function Invoke-FixStep {
     Invoke-FixStep -Name 'myproject-feedback-types' -Action {
         Install-FeedbackWorkItemTypes -Project 'MyProject' -TypeDefinitionsPath $agileTypeDefinitions
     } -Verify {
-        (Get-WorkItemType -Project 'MyProject') -contains 'Feedback Request'
+        (Get-WitWorkItemType -Project 'MyProject') -contains 'Feedback Request'
     }
     #>
     [CmdletBinding()]

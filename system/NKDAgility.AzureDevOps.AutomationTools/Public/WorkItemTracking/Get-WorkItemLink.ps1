@@ -9,7 +9,7 @@ function Get-WorkItemLink {
     recovered from the source work item's relations in the same pass.
 
     Defaults to every CUSTOM link type in the collection, which is exactly the set
-    Remove-WorkItemLinkType destroys. Only forward ends are queried, so each link is reported
+    Remove-WitWorkItemLinkType destroys. Only forward ends are queried, so each link is reported
     once.
     .PARAMETER UseDefaultCredentials
     Authenticate as the process identity instead of Entra. Required for on-premises

@@ -66,8 +66,8 @@ Cleanup runbooks are executed **selection-by-selection in VS Code, not top-to-bo
 
 The module's fix functions come in two layers:
 
-- **Primitives** (`Rename-Field`, `Remove-WitFieldRule`, `Set-ProcessConfigurationStates`, …) shell out to `witadmin.exe` (located via the private `Resolve-WitAdminPath`) or edit exported XML locally before re-importing.
-- **Task-level commands** compose primitives into one call per project: `Install-FeedbackWorkItemTypes` (types + categories, TF400526/TF400517 prerequisites) then `Repair-ProcessConfiguration` (export → TypeFields/backlogs/feedback → import; state mappings are parameters — verify against `Get-WorkItemTypeState` before running).
+- **Primitives** (`Rename-WitField`, `Remove-WitFieldRule`, `Set-ProcessConfigurationStates`, …) shell out to `witadmin.exe` (located via the private `Resolve-WitAdminPath`) or edit exported XML locally before re-importing.
+- **Task-level commands** compose primitives into one call per project: `Install-FeedbackWorkItemTypes` (types + categories, TF400526/TF400517 prerequisites) then `Repair-ProcessConfiguration` (export → TypeFields/backlogs/feedback → import; state mappings are parameters — verify against `Get-WitWorkItemTypeState` before running).
 
 `Set-MigrationContext -Collection … -Project …` sets session defaults via `$Global:PSDefaultParameterValues` so runbook lines don't repeat `-Collection`; `-Project` is only defaulted on commands where it is mandatory. `Clear-MigrationContext` undoes it.
 
@@ -75,7 +75,7 @@ The module's fix functions come in two layers:
 
 **Reference originals:** Microsoft's [process-customization-scripts](https://github.com/Microsoft/process-customization-scripts) repo (cloned as a sibling of this repo, referenced by runbooks as `..\process-customization-scripts`) holds the OOB template shapes the Data Import Tool validates against; its `Export\ExportProjectTemplate.ps1` exports a project the way the migrator sees it for diffing. Fix values (TypeFields, categories, feedback states) come from there. Change the minimum needed to pass validation — preserve the customer's customisations; never wholesale-replace customised definitions with OOB ones.
 
-**Custom link types are destructive to remove.** `witadmin deletelinktype` deletes every link of the type along with the definition, and the relationships cannot be recovered. `Remove-WorkItemLinkType` therefore calls `Export-WorkItemLinkInventory` first and refuses to delete if that export fails (`-NoExport` overrides). The inventory is written as a `.json` record plus a readable `.csv` sibling into the export snapshot — it is both the customer conversation and the basis for re-creating the links as related links after the import.
+**Custom link types are destructive to remove.** `witadmin deletelinktype` deletes every link of the type along with the definition, and the relationships cannot be recovered. `Remove-WitWorkItemLinkType` therefore calls `Export-WorkItemLinkInventory` first and refuses to delete if that export fails (`-NoExport` overrides). The inventory is written as a `.json` record plus a readable `.csv` sibling into the export snapshot — it is both the customer conversation and the basis for re-creating the links as related links after the import.
 
 Keep new fix functions in the same style: Verb-Noun names, one function per file under `Public/`, idempotent where possible (report "no change" rather than throwing when the fix is already applied), and add each new public function to `FunctionsToExport` in the `.psd1`.
 
@@ -174,7 +174,7 @@ The module talks to collections two ways, and each has one private invoker that 
 | Public folder | `Public/DataImportTool` | `Public/WorkItemTracking` |
 | Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries |
 
-`Public/` folders group by **what a command is for**, not by transport — the transport is an implementation detail behind the invoker. `Public/WorkItemTracking` is separate from `Public/DataImportTool` because reading work items and links is useful to every toolchain (a link inventory is as relevant when verifying an Azure DevOps Migration Tools run as when clearing a collection for the Data Import Tool), whereas `DataImportTool` is specifically the Migrator.exe/witadmin fix workflow. A command that composes both — like `Remove-WorkItemLinkType`, which inventories over REST then deletes with witadmin — belongs to the workflow it serves.
+`Public/` folders group by **what a command is for**, not by transport — the transport is an implementation detail behind the invoker. `Public/WorkItemTracking` is separate from `Public/DataImportTool` because reading work items and links is useful to every toolchain (a link inventory is as relevant when verifying an Azure DevOps Migration Tools run as when clearing a collection for the Data Import Tool), whereas `DataImportTool` is specifically the Migrator.exe/witadmin fix workflow. A command that composes both — like `Remove-WitWorkItemLinkType`, which inventories over REST then deletes with witadmin — belongs to the workflow it serves.
 
 REST commands default to `api-version=5.0`: the Data Import Tool runs against Azure DevOps Server, and 5.0 is available on every supported server version, unlike the `$queryString` 7.x defaults used for Services organisations.
 

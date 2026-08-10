@@ -10,7 +10,7 @@ function Get-WorkItemLinkType {
     only (IsReverse = $false) to avoid reporting every link twice.
 
     A link type is treated as custom when its reference name is not in the System or Microsoft
-    namespace. Those are the ones the Data Import Tool rejects and Remove-WorkItemLinkType
+    namespace. Those are the ones the Data Import Tool rejects and Remove-WitWorkItemLinkType
     deletes, taking every link of that type with them.
 
     Only relation types whose usage is 'workItemLink' are returned; attachment, hyperlink and

@@ -1,4 +1,4 @@
-function Export-ProcessConfigurationFixFile {
+function Export-WitProcessConfigurationFixFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

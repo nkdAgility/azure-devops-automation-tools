@@ -38,10 +38,10 @@
         'Install-FeedbackWorkItemTypes'
         'Repair-ProcessConfiguration'
         # DataImportTool - fields
-        'Rename-Field'
+        'Rename-WitField'
         # DataImportTool - process configuration XML
-        'Export-ProcessConfigurationFixFile'
-        'Import-ProcessConfigurationFixFile'
+        'Export-WitProcessConfigurationFixFile'
+        'Import-WitProcessConfigurationFixFile'
         'Update-ProcessConfigurationFixFile'
         'Add-ProcessConfigurationElement'
         'Set-ProcessConfigurationAttribute'
@@ -50,20 +50,20 @@
         'Set-ProcessConfigurationColumns'
         'Set-ProcessConfigurationAddPanel'
         # DataImportTool - work item types and categories
-        'Get-WorkItemType'
-        'Get-WorkItemTypeState'
-        'Copy-WorkItemType'
-        'Import-WorkItemTypeFile'
-        'Add-WorkItemCategory'
-        'Add-WorkItemCategoryType'
-        'Remove-WorkItemCategoryType'
+        'Get-WitWorkItemType'
+        'Get-WitWorkItemTypeState'
+        'Copy-WitWorkItemType'
+        'Import-WitWorkItemTypeFile'
+        'Add-WitWorkItemCategory'
+        'Add-WitWorkItemCategoryType'
+        'Remove-WitWorkItemCategoryType'
         # DataImportTool - rules and link types
         'Find-WitRuleScope'
-        'Find-GlobalWorkflowRuleScope'
+        'Find-WitGlobalWorkflowRuleScope'
         'Remove-WitRuleScope'
-        'Remove-GlobalWorkflowRuleScope'
+        'Remove-WitGlobalWorkflowRuleScope'
         'Remove-WitFieldRule'
-        'Remove-WorkItemLinkType'
+        'Remove-WitWorkItemLinkType'
         # WorkItemTracking - REST
         'Get-WorkItemLinkType'
         'Get-WorkItemLink'
@@ -71,7 +71,22 @@
     )
     CmdletsToExport   = @()
     VariablesToExport = @()
-    AliasesToExport   = @()
+    AliasesToExport   = @(
+        # Pre-Wit-prefix names, kept so existing engagement runbooks keep working.
+        'Add-WorkItemCategory'
+        'Add-WorkItemCategoryType'
+        'Copy-WorkItemType'
+        'Get-WorkItemType'
+        'Get-WorkItemTypeState'
+        'Import-WorkItemTypeFile'
+        'Remove-WorkItemCategoryType'
+        'Remove-WorkItemLinkType'
+        'Rename-Field'
+        'Find-GlobalWorkflowRuleScope'
+        'Remove-GlobalWorkflowRuleScope'
+        'Export-ProcessConfigurationFixFile'
+        'Import-ProcessConfigurationFixFile'
+    )
     PrivateData       = @{
         PSData = @{
             Tags       = @('AzureDevOps', 'Migration', 'DataImportTool', 'witadmin')

@@ -23,7 +23,7 @@ in a fresh clone. Never rely on the managed block below for a safety rule.
 - **Selection-by-selection.** `DataImport-Cleanup.ps1` and its siblings are run one
   section at a time in VS Code, never top-to-bottom. Preserve their sectioned structure.
 - **Custom link type deletion is irreversible.** `witadmin deletelinktype` destroys every
-  link of that type along with the definition. `Remove-WorkItemLinkType` inventories
+  link of that type along with the definition. `Remove-WitWorkItemLinkType` inventories
   first for a reason; never pass `-NoExport` to make an error go away.
 - **Secrets.** `secrets/secrets.json` is gitignored and must stay so. Never print, log,
   echo or commit a PAT; never add a `pat` value to `data/organisations.json`. When

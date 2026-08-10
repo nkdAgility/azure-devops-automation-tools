@@ -1,4 +1,4 @@
-function Get-WorkItemType {
+function Get-WitWorkItemType {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

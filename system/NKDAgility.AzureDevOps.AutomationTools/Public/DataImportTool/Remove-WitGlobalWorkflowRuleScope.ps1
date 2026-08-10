@@ -1,4 +1,4 @@
-function Remove-GlobalWorkflowRuleScope {
+function Remove-WitGlobalWorkflowRuleScope {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

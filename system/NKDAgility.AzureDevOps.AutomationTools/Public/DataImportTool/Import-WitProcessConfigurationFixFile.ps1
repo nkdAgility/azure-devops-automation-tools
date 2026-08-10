@@ -1,4 +1,4 @@
-function Import-ProcessConfigurationFixFile {
+function Import-WitProcessConfigurationFixFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

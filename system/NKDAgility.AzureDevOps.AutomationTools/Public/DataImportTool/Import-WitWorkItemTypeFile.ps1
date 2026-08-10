@@ -1,4 +1,4 @@
-function Import-WorkItemTypeFile {
+function Import-WitWorkItemTypeFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,

@@ -25,7 +25,7 @@ yours to edit; the template never overwrites them again.
   constraints.
 - **`Migration Tools` / `Platform` engagements: run `Sync.ps1 -WhatIf` first, always.**
 - **Custom link type deletion is irreversible.** `witadmin deletelinktype` destroys every
-  link of that type along with the definition. `Remove-WorkItemLinkType` inventories over
+  link of that type along with the definition. `Remove-WitWorkItemLinkType` inventories over
   REST first and refuses to delete if that export fails; `-NoExport` exists for the case
   where you have already captured the inventory, not to make an error go away.
 - **Exports are pristine.** Never modify anything under `exports/`. Edit copies in the
@@ -48,7 +48,7 @@ not repeat them; `Clear-MigrationContext` undoes it.
 
 Microsoft's `process-customization-scripts` repo holds the out-of-box template shapes the
 Data Import Tool validates against. Fix values — TypeFields, categories, feedback states —
-come from there. Verify state mappings against `Get-WorkItemTypeState` before running
+come from there. Verify state mappings against `Get-WitWorkItemTypeState` before running
 `Repair-ProcessConfiguration`.
 
 ### Transports

@@ -1,4 +1,4 @@
-function Add-WorkItemCategory {
+function Add-WitWorkItemCategory {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Collection,
