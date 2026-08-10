@@ -65,6 +65,7 @@
         'Remove-WitFieldRule'
         'Remove-WitWorkItemLinkType'
         # WorkItemTracking - REST
+        'Get-WorkItemType'
         'Get-WorkItemLinkType'
         'Get-WorkItemLink'
         'Export-WorkItemLinkInventory'
@@ -76,7 +77,6 @@
         'Add-WorkItemCategory'
         'Add-WorkItemCategoryType'
         'Copy-WorkItemType'
-        'Get-WorkItemType'
         'Get-WorkItemTypeState'
         'Import-WorkItemTypeFile'
         'Remove-WorkItemCategoryType'

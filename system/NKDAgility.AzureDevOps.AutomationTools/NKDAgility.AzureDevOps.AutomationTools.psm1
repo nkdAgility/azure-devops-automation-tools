@@ -16,11 +16,13 @@ foreach ($file in ($private + $public)) {
 # working: a client workspace pins nothing, so the next init.ps1 hands them this module.
 # New code should use the Wit names - the prefix is what says "this shells out to
 # witadmin.exe" rather than going over REST.
+# NOTE: 'Get-WorkItemType' is deliberately NOT aliased here. That name now belongs to
+# the REST command of the same name; aliasing it would silently send a runbook line to
+# a different transport. Callers that meant witadmin were updated to Get-WitWorkItemType.
 $script:WitAliases = @{
     'Add-WorkItemCategory'               = 'Add-WitWorkItemCategory'
     'Add-WorkItemCategoryType'           = 'Add-WitWorkItemCategoryType'
     'Copy-WorkItemType'                  = 'Copy-WitWorkItemType'
-    'Get-WorkItemType'                   = 'Get-WitWorkItemType'
     'Get-WorkItemTypeState'              = 'Get-WitWorkItemTypeState'
     'Import-WorkItemTypeFile'            = 'Import-WitWorkItemTypeFile'
     'Remove-WorkItemCategoryType'        = 'Remove-WitWorkItemCategoryType'

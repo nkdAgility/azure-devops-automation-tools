@@ -78,6 +78,31 @@
     LFS objects from the source and pushes them to the target (which also
     backfills previously migrated repos). Use this to migrate refs only.
 
+.PARAMETER SkipWiki
+    Skip migrating the source project's provisioned project wiki. By default the
+    wiki is migrated: a project wiki is backed by its own Git repository that is
+    NOT returned by the repositories API, so it is discovered via the Wiki API
+    and provisioned on the target the same way (which creates its backing repo).
+    Its history is force-pushed to replace the placeholder home page that
+    provisioning creates. Code wikis (published from an existing code repo) are
+    migrated as ordinary repos and are not affected by this switch.
+
+.PARAMETER SkipWikiLinkRewrite
+    Skip rewriting Azure DevOps work item URLs inside the wiki. By default, when
+    a project wiki is migrated its markdown is scanned for work item links of
+    the form 'https://dev.azure.com/<org>/<project>/_workitems/edit/<id>'
+    pointing at the source. Because the work item migration assigns NEW ids in
+    the target, each source id is resolved to its target id via the target work
+    items' Custom.ReflectedWorkItemId field (which records the original source
+    reference), and both the org/project and the id are rewritten. Links whose
+    target work item cannot be resolved (e.g. the wiki is migrated before the
+    work items) are left unchanged so a later re-run can fix them. Use this
+    switch to migrate the wiki verbatim without touching its links.
+
+    PATs: in a customer workspace, run Set-AutomationSecrets (from the
+    NKDAgility.AzureDevOps.AutomationTools module) first and reference tokens
+    as $ENV:AZDO_PAT_<ORG> in the per-migration config.
+
 .EXAMPLE
     .\Migrate-Repos.ps1 `
         -SourceOrg https://dev.azure.com/contoso-source -SourcePat $srcPat -SourceProject "Payments" `
@@ -96,10 +121,6 @@
     segment fast-forwards the target ref and already-pushed Git objects are
     skipped, while 'git lfs push --all' only uploads LFS objects the target is
     missing, so re-running backfills LFS content for already-migrated repos.
-
-    PATs: in a customer workspace, run Set-AutomationSecrets (from the
-    NKDAgility.AzureDevOps.AutomationTools module) first and reference tokens
-    as $ENV:AZDO_PAT_<ORG> in the per-migration config.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -136,7 +157,11 @@ param(
 
     [switch]$KeepClones,
 
-    [switch]$SkipLfs
+    [switch]$SkipLfs,
+
+    [switch]$SkipWiki,
+
+    [switch]$SkipWikiLinkRewrite
 )
 
 $ErrorActionPreference = 'Stop'
@@ -235,6 +260,60 @@ function Get-TargetRepo {
     $url = "https://dev.azure.com/$org/$TargetProject/_apis/git/repositories?api-version=7.1"
     (Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders).value |
         Where-Object { $_.name -eq $Name } | Select-Object -First 1
+}
+
+function Get-SourceWikis {
+    # Project wikis are backed by a dedicated Git repository that the git
+    # repositories API does NOT list, so they are discovered here via the Wiki
+    # API. Only 'projectWiki' entries have their own repo to migrate; a
+    # 'codeWiki' is published from an existing code repo that is already
+    # migrated as an ordinary repository.
+    $org = Get-OrgName -OrgUrl $SourceOrg
+    $url = "https://dev.azure.com/$org/$SourceProject/_apis/wiki/wikis?api-version=7.1"
+    (Invoke-AdoApi -Uri $url -Headers $script:SourceHeaders).value |
+        Where-Object { $_.type -eq 'projectWiki' }
+}
+
+function Get-ProjectId {
+    param([string]$OrgUrl, [hashtable]$Headers, [string]$Project)
+    $org = Get-OrgName -OrgUrl $OrgUrl
+    $seg = [uri]::EscapeDataString($Project)
+    $url = "https://dev.azure.com/$org/_apis/projects/$seg`?api-version=7.1"
+    (Invoke-AdoApi -Uri $url -Headers $Headers).id
+}
+
+function New-TargetWiki {
+    # Ensures a project wiki exists in the target project, provisioning its
+    # backing Git repository. Returns the wiki object (with remoteUrl) so its
+    # repo can be pushed to. Idempotent: an existing project wiki is reused.
+    $org = Get-OrgName -OrgUrl $TargetOrg
+    $listUrl = "https://dev.azure.com/$org/$TargetProject/_apis/wiki/wikis?api-version=7.1"
+    $existing = (Invoke-AdoApi -Uri $listUrl -Headers $script:TargetHeaders).value |
+        Where-Object { $_.type -eq 'projectWiki' } | Select-Object -First 1
+    if ($existing) {
+        Write-Host "    Target project wiki already exists." -ForegroundColor DarkGray
+        return $existing
+    }
+    if (-not $PSCmdlet.ShouldProcess("$TargetProject wiki", 'Create target project wiki')) {
+        return $null
+    }
+    $projectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
+    $createUrl = "https://dev.azure.com/$org/_apis/wiki/wikis?api-version=7.1"
+    $body = @{ type = 'projectWiki'; name = "$TargetProject.wiki"; projectId = $projectId }
+    Write-Host "    Creating target project wiki." -ForegroundColor Green
+    Invoke-AdoApi -Uri $createUrl -Headers $script:TargetHeaders -Method Post -Body $body
+}
+
+function Get-WikiGitUrl {
+    # Builds the git-cloneable URL for a project wiki's backing repository. The
+    # Wiki API's remoteUrl is a '_wiki/wikis/<id>' REST endpoint that git cannot
+    # clone; the backing repo lives at '_git/<wikiName>' instead. Path segments
+    # are URL-encoded so wiki names containing '.' or spaces stay valid.
+    param([string]$OrgUrl, [string]$Project, [string]$WikiName)
+    $org = Get-OrgName -OrgUrl $OrgUrl
+    $projectSeg = [uri]::EscapeDataString($Project)
+    $nameSeg = [uri]::EscapeDataString($WikiName)
+    "https://dev.azure.com/$org/$projectSeg/_git/$nameSeg"
 }
 
 function New-TargetRepo {
@@ -340,13 +419,43 @@ function Sync-SourceLfs {
     finally { Pop-Location }
 }
 
-function Push-Lfs {
-    # Uploads all LFS objects in the local store to the target. Run before the
-    # refs are pushed so the objects always exist before a pointer that
-    # references them. 'git lfs push --all' only transfers objects the target is
-    # missing, which makes re-running the migration an idempotent backfill for
-    # repositories that were migrated before LFS support existed.
+function Get-PendingLfsCount {
+    # Returns how many LFS objects the target is still missing, using a dry-run
+    # push that negotiates with the target's LFS store but transfers nothing.
+    # 'git lfs push --all --dry-run' prints one 'push <oid> => <path>' line per
+    # object that WOULD be uploaded (i.e. that the target lacks); objects the
+    # target already has are omitted. This lets the migration skip the fetch and
+    # push entirely on re-runs where nothing is new, instead of re-scanning and
+    # re-negotiating every object each time.
     param([string]$CloneDir, [string]$RemoteName = 'target')
+
+    $PSNativeCommandUseErrorActionPreference = $false
+
+    Push-Location $CloneDir
+    try {
+        $lines = & git -c "http.extraheader=$script:TargetHeader" lfs push --all --dry-run $RemoteName 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            # If the dry-run itself fails, fall back to attempting the transfer.
+            return -1
+        }
+        @($lines | Where-Object { $_ -match '^\s*push\s' }).Count
+    }
+    finally { Pop-Location }
+}
+
+function Push-Lfs {
+    # Transfers only the LFS objects the target is missing. First a dry-run
+    # counts the objects the target lacks; when none are pending the fetch and
+    # push are skipped so re-runs don't re-download from the source or
+    # re-negotiate every object with the target. When some are pending, the
+    # objects are fetched from the source into the local store and pushed to the
+    # target. Run before the refs are pushed so the objects always exist before
+    # a pointer that references them. This keeps re-runs an idempotent backfill.
+    param(
+        [string]$CloneDir,
+        [string]$SourceRemote = 'source',
+        [string]$TargetRemote = 'target'
+    )
 
     if ($SkipLfs -or -not (Test-GitLfs)) { return }
 
@@ -354,10 +463,22 @@ function Push-Lfs {
     # PowerShell 7.4+ turn them into terminating errors that abort the run.
     $PSNativeCommandUseErrorActionPreference = $false
 
-    Write-Host '    Pushing all LFS objects to target...' -ForegroundColor Green
+    $pending = Get-PendingLfsCount -CloneDir $CloneDir -RemoteName $TargetRemote
+    if ($pending -eq 0) {
+        Write-Host '    All LFS objects already present on target; skipping LFS transfer.' -ForegroundColor DarkGray
+        return
+    }
+    if ($pending -gt 0) {
+        Write-Host ("    {0} LFS object(s) missing on target." -f $pending) -ForegroundColor DarkGray
+    }
+
+    # Fetch (only) the objects needed from the source into the local store.
+    Sync-SourceLfs -CloneDir $CloneDir -RemoteName $SourceRemote
+
+    Write-Host '    Pushing missing LFS objects to target...' -ForegroundColor Green
     Push-Location $CloneDir
     try {
-        & git -c "http.extraheader=$script:TargetHeader" lfs push --all $RemoteName
+        & git -c "http.extraheader=$script:TargetHeader" lfs push --all $TargetRemote
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "    'git lfs push --all' reported errors; some LFS objects may not have been uploaded."
         }
@@ -380,6 +501,14 @@ function Set-TargetRemote {
             Write-Host "    Adding target remote '$RemoteName'." -ForegroundColor Green
             Invoke-Git -GitArgs @('remote', 'add', $RemoteName, $TargetUrl)
         }
+
+        # Azure DevOps advertises LFS locking, so git-lfs prints a
+        # "Locking support detected on remote ... Consider enabling it with
+        # git config lfs.<url>/info/lfs.locksverify true" hint on every push.
+        # Set the flag explicitly (once) so the hint is not repeated for every
+        # LFS push/segment. 'true' keeps lock verification enabled; the value is
+        # scoped to this clone only.
+        Invoke-Git -GitArgs @('config', 'lfs.locksverify', 'true')
     }
     finally { Pop-Location }
 }
@@ -390,16 +519,21 @@ function Push-Mirror {
     # contains Azure DevOps server-managed refs (e.g. refs/pull/*) which the
     # target rejects. Restricting to heads and tags avoids those refs while
     # --prune still removes branches/tags on the target that no longer exist.
-    param([string]$CloneDir, [string]$TargetRemote)
+    #
+    # -Force is used for provisioned targets whose history diverges from the
+    # source (e.g. a freshly created project wiki already has a placeholder
+    # home-page commit on wikiMaster), where a fast-forward-only push would be
+    # rejected.
+    param([string]$CloneDir, [string]$TargetRemote, [switch]$Force)
 
     Write-Host "    Pushing all branches and tags..." -ForegroundColor Green
     Push-Location $CloneDir
     try {
-        Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs @(
-            'push', '--prune', $TargetRemote,
+        $pushArgs = @('push', '--prune', $TargetRemote,
             'refs/heads/*:refs/heads/*',
-            'refs/tags/*:refs/tags/*'
-        )
+            'refs/tags/*:refs/tags/*')
+        if ($Force) { $pushArgs = @('push', '--force') + $pushArgs[1..($pushArgs.Count - 1)] }
+        Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $pushArgs
     }
     finally { Pop-Location }
 }
@@ -507,16 +641,14 @@ function Migrate-Repo {
     # Clone the source as a mirror, or update the existing cached mirror.
     Sync-SourceMirror -CloneDir $cloneDir -RemoteUrl $Repo.remoteUrl
 
-    # Pull all LFS objects from the source into the local store so they can be
-    # pushed to the target (mirror clone only copies the pointer files).
-    Sync-SourceLfs -CloneDir $cloneDir -RemoteName 'source'
-
     # Ensure the clone has a 'target' remote pointing at the destination repo.
+    # Done before the LFS step so it can query what the target is missing.
     Set-TargetRemote -CloneDir $cloneDir -TargetUrl $targetUrl -RemoteName 'target'
 
-    # Upload LFS objects before the refs so pointers never precede their content.
-    # Also backfills repos migrated before LFS support was added.
-    Push-Lfs -CloneDir $cloneDir -RemoteName 'target'
+    # Transfer only the LFS objects the target is missing (fetched from source
+    # on demand) before the refs are pushed so pointers never precede their
+    # content. Also backfills repos migrated before LFS support was added.
+    Push-Lfs -CloneDir $cloneDir -SourceRemote 'source' -TargetRemote 'target'
 
     if ($useSegmented) {
         Push-Segmented -CloneDir $cloneDir -TargetRemote 'target' -BatchSize $CommitBatchSize
@@ -527,6 +659,58 @@ function Migrate-Repo {
 
     Write-Host "    Done: $($Repo.name) ${progress}".TrimEnd() -ForegroundColor Green
     New-RepoSummary -Name $Repo.name -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Migrated'
+}
+
+function Migrate-Wiki {
+    # Migrates a provisioned project wiki. The wiki's backing repo is cloned
+    # from the source and pushed into the target wiki repo, which is provisioned
+    # first via the Wiki API. The push is forced because provisioning seeds the
+    # target wiki with a placeholder home page whose history diverges from the
+    # source's.
+    param($Wiki, [string]$WorkRoot, [int]$Index, [int]$Total)
+
+    $progress = if ($Total) { "[$Index/$Total] " } else { '' }
+    Write-Step "${progress}$SourceProject == Wiki: $($Wiki.name)"
+
+    $targetWiki = New-TargetWiki
+    if (-not $targetWiki -and -not $WhatIfPreference) {
+        New-RepoSummary -Name $Wiki.name -SizeBytes 0 -SizeGB 0 -Strategy 'wiki' -Status 'Skipped (no target wiki)'
+        return
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($Wiki.name, 'Mirror-clone and push wiki')) {
+        New-RepoSummary -Name $Wiki.name -SizeBytes 0 -SizeGB 0 -Strategy 'wiki' -Status 'WhatIf (preview)'
+        return
+    }
+
+    # The Wiki API's remoteUrl points at the '_wiki/wikis/<id>' REST endpoint,
+    # which is NOT a git-cloneable URL (git clone fails with 'not valid: is this
+    # a git repository?'). A project wiki's backing repo is instead cloned from
+    # '_git/<wikiName>', so build that URL from the org/project/name for both
+    # sides. Names are URL-encoded so '.'/space-containing wiki names stay valid.
+    $sourceUrl = Get-WikiGitUrl -OrgUrl $SourceOrg -Project $SourceProject -WikiName $Wiki.name
+    $targetUrl = Get-WikiGitUrl -OrgUrl $TargetOrg -Project $TargetProject -WikiName $targetWiki.name
+    $cloneDir = Join-Path $WorkRoot ($Wiki.name + '.git')
+
+    Sync-SourceMirror -CloneDir $cloneDir -RemoteUrl $sourceUrl
+    Set-TargetRemote -CloneDir $cloneDir -TargetUrl $targetUrl -RemoteName 'target'
+    Push-Lfs -CloneDir $cloneDir -SourceRemote 'source' -TargetRemote 'target'
+
+    # Repoint work item links in the wiki content to the target work items
+    # before pushing, unless suppressed. Delegated to the standalone
+    # Update-WikiWorkItemLinks.ps1 (run with -Commit here; without -Commit it
+    # previews only, which is how the rewrite can be validated before a push).
+    if (-not $SkipWikiLinkRewrite) {
+        $linkScript = Join-Path $PSScriptRoot 'Update-WikiWorkItemLinks.ps1'
+        & $linkScript -SourceOrg $SourceOrg -SourceProject $SourceProject `
+            -TargetOrg $TargetOrg -TargetPat $TargetPat -TargetProject $TargetProject `
+            -CloneDir $cloneDir -Branch 'wikiMaster' -Commit | Out-Null
+    }
+
+    Push-Mirror -CloneDir $cloneDir -TargetRemote 'target' -Force
+
+    Write-Host "    Done: $($Wiki.name) ${progress}".TrimEnd() -ForegroundColor Green
+    New-RepoSummary -Name $Wiki.name -SizeBytes 0 -SizeGB 0 -Strategy 'wiki' -Status 'Migrated'
 }
 
 #region Main ------------------------------------------------------------------
@@ -552,6 +736,33 @@ New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
 Write-Step "Working directory: $WorkPath"
 
 try {
+    # Migrate the project wiki first so its content is in place before the
+    # (typically longer) repository transfers run.
+    if (-not $SkipWiki) {
+        $wikis = @(Get-SourceWikis)
+        if (-not $wikis) {
+            Write-Warning 'No project wiki found in source; nothing to migrate (use -SkipWiki to suppress this warning).'
+        }
+        else {
+            Write-Step ("Found {0} project wiki(s) to process." -f $wikis.Count)
+            $wikiTotal = $wikis.Count
+            $wikiIndex = 0
+            foreach ($wiki in $wikis) {
+                $wikiIndex++
+                # As with repositories, a single wiki failure must not abort the
+                # run; surface it and continue.
+                try {
+                    Migrate-Wiki -Wiki $wiki -WorkRoot $WorkPath -Index $wikiIndex -Total $wikiTotal
+                }
+                catch {
+                    Write-Warning ("    Wiki migration FAILED for '{0}': {1}" -f $wiki.name, $_.Exception.Message)
+                    New-RepoSummary -Name $wiki.name -SizeBytes 0 -SizeGB 0 -Strategy 'wiki' `
+                        -Status ("Failed: {0}" -f $_.Exception.Message)
+                }
+            }
+        }
+    }
+
     $repos = Get-SourceRepos
     if (-not $repos) {
         Write-Warning "No repositories found in source (RepoName filter: '$RepoName')."
