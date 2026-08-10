@@ -35,6 +35,14 @@
     permissions) are reported in the unresolved CSV and their links are left
     unchanged, so a later re-run can pick them up.
 
+    The scan also HEALS half-fixed comments left by a run made before the
+    format fix: links already rewritten to the target, but the comment saved as
+    html so its markdown renders literally. That state is detected without any
+    CSV - format says html, the text has no HTML tags, but it carries a
+    markdown-syntax attachment link - and the comment is re-marked as markdown.
+    Running the script twice therefore converges: the second run finds nothing
+    left to do.
+
     PATs: in a customer workspace, run Set-AutomationSecrets (from the
     NKDAgility.AzureDevOps.AutomationTools module) first; -SourcePat and
     -TargetPat then default from the derived AZDO_PAT_<ORG> variables. The
@@ -311,6 +319,7 @@ $changes = [System.Collections.Generic.List[object]]::new()
 $unresolved = [System.Collections.Generic.List[object]]::new()
 $scannedComments = 0
 $editedComments = 0
+$formatRepairs = 0
 
 foreach ($id in $ids) {
     # Comments API pages with a continuation token.
@@ -330,8 +339,10 @@ foreach ($id in $ids) {
         # Not named $matches: -match below writes the automatic $Matches variable,
         # and shadowing it invites exactly that collision.
         $linkMatches = @([regex]::Matches($text, $attachmentPattern))
-        if (-not $linkMatches.Count) { continue }
 
+        # NO early continue when nothing matches: a half-fixed comment has no source
+        # links left by definition - its links were already rewritten - and skipping
+        # here is exactly how the format-repair detection below never ran.
         $newText = $text
         $rewrittenHere = 0
         foreach ($match in ($linkMatches | Sort-Object { $_.Value } -Unique)) {
@@ -387,11 +398,31 @@ foreach ($id in $ids) {
                 })
         }
 
-        if ($rewrittenHere -and $newText -ne $text) {
+        # Half-fixed detection: a run made before the format fix rewrote this comment's
+        # links (so nothing above matched) but saved it as html, leaving markdown syntax
+        # rendering literally. The state is unambiguous without any CSV: format says html,
+        # the text has NO html tags, but it DOES carry a markdown-syntax attachment link -
+        # genuine html comments reference attachments as <a href>/<img>, never as ![](...).
+        $format = Get-CommentFormat $comment
+        $formatRepair = $format -eq 'html' -and
+            $newText -notmatch '(?i)<(?:div|p|br|span|a|img|table|ul|ol|li)\b' -and
+            $newText -match '!?\[[^\]]*\]\([^)]*_apis/wit/attachments/[^)]*\)'
+
+        if (($rewrittenHere -and $newText -ne $text) -or $formatRepair) {
             $editedComments++
-            Write-Host ("  WI {0} comment {1}: {2} link(s)" -f $id, $comment.id, $rewrittenHere) -ForegroundColor DarkGray
+            $writeFormat = if ($formatRepair) { $formatRepairs++; 'markdown' } else { $format }
+            $note = if ($formatRepair) { '; re-marking html -> markdown' } else { '' }
+            Write-Host ("  WI {0} comment {1}: {2} link(s){3}" -f $id, $comment.id, $rewrittenHere, $note) -ForegroundColor DarkGray
+            if ($formatRepair) {
+                $changes.Add([pscustomobject]@{
+                        WorkItemId = $id; CommentId = $comment.id; FileName = '(format repair)'
+                        SourceUrl = ''; TargetUrl = ''
+                        CommentFormat = 'html -> markdown'
+                        Applied = [bool]$Commit
+                    })
+            }
             if ($Commit) {
-                Set-TargetComment -Id $id -CommentId $comment.id -Text $newText -Format (Get-CommentFormat $comment)
+                Set-TargetComment -Id $id -CommentId $comment.id -Text $newText -Format $writeFormat
             }
         }
     }
@@ -403,9 +434,11 @@ $changes | Export-Csv -LiteralPath $changesCsv -NoTypeInformation
 $unresolved | Export-Csv -LiteralPath $unresolvedCsv -NoTypeInformation
 
 $verb = if ($Commit) { 'rewrote' } else { 'would rewrite' }
+$repairVerb = if ($Commit) { 're-marked' } else { 'would re-mark' }
+$linkCount = @($changes | Where-Object { $_.FileName -ne '(format repair)' }).Count
 Write-Host ''
-Write-Host ("==> Scanned {0} comment(s) across {1} work item(s); {2} {3} link(s) in {4} comment(s); {5} distinct attachment(s); {6} unresolved." -f `
-        $scannedComments, @($ids).Count, $verb, $changes.Count, $editedComments, $attachmentMap.Count, $unresolved.Count) -ForegroundColor $(if ($unresolved.Count) { 'Yellow' } else { 'Green' })
+Write-Host ("==> Scanned {0} comment(s) across {1} work item(s); {2} {3} link(s) in {4} comment(s); {5} distinct attachment(s); {6} {7} half-fixed comment(s) as markdown; {8} unresolved." -f `
+        $scannedComments, @($ids).Count, $verb, $linkCount, $editedComments, $attachmentMap.Count, $repairVerb, $formatRepairs, $unresolved.Count) -ForegroundColor $(if ($unresolved.Count) { 'Yellow' } else { 'Green' })
 Write-Host "    changes    : $changesCsv"
 Write-Host "    unresolved : $unresolvedCsv"
 if (-not $Commit -and $changes.Count) {
