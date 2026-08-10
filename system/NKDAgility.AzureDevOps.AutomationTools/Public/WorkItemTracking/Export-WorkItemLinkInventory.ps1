@@ -42,6 +42,8 @@ function Export-WorkItemLinkInventory {
         [string]$Project,
         [string]$Path,
         [string]$Pat,
+
+        [switch]$UseDefaultCredentials,
         [string]$ApiVersion = '5.0'
     )
 
@@ -50,15 +52,15 @@ function Export-WorkItemLinkInventory {
     $types = @(
         if ($ReferenceName) {
             foreach ($name in $ReferenceName) {
-                Get-WorkItemLinkType -Collection $Collection -ReferenceName $name -Pat $Pat -ApiVersion $ApiVersion
+                Get-WorkItemLinkType -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -ReferenceName $name -Pat $Pat -ApiVersion $ApiVersion
             }
         }
         else {
-            Get-WorkItemLinkType -Collection $Collection -CustomOnly -Pat $Pat -ApiVersion $ApiVersion
+            Get-WorkItemLinkType -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -CustomOnly -Pat $Pat -ApiVersion $ApiVersion
         }
     )
 
-    $links = @(Get-WorkItemLink -Collection $Collection -ReferenceName $ReferenceName -Project $Project -Pat $Pat -ApiVersion $ApiVersion)
+    $links = @(Get-WorkItemLink -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -ReferenceName $ReferenceName -Project $Project -Pat $Pat -ApiVersion $ApiVersion)
 
     if (-not $Path) {
         $source = ([uri]$Collection).Segments[-1].Trim('/')

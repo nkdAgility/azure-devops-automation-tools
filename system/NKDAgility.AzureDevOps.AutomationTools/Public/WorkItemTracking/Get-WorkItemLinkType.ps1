@@ -15,6 +15,10 @@ function Get-WorkItemLinkType {
 
     Only relation types whose usage is 'workItemLink' are returned; attachment, hyperlink and
     artifact relations are excluded.
+    .PARAMETER UseDefaultCredentials
+    Authenticate as the process identity instead of Entra. Required for on-premises
+    Azure DevOps Server collections, which have no Entra tenant behind them.
+
 
     .PARAMETER ReferenceName
     Return only this link type. Accepts either the bare link type reference name
@@ -39,10 +43,12 @@ function Get-WorkItemLinkType {
         [string]$ReferenceName,
         [switch]$CustomOnly,
         [string]$Pat,
+
+        [switch]$UseDefaultCredentials,
         [string]$ApiVersion = '5.0'
     )
 
-    $response = Invoke-AzureDevOpsApi -Collection $Collection -Path '_apis/wit/workitemrelationtypes' -Pat $Pat -ApiVersion $ApiVersion
+    $response = Invoke-AzureDevOpsApi -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -Path '_apis/wit/workitemrelationtypes' -Pat $Pat -ApiVersion $ApiVersion
 
     foreach ($type in @($response.value)) {
         if ($type.attributes.usage -ne 'workItemLink') { continue }

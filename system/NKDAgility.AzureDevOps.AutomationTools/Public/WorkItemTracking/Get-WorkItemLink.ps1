@@ -11,6 +11,10 @@ function Get-WorkItemLink {
     Defaults to every CUSTOM link type in the collection, which is exactly the set
     Remove-WorkItemLinkType destroys. Only forward ends are queried, so each link is reported
     once.
+    .PARAMETER UseDefaultCredentials
+    Authenticate as the process identity instead of Entra. Required for on-premises
+    Azure DevOps Server collections, which have no Entra tenant behind them.
+
 
     .PARAMETER ReferenceName
     Link types to enumerate. Accepts bare reference names ('Custom.Affects') or specific ends
@@ -35,6 +39,8 @@ function Get-WorkItemLink {
         [string[]]$ReferenceName,
         [string]$Project,
         [string]$Pat,
+
+        [switch]$UseDefaultCredentials,
         [string]$ApiVersion = '5.0'
     )
 
@@ -42,13 +48,13 @@ function Get-WorkItemLink {
     # a link is not reported once from each side.
     $ends = if ($ReferenceName) {
         foreach ($name in $ReferenceName) {
-            $matched = @(Get-WorkItemLinkType -Collection $Collection -ReferenceName $name -Pat $Pat -ApiVersion $ApiVersion)
+            $matched = @(Get-WorkItemLinkType -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -ReferenceName $name -Pat $Pat -ApiVersion $ApiVersion)
             if (-not $matched) { throw "No work item link type in '$Collection' matches reference name '$name'." }
             $matched | Where-Object { -not $_.IsReverse }
         }
     }
     else {
-        Get-WorkItemLinkType -Collection $Collection -CustomOnly -Pat $Pat -ApiVersion $ApiVersion |
+        Get-WorkItemLinkType -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -CustomOnly -Pat $Pat -ApiVersion $ApiVersion |
             Where-Object { -not $_.IsReverse }
     }
     $ends = @($ends)
@@ -70,7 +76,7 @@ function Get-WorkItemLink {
         Write-FixStep "Querying links of type '$($end.Name)' ($($end.ReferenceName))"
         $wiql = "SELECT [System.Id] FROM WorkItemLinks WHERE [System.Links.LinkType] = '$($end.ReferenceName)' MODE (MustContain)"
         try {
-            $response = Invoke-AzureDevOpsApi -Collection $Collection -Path $wiqlPath -Method Post -Pat $Pat -ApiVersion $ApiVersion -Body @{ query = $wiql }
+            $response = Invoke-AzureDevOpsApi -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -Path $wiqlPath -Method Post -Pat $Pat -ApiVersion $ApiVersion -Body @{ query = $wiql }
         }
         catch {
             if ("$_" -match 'VS402337') {
@@ -98,7 +104,7 @@ function Get-WorkItemLink {
 
     # Both sides wrapped in @() first: with a single relation the property accessors return
     # scalars, and int + int would add rather than concatenate.
-    $details = Get-WorkItemDetailMap -Collection $Collection -Pat $Pat -ApiVersion $ApiVersion `
+    $details = Get-WorkItemDetailMap -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -Pat $Pat -ApiVersion $ApiVersion `
         -Id (@($relations.SourceId) + @($relations.TargetId))
 
     foreach ($relation in $relations) {

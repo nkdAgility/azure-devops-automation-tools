@@ -23,7 +23,11 @@ function Invoke-AzureDevOpsApi {
         [string]$ApiVersion = '5.0',
         [hashtable]$Query,
         $Body,
-        [string]$Pat
+        [string]$Pat,
+
+        # Explicit opt-out of Entra, for on-premises Azure DevOps Server collections that
+        # authenticate the process identity. Without it, and without -Pat, Entra is used.
+        [switch]$UseDefaultCredentials
     )
 
     $parameters = @{}
@@ -41,8 +45,19 @@ function Invoke-AzureDevOpsApi {
         ContentType = 'application/json'
         ErrorAction = 'Stop'
     }
-    if ($Pat) { $arguments.Headers = Get-AzureDevOpsAuthHeader -Pat $Pat }
-    else { $arguments.UseDefaultCredentials = $true }
+    # Auth precedence: an explicit PAT, then an explicit -UseDefaultCredentials, then
+    # Entra. Entra is the DEFAULT - the other two are opt-outs. On-premises Server
+    # collections have no Entra tenant, so they must pass -UseDefaultCredentials; the
+    # error from Get-EntraAccessToken says exactly that.
+    if ($Pat) {
+        $arguments.Headers = Get-AzureDevOpsAuthHeader -Pat $Pat
+    }
+    elseif ($UseDefaultCredentials) {
+        $arguments.UseDefaultCredentials = $true
+    }
+    else {
+        $arguments.Headers = @{ Authorization = 'Bearer ' + (Get-EntraAccessToken -Collection $Collection) }
+    }
     if ($null -ne $Body) {
         $arguments.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 10 }
     }

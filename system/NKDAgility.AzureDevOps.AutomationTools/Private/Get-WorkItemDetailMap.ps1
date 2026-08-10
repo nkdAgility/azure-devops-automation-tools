@@ -17,6 +17,8 @@ function Get-WorkItemDetailMap {
         [Parameter(Mandatory)] [string]$Collection,
         [Parameter(Mandatory)] [AllowEmptyCollection()] [int[]]$Id,
         [string]$Pat,
+
+        [switch]$UseDefaultCredentials,
         [string]$ApiVersion = '5.0'
     )
 
@@ -29,7 +31,7 @@ function Get-WorkItemDetailMap {
         $chunk = @($ids[$offset..([Math]::Min($offset + $chunkSize - 1, $ids.Count - 1))])
         Write-FixStep "  reading work items $($offset + 1)-$($offset + $chunk.Count) of $($ids.Count)"
         try {
-            $response = Invoke-AzureDevOpsApi -Collection $Collection -Pat $Pat -ApiVersion $ApiVersion `
+            $response = Invoke-AzureDevOpsApi -Collection $Collection -UseDefaultCredentials:$UseDefaultCredentials -Pat $Pat -ApiVersion $ApiVersion `
                 -Path '_apis/wit/workitems' -Query @{ ids = ($chunk -join ','); '$expand' = 'relations' }
         }
         catch {
