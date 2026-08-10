@@ -35,6 +35,15 @@
     permissions) are reported in the unresolved CSV and their links are left
     unchanged, so a later re-run can pick them up.
 
+    PROGRESS: a live progress bar shows [n/total], work items per minute and
+    ETA, and a heartbeat line lands in the console every 60 seconds with the
+    running totals. CHECKPOINTS: a committed full scan records the last
+    completed work item after every item, so an interrupted run resumes where
+    it stopped ('Resuming after WI <id>...'); -Restart starts over. Preview and
+    -WorkItemId runs never checkpoint, and a completed run clears its
+    checkpoint. The file is <output>\comment-attachment-links-<project>
+    .checkpoint.json - gitignored by the workspace's *.checkpoint.json rule.
+
     The scan also HEALS comments damaged by earlier states of this problem,
     detected without any CSV, so pointing the engine at a work item fixes it
     whatever state it is in and a second run converges to a no-op:
@@ -78,6 +87,10 @@
 .PARAMETER Commit
     Perform the migration: upload attachments and PATCH comments. Without it
     the script only reports and writes CSVs.
+
+.PARAMETER Restart
+    Clear the checkpoint left by an interrupted commit run and start the scan
+    from the beginning. Safe: the scan is idempotent, a full re-run converges.
 
 .PARAMETER OutputFolder
     Where the evidence CSVs are written. Defaults to .\output. Two files per
@@ -132,6 +145,9 @@ param(
     [int[]]$WorkItemId,
 
     [switch]$Commit,
+
+    # Ignore (and clear) the checkpoint from an interrupted run and start over.
+    [switch]$Restart,
 
     [string]$OutputFolder = (Join-Path (Get-Location).Path 'output'),
 
@@ -276,9 +292,11 @@ if ($RepairFormatCsv) {
         Group-Object WorkItemId, CommentId | ForEach-Object { $_.Group[0] }
     Write-Host "==> Format repair: $(@($rows).Count) comment(s) from $RepairFormatCsv" -ForegroundColor Cyan
 
-    $repaired = 0; $skipped = 0
+    $repaired = 0; $skipped = 0; $done = 0
     foreach ($row in $rows) {
         $wi = [int]$row.WorkItemId; $cid = [int]$row.CommentId
+        $done++
+        Write-Progress -Activity 'Comment format repair' -Status ("[{0}/{1}] WI {2} comment {3}" -f $done, @($rows).Count, $wi, $cid) -PercentComplete ([math]::Min(100, 100 * $done / [math]::Max(1, @($rows).Count)))
         $comment = Invoke-AdoRest -Uri "$targetBase/_apis/wit/workItems/$wi/comments/$cid`?api-version=7.1-preview.4" -Headers $targetHeaders
         $format = Get-CommentFormat $comment
         if ($format -eq 'markdown') {
@@ -327,6 +345,32 @@ else {
 }
 Write-Host "==> $(@($ids).Count) work item(s) with comments to scan." -ForegroundColor Cyan
 
+# ─── Checkpoint: resume an interrupted commit run ────────────────────────────
+# WIQL returns ids ascending, so a high-water mark of the last COMPLETED work item is
+# enough to resume. Only a committed full scan checkpoints: preview writes nothing (a
+# preview 'completed' id must never make a later commit skip it), and a -WorkItemId run
+# is a targeted test. The file lives in the output folder as *.checkpoint.json, which
+# workspace .gitignores already exclude, and is deleted when a run completes - the scan
+# is idempotent, so a fresh full run is always safe.
+$useCheckpoint = $Commit -and -not $WorkItemId
+$checkpointPath = Join-Path $OutputFolder ("comment-attachment-links-{0}.checkpoint.json" -f ($TargetProject -replace '[^A-Za-z0-9.\-]', '_'))
+if ($useCheckpoint -and $Restart -and (Test-Path -LiteralPath $checkpointPath)) {
+    Remove-Item -LiteralPath $checkpointPath -Force
+    Write-Host '==> -Restart: checkpoint cleared, starting over.' -ForegroundColor Yellow
+}
+if ($useCheckpoint -and (Test-Path -LiteralPath $checkpointPath)) {
+    $cp = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json
+    if ($cp.sourceOrg -eq $SourceOrgUrl.TrimEnd('/') -and $cp.targetOrg -eq $TargetOrgUrl.TrimEnd('/') -and $cp.targetProject -eq $TargetProject) {
+        $before = @($ids).Count
+        $ids = @($ids | Where-Object { $_ -gt [int]$cp.lastCompletedId })
+        Write-Host ("==> Resuming after WI {0} (checkpoint {1}): {2} of {3} work item(s) remain. -Restart to start over." -f `
+                $cp.lastCompletedId, $cp.updatedAt, @($ids).Count, $before) -ForegroundColor Yellow
+    }
+    else {
+        Write-Warning "Checkpoint at $checkpointPath belongs to a different source/target; ignoring it."
+    }
+}
+
 # ─── 2. Scan comments, migrate attachments, rewrite links ────────────────────
 
 # One source attachment can be referenced from many comments; migrate it once.
@@ -337,7 +381,27 @@ $scannedComments = 0
 $editedComments = 0
 $formatRepairs = 0
 
+# Progress: a live bar with rate and ETA, plus a console heartbeat every 60 seconds so
+# a transcript (or a glance at a scrolled-away window) still shows movement.
+$total = @($ids).Count
+$processed = 0
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$lastBeat = [TimeSpan]::Zero
+
 foreach ($id in $ids) {
+    $processed++
+    $rate = if ($stopwatch.Elapsed.TotalMinutes -gt 0) { $processed / $stopwatch.Elapsed.TotalMinutes } else { 0 }
+    $eta = if ($rate -gt 0 -and $total -gt $processed) { [TimeSpan]::FromMinutes(($total - $processed) / $rate).ToString('hh\:mm\:ss') } else { '--:--:--' }
+    if ($total -gt 0) {
+        Write-Progress -Activity "Comment attachment link fix: $TargetProject" `
+            -Status ("[{0}/{1}] WI {2}   {3:N1} wi/min   ETA {4}" -f $processed, $total, $id, $rate, $eta) `
+            -PercentComplete ([math]::Min(100, 100 * $processed / $total))
+    }
+    if (($stopwatch.Elapsed - $lastBeat).TotalSeconds -ge 60) {
+        $lastBeat = $stopwatch.Elapsed
+        Write-Host ("  [{0}/{1}] WI {2} | {3:N1} wi/min | elapsed {4} | ETA {5} | {6} comment(s) scanned, {7} edited, {8} healed, {9} unresolved" -f `
+                $processed, $total, $id, $rate, $stopwatch.Elapsed.ToString('hh\:mm\:ss'), $eta, $scannedComments, $editedComments, $formatRepairs, $unresolved.Count) -ForegroundColor Cyan
+    }
     # Comments API pages with a continuation token.
     $comments = [System.Collections.Generic.List[object]]::new()
     $continuation = $null
@@ -463,6 +527,26 @@ foreach ($id in $ids) {
             }
         }
     }
+
+    # This work item is fully processed - move the high-water mark. Written per item:
+    # the whole point is surviving a crash mid-run.
+    if ($useCheckpoint) {
+        @{
+            sourceOrg       = $SourceOrgUrl.TrimEnd('/')
+            targetOrg       = $TargetOrgUrl.TrimEnd('/')
+            targetProject   = $TargetProject
+            lastCompletedId = $id
+            completed       = $processed
+            updatedAt       = (Get-Date).ToString('o')
+        } | ConvertTo-Json | Set-Content -LiteralPath $checkpointPath
+    }
+}
+
+Write-Progress -Activity "Comment attachment link fix: $TargetProject" -Completed
+# A completed run clears its checkpoint: the scan is idempotent, so the next full run
+# starting from scratch is correct - only an INTERRUPTED run should resume.
+if ($useCheckpoint -and (Test-Path -LiteralPath $checkpointPath)) {
+    Remove-Item -LiteralPath $checkpointPath -Force
 }
 
 # ─── 3. Report ───────────────────────────────────────────────────────────────
@@ -474,8 +558,9 @@ $verb = if ($Commit) { 'rewrote' } else { 'would rewrite' }
 $repairVerb = if ($Commit) { 're-marked' } else { 'would re-mark' }
 $linkCount = @($changes | Where-Object { $_.FileName -notin '(format repair)', '(markdown unescape)' }).Count
 Write-Host ''
-Write-Host ("==> Scanned {0} comment(s) across {1} work item(s); {2} {3} link(s) in {4} comment(s); {5} distinct attachment(s); {6} {7} half-fixed comment(s) as markdown; {8} unresolved." -f `
-        $scannedComments, @($ids).Count, $verb, $linkCount, $editedComments, $attachmentMap.Count, $repairVerb, $formatRepairs, $unresolved.Count) -ForegroundColor $(if ($unresolved.Count) { 'Yellow' } else { 'Green' })
+$avgRate = if ($stopwatch.Elapsed.TotalMinutes -gt 0) { $processed / $stopwatch.Elapsed.TotalMinutes } else { 0 }
+Write-Host ("==> Scanned {0} comment(s) across {1} work item(s) in {2} ({3:N1} wi/min); {4} {5} link(s) in {6} comment(s); {7} distinct attachment(s); {8} {9} half-fixed comment(s) as markdown; {10} unresolved." -f `
+        $scannedComments, $processed, $stopwatch.Elapsed.ToString('hh\:mm\:ss'), $avgRate, $verb, $linkCount, $editedComments, $attachmentMap.Count, $repairVerb, $formatRepairs, $unresolved.Count) -ForegroundColor $(if ($unresolved.Count) { 'Yellow' } else { 'Green' })
 Write-Host "    changes    : $changesCsv"
 Write-Host "    unresolved : $unresolvedCsv"
 if (-not $Commit -and $changes.Count) {
