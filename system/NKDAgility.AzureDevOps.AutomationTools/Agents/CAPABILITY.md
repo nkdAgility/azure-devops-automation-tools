@@ -58,13 +58,17 @@ by a committed approval CSV:
 3. Re-running is the workflow: newly approved rows migrate; already-migrated repos
    re-sync idempotently. Nothing on GitHub is ever deleted.
 
-Authentication is **ambient identity first, stored token as fallback**: Entra for the
-source (`Get-AzureDevOpsAccessToken` — an Entra token works anywhere a PAT does, REST and
-git alike, and is renewed per repository across a long run), the signed-in gh CLI for
-GitHub (`Get-GitHubAccessToken`, then `GITHUB_TOKEN`). PATs/tokens in `secrets.json` are
-only used when ambient sign-in is unavailable — worth configuring for unattended runs and
-required for organisations that are not Entra-backed, where every REST command falls back
-to the secrets PAT for the collection automatically.
+Authentication is **ambient identity first, stored token as fallback** — for this and for
+every other engine (`Migrate-Repos`, `Migrate-Artifacts`, `Update-WikiWorkItemLinks`,
+`Update-CommentAttachmentLinks`, `Set-WorkItemStartId`): Entra per Azure DevOps
+organisation (`Get-AzureDevOpsAccessToken` — an Entra token works anywhere a PAT does,
+REST and git alike, and is renewed per repository/feed/work-item batch across a long run),
+the signed-in gh CLI for GitHub (`Get-GitHubAccessToken`, then `GITHUB_TOKEN`). PATs/tokens
+in `secrets.json` are only used when ambient sign-in is unavailable — worth configuring for
+unattended runs and required for organisations that are not Entra-backed, where every REST
+command falls back to the secrets PAT for the collection automatically. The exception is
+`devopsmigration.exe`, which cannot use Entra: its `configuration-*.json` `AccessToken`
+env-var bindings stay PAT-fed by `Set-AutomationSecrets`.
 
 Rules:
 
@@ -75,8 +79,16 @@ Rules:
   edits to `TargetName`/`Approved`/`Notes` are always preserved by inventory refreshes.
 - A `TargetName` edited *after* its repo migrated is **Blocked**, not migrated twice —
   revert the CSV, or reconcile on GitHub and re-run with `-AcceptRenames`.
-- Repos with blobs over GitHub's hard 100 MB limit are **Blocked**, not failed mid-push;
-  `git lfs migrate` rewrites history and is a customer decision, never automated.
+- Repos with blobs over GitHub's hard 100 MB limit are **Blocked**, not failed mid-push,
+  and each offending file is recorded in the committed `oversize-decisions.json` with
+  action `pending`. History rewrites are a customer decision: record it per file there —
+  `lfs` (rewrite into Git LFS) or `strip` (remove from history via git filter-repo) — and
+  re-run; the rewrite happens in a separate copy, the source is never touched, GitHub
+  commit ids diverge and `lfs` consumes quota. `LfsMigrateOversize` is the blanket
+  everything-to-LFS opt-in when per-file decisions are not needed.
+- `output\github-attention.md` is the one-place, committed list of every approved repo
+  that has not migrated, with full reasons and oversize object lists inlined. Refresh it
+  by re-running `Sync.ps1`.
 - **Never print, log or echo `GITHUB_TOKEN`** — the same secrets rules as PATs apply; git
   auth goes via `http.extraheader`, never in a remote URL.
 

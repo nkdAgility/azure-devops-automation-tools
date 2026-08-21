@@ -22,15 +22,14 @@
     -BatchSize to reduce overhead, and the batch is trimmed automatically as the
     target is approached so the counter is not overshot by more than one.
 
-    Authentication uses a Personal Access Token (PAT). The token needs Work
+    Authentication is ambient-identity first, stored token as the fallback:
+    Entra by default. When the automation module is loaded the script acquires
+    an Entra access token via Get-AzureDevOpsAccessToken, re-resolved before
+    every batch so the module's cache renews it near expiry across a long run.
+    The fallbacks are -Pat, then the AZDO_PAT_<ORG> environment variable
+    populated by Set-AutomationSecrets. Whichever identity is used needs Work
     Items (Read, Write & Manage) so it can both create and permanently destroy
-    work items. Provide it with -Pat, or let the script fall back to the
-    AZDO_PAT_<ORG> environment variable populated by Set-MigrationSecrets.ps1.
-    When no PAT is available the script falls back to an Entra (Azure AD) access
-    token: it installs the Az.Accounts module for the current user if needed,
-    prompts for an interactive sign-in when no Azure context exists, and uses
-    Get-AzAccessToken. Ensure the signed-in identity has the same Work Items
-    permissions.
+    work items.
 
 .PARAMETER OrgUrl
     Organisation URL, e.g. https://dev.azure.com/contoso.
@@ -44,15 +43,14 @@
     the counter until a throwaway work item reaches (MinId - 1).
 
 .PARAMETER Pat
-    Personal Access Token with Work Items (Read, Write & Manage). Defaults to
-    the AZDO_PAT_<ORG> environment variable derived from the organisation name,
-    and then to an Entra (Azure AD) access token when neither is available.
+    Fallback Personal Access Token with Work Items (Read, Write & Manage), used
+    when Entra sign-in is unavailable or fails. Defaults to the AZDO_PAT_<ORG>
+    environment variable derived from the organisation name.
 
 .PARAMETER TenantId
-    Entra tenant (directory) ID to authenticate against when falling back to an
-    Entra token. Set this to the tenant that backs the Azure DevOps organisation
-    to avoid cross-tenant sign-in warnings/failures (e.g. from MFA or
-    conditional access on unrelated tenants).
+    Deprecated and ignored: the module's Get-AzureDevOpsAccessToken discovers
+    the organisation's tenant automatically and pins the sign-in to it. Kept so
+    existing runbook lines that pass it keep working.
 
 .PARAMETER WorkItemType
     Work item type to create for the throwaway items. Default: Task.
@@ -75,11 +73,14 @@
     capped by this value. Default: 60.
 
 .EXAMPLE
-    .\scripts\Set-WorkItemStartId.ps1 -OrgUrl https://dev.azure.com/machining -Project Milling -MinId 100000
+    # Ambient identity: Entra, no PAT.
+    .\Set-WorkItemStartId.ps1 -OrgUrl https://dev.azure.com/machining -Project Milling -MinId 100000
 
 .EXAMPLE
-    . .\scripts\Set-MigrationSecrets.ps1
-    .\scripts\Set-WorkItemStartId.ps1 -OrgUrl https://dev.azure.com/machining -Project Milling -MinId 100000 -WhatIf
+    # Fallback PAT from the workspace secrets (Set-AutomationSecrets exports
+    # AZDO_PAT_<ORG>), previewed first.
+    Set-AutomationSecrets
+    .\Set-WorkItemStartId.ps1 -OrgUrl https://dev.azure.com/machining -Project Milling -MinId 100000 -WhatIf
 
 .OUTPUTS
     The highest work item ID that was consumed. The next work item created will
@@ -131,84 +132,53 @@ function Get-DerivedEnvVarName {
     'AZDO_PAT_' + ($Org.ToUpperInvariant() -replace '[^A-Z0-9]', '_')
 }
 
-function Get-AdoTenantId {
-    # Discovers the Entra tenant that backs an Azure DevOps organisation. ADO
-    # returns the tenant GUID in the 'X-VSS-ResourceTenant' response header, so
-    # an unauthenticated probe is enough. Pinning sign-in to this tenant avoids
-    # Az enumerating (and failing MFA on) every other tenant the user can see.
-    param([string]$Org)
-    try {
-        $resp = Invoke-WebRequest -Uri "https://dev.azure.com/$Org/_apis/connectionData?api-version=7.1-preview" `
-            -Method Get -SkipHttpErrorCheck -ErrorAction Stop
-        $raw = $resp.Headers['X-VSS-ResourceTenant']
-        if ($raw) {
-            # Header can be an array and/or comma-separated; take the first GUID.
-            $tenant = (($raw -join ',') -split ',' | ForEach-Object { $_.Trim() } |
-                Where-Object { $_ -as [guid] } | Select-Object -First 1)
-            return $tenant
-        }
-    }
-    catch {
-        Write-Verbose "Tenant discovery failed: $($_.Exception.Message)"
-    }
-    return $null
-}
-
 function Get-BasicAuthHeader {
     param([string]$Token)
     $bytes = [System.Text.Encoding]::ASCII.GetBytes(":$Token")
     @{ Authorization = 'Basic ' + [Convert]::ToBase64String($bytes) }
 }
 
-function Initialize-AzAccounts {
-    # Ensures the Az.Accounts module is installed and imported. Installs it for
-    # the current user (no elevation) when missing.
-    if (Get-Module -Name Az.Accounts) { return }
+function Initialize-Auth {
+    # Ambient identity first: an Entra access token works anywhere a PAT does, so
+    # Entra is the default and -Pat (then the AZDO_PAT_<ORG> variable that
+    # Set-AutomationSecrets exports) only the fallback. Called before every
+    # batch, not just once: the module caches the token and renews it shortly
+    # before expiry, so re-resolving keeps a long ID-consuming run
+    # authenticated. Announces the mode once - never the credential.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $OrgUrl }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
 
-    if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
-        Write-Step 'Az.Accounts module not found. Installing it for the current user...'
-        # PowerShell Gallery requires TLS 1.2 on older configurations.
-        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
-
-        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+    if ($token) {
+        $script:Headers = @{ Authorization = 'Bearer ' + $token }
+        if ($script:AuthMode -ne 'Entra') {
+            Write-Host '==> Auth: Entra.' -ForegroundColor DarkGray
+            $script:AuthMode = 'Entra'
         }
-        if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -ne 'Trusted') {
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        return
+    }
+
+    $envName = Get-DerivedEnvVarName -Org $org
+    $pat = $Pat
+    if ([string]::IsNullOrWhiteSpace($pat)) {
+        $pat = [System.Environment]::GetEnvironmentVariable($envName)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($pat)) {
+        $script:Headers = Get-BasicAuthHeader -Token $pat
+        if ($script:AuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the PAT." -f $entraError)
+            $script:AuthMode = 'PAT'
         }
-        Install-Module -Name Az.Accounts -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        return
     }
 
-    Import-Module Az.Accounts -ErrorAction Stop
-}
-
-function Get-EntraAccessToken {
-    # Acquires an Entra (Azure AD) access token scoped to the Azure DevOps
-    # resource using the Az.Accounts module, installing it on demand and
-    # prompting for an interactive sign-in when no context exists.
-    # 499b84ac-1321-427f-aa17-267ca6975798 is the well-known Azure DevOps app ID.
-    $adoResource = '499b84ac-1321-427f-aa17-267ca6975798'
-
-    Initialize-AzAccounts
-
-    $ctx = Get-AzContext -ErrorAction SilentlyContinue
-    $needsConnect = -not $ctx -or ($TenantId -and $ctx.Tenant.Id -ne $TenantId)
-    if ($needsConnect) {
-        Write-Step 'Signing in to Azure...'
-        $connectArgs = @{ ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
-        if ($TenantId) { $connectArgs.TenantId = $TenantId }
-        Connect-AzAccount @connectArgs | Out-Null
-    }
-
-    Write-Verbose 'Acquiring Entra token via Get-AzAccessToken.'
-    $tokenArgs = @{ ResourceUrl = $adoResource; ErrorAction = 'Stop' }
-    if ($TenantId) { $tokenArgs.TenantId = $TenantId }
-    $token = Get-AzAccessToken @tokenArgs
-    # AsSecureString became the default in newer Az.Accounts versions.
-    if ($token.Token -is [System.Security.SecureString]) {
-        return [System.Net.NetworkCredential]::new('', $token.Token).Password
-    }
-    return $token.Token
+    throw ("No credential available: Entra sign-in failed ({0}), no -Pat was supplied and `$ENV:{1} is not set. Sign in to Entra, or run Set-AutomationSecrets." -f $entraError, $envName)
 }
 
 function Write-Step {
@@ -218,38 +188,14 @@ function Write-Step {
 
 $org = Get-OrgName -Url $OrgUrl
 
-# Resolve authentication. Preference order:
-#   1. Explicit -Pat.
-#   2. AZDO_PAT_<ORG> environment variable (Set-MigrationSecrets.ps1).
-#   3. Entra (Azure AD) access token from Az PowerShell / Azure CLI.
-if ([string]::IsNullOrWhiteSpace($Pat)) {
-    $envName = Get-DerivedEnvVarName -Org $org
-    $Pat = [System.Environment]::GetEnvironmentVariable($envName)
-    if ([string]::IsNullOrWhiteSpace($Pat)) {
-        Write-Verbose "No PAT supplied and '$envName' is not set; falling back to an Entra token."
-    }
-    else {
-        Write-Verbose "Using PAT from environment variable '$envName'."
-    }
+if ($TenantId) {
+    Write-Warning '-TenantId is deprecated and ignored: the tenant is discovered automatically by Get-AzureDevOpsAccessToken.'
 }
 
-if ([string]::IsNullOrWhiteSpace($Pat)) {
-    if ([string]::IsNullOrWhiteSpace($TenantId)) {
-        $TenantId = Get-AdoTenantId -Org $org
-        if ($TenantId) {
-            Write-Verbose "Discovered Entra tenant '$TenantId' for org '$org'."
-        }
-        else {
-            Write-Warning "Could not auto-discover the tenant for org '$org'. Sign-in may enumerate all your tenants; pass -TenantId to avoid this."
-        }
-    }
-    $entraToken = Get-EntraAccessToken
-    $headers = @{ Authorization = "Bearer $entraToken" }
-    Write-Verbose 'Authenticating with an Entra bearer token.'
-}
-else {
-    $headers = Get-BasicAuthHeader -Token $Pat
-}
+# Ambient-first credential resolution: Entra then the -Pat / AZDO_PAT_<ORG>
+# fallbacks, renewed per batch (see Initialize-Auth).
+$script:AuthMode = $null
+Initialize-Auth
 
 $apiVersion = '7.1'
 $createUri = "https://dev.azure.com/$org/$Project/_apis/wit/workitems/`$$WorkItemType`?api-version=$apiVersion"
@@ -307,7 +253,7 @@ function New-ThrowawayWorkItem {
     ) | ConvertTo-Json -Depth 5 -AsArray
     $wi = Invoke-AdoRestWithRetry -RequestArgs @{
         Uri         = $createUri
-        Headers     = $headers
+        Headers     = $script:Headers
         Method      = 'Post'
         Body        = $body
         ContentType = 'application/json-patch+json'
@@ -321,7 +267,7 @@ function Remove-WorkItem {
     $uri = "https://dev.azure.com/$org/$Project/_apis/wit/workitems/$Id`?destroy=true&api-version=$apiVersion"
     Invoke-AdoRestWithRetry -RequestArgs @{
         Uri     = $uri
-        Headers = $headers
+        Headers = $script:Headers
         Method  = 'Delete'
     } | Out-Null
 }
@@ -346,6 +292,9 @@ $startTime = Get-Date
 $startId = 0
 
 while ($lastId -lt $target) {
+    # Renew a near-expiry Entra token before each batch (cache hit otherwise).
+    Initialize-Auth
+
     # First iteration probes the current position with a single item; afterwards
     # create as many as needed, capped by BatchSize and trimmed near the target.
     if ($lastId -eq 0) {

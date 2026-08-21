@@ -31,8 +31,9 @@ $here = $PSScriptRoot
 . "$here\..\..\init.ps1"
 
 # Load PATs from secrets\secrets.json into the environment: $ENV:AZDO_PAT_<ORG>
-# for the Run-Migrate-*.ps1 configs, plus the MigrationTools__...__AccessToken
-# names that devopsmigration.exe binds over its JSON configs.
+# as Entra fallbacks for the Run-Migrate-*.ps1 configs, plus the
+# MigrationTools__...__AccessToken names that devopsmigration.exe binds over its
+# JSON configs (devopsmigration.exe cannot use Entra, so those stay PAT-fed).
 Set-AutomationSecrets | Out-Null
 
 # Resolve devopsmigration.exe from PATH so a missing tool fails fast with an

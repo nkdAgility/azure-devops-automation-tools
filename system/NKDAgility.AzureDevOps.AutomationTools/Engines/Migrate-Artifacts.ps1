@@ -1599,6 +1599,8 @@ function Invoke-FeedInventory {
     param($Feed)
 
     Write-Step "Feed: $($Feed.name)"
+    # Renew a near-expiry Entra token before this feed's probes (cache hit otherwise).
+    Initialize-SourceAuth
     $packages = Get-FeedPackages -FeedId $Feed.id
     foreach ($pkg in $packages) {
         $protocol = "$($pkg.protocolType)".ToLowerInvariant()
@@ -1622,6 +1624,9 @@ function Migrate-Feed {
     param($Feed, [string]$WorkRoot)
 
     Write-Step "Feed: $($Feed.name)"
+    # Renew near-expiry Entra tokens before this feed's sync (cache hits otherwise).
+    Initialize-SourceAuth
+    Initialize-TargetAuth
     $targetFeed = New-TargetFeed -SourceFeed $Feed
     # Defend against a function accidentally emitting extra objects: keep only
     # the actual feed (the one carrying an 'id').
@@ -1657,6 +1662,10 @@ function Migrate-Feed {
     $pkgIndex = 0
     foreach ($pkg in $packages) {
         $pkgIndex++
+        # Re-resolve both credentials so an Entra token nearing expiry is
+        # renewed before this package's downloads and publishes start.
+        Initialize-SourceAuth
+        Initialize-TargetAuth
         $protocol = "$($pkg.protocolType)".ToLowerInvariant()
 
         Write-Host ("    [{0}/{1}] {2} [{3}]" -f $pkgIndex, $totalPackages, $pkg.name, $protocol) -ForegroundColor Cyan
@@ -1720,8 +1729,14 @@ function Migrate-Feed {
 
 #region Main ------------------------------------------------------------------
 
-$script:SourceHeaders = Get-AuthHeader -Pat $SourcePat
-$script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
+# Ambient-first credential resolution: Entra then the -SourcePat/-TargetPat
+# fallbacks, renewed per feed and package (see Initialize-SourceAuth). Inventory
+# is read-only against the source, so the target credential is only resolved for
+# a real migration run.
+$script:SourceAuthMode = $null
+$script:TargetAuthMode = $null
+Initialize-SourceAuth
+if (-not $Inventory) { Initialize-TargetAuth }
 
 # Establish the persistent download cache. Files are fetched into here once and
 # reused across runs (inventory sizing and migration upload share it), so the

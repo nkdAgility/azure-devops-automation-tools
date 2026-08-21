@@ -68,19 +68,31 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $validParams = (Get-Command -Name $migrateScript).Parameters.Keys
 
 # Expands "$ENV:NAME" / "${ENV:NAME}" placeholders in a config string using the
-# process environment (tokens loaded by Set-AutomationSecrets).
+# process environment (tokens loaded by Set-AutomationSecrets). PATs are
+# fallbacks behind ambient identity (Entra), so -AllowMissing returns $null for
+# an unset variable instead of throwing.
 function Expand-EnvPlaceholder {
-    param([string]$Value)
-    [regex]::Replace($Value, '\$(?:ENV:(?<n>\w+)|\{ENV:(?<n>\w+)\})', {
-        param($m)
-        $name = $m.Groups['n'].Value
-        $resolved = [Environment]::GetEnvironmentVariable($name)
-        if ([string]::IsNullOrEmpty($resolved)) {
-            throw "Environment variable '$name' referenced in config is not set. Run Set-AutomationSecrets first (Sync.ps1 does this automatically)."
-        }
-        $resolved
-    }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    param([string]$Value, [switch]$AllowMissing)
+    try {
+        [regex]::Replace($Value, '\$(?:ENV:(?<n>\w+)|\{ENV:(?<n>\w+)\})', {
+            param($m)
+            $name = $m.Groups['n'].Value
+            $resolved = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrEmpty($resolved)) {
+                throw "Environment variable '$name' referenced in config is not set. Run Set-AutomationSecrets first (Sync.ps1 does this automatically)."
+            }
+            $resolved
+        }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    catch {
+        if ($AllowMissing) { return $null }
+        throw
+    }
 }
+
+# The engine prefers ambient identity (Entra) and only uses these as fallbacks -
+# so a missing token is not an error here.
+$fallbackTokenParams = @('SourcePat', 'TargetPat')
 
 # Switch parameters on Migrate-Artifacts.ps1: only include when set to $true.
 $switchParams = @('KeepDownloads')
@@ -104,7 +116,8 @@ function ConvertTo-MigrateParams {
         }
 
         if ($value -is [string]) {
-            $value = Expand-EnvPlaceholder -Value $value
+            $value = Expand-EnvPlaceholder -Value $value -AllowMissing:($fallbackTokenParams -contains $name)
+            if ($null -eq $value) { continue }
         }
 
         $params[$name] = $value

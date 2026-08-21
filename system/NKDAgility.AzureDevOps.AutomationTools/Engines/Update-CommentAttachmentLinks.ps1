@@ -58,11 +58,14 @@
         comment is unescaped (the button escaped the whole comment) and saved
         as markdown.
 
-    PATs: in a customer workspace, run Set-AutomationSecrets (from the
-    NKDAgility.AzureDevOps.AutomationTools module) first; -SourcePat and
-    -TargetPat then default from the derived AZDO_PAT_<ORG> variables. The
-    source PAT needs Work Items (Read); the target PAT needs Work Items
-    (Read & Write).
+    Authentication is ambient-identity first, stored token as the fallback:
+    Entra by default for BOTH organisations. When the automation module is
+    loaded the engine acquires an Entra access token per organisation via
+    Get-AzureDevOpsAccessToken, re-resolved per work item so the module's
+    cache renews it near expiry across a long run. The fallbacks are -SourcePat
+    / -TargetPat, then the derived AZDO_PAT_<ORG> variables populated by
+    Set-AutomationSecrets. The source credential needs Work Items (Read); the
+    target Work Items (Read & Write).
 
 .PARAMETER SourceOrgUrl
     Source organisation URL, e.g. https://dev.azure.com/georgfischer. Only
@@ -75,10 +78,12 @@
     Target project whose work item comments are scanned, e.g. UM-MIKRON-Milling.
 
 .PARAMETER SourcePat
-    PAT for the source organisation. Defaults from AZDO_PAT_<SOURCEORG>.
+    Fallback PAT for the source organisation, used when Entra sign-in is
+    unavailable or fails. Defaults from AZDO_PAT_<SOURCEORG>.
 
 .PARAMETER TargetPat
-    PAT for the target organisation. Defaults from AZDO_PAT_<TARGETORG>.
+    Fallback PAT for the target organisation, used when Entra sign-in is
+    unavailable or fails. Defaults from AZDO_PAT_<TARGETORG>.
 
 .PARAMETER WorkItemId
     Optional. Restrict the scan to these work item ids - use this to validate
@@ -172,22 +177,61 @@ function Get-DerivedPatName {
     'AZDO_PAT_' + ($Org.ToUpperInvariant() -replace '[^A-Z0-9]', '_')
 }
 
-function Resolve-Pat {
-    # An explicit value wins; otherwise fall back to the AZDO_PAT_<ORG> variable
-    # that Set-AutomationSecrets exports from the workspace secrets file.
-    param([string]$Explicit, [string]$Org, [string]$Side)
-    if (-not [string]::IsNullOrWhiteSpace($Explicit)) { return $Explicit }
-    $name = Get-DerivedPatName -Org $Org
-    $value = [Environment]::GetEnvironmentVariable($name)
-    if ([string]::IsNullOrWhiteSpace($value)) {
-        throw "No $Side PAT. Pass -${Side}Pat, or run Set-AutomationSecrets so `$ENV:$name is populated."
-    }
-    return $value
-}
-
 function Get-AuthHeader {
     param([string]$Token)
     @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Token")) }
+}
+
+function Initialize-AdoAuth {
+    # Ambient identity first: an Entra access token works anywhere a PAT does, so
+    # Entra is the default and the explicit PAT (then the derived AZDO_PAT_<ORG>
+    # variable that Set-AutomationSecrets exports) only the fallback. Called
+    # before every work item, not just once: the module caches the token and
+    # renews it shortly before expiry, so re-resolving keeps a long run
+    # authenticated. Announces the mode once per side - never the credential.
+    # Returns the resolved header hashtable.
+    param([string]$OrgUrl, [string]$ExplicitPat, [string]$Side)
+
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $OrgUrl }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        if ($script:AuthMode[$Side] -ne 'Entra') {
+            Write-Host "==> $Side auth: Entra." -ForegroundColor DarkGray
+            $script:AuthMode[$Side] = 'Entra'
+        }
+        return @{ Authorization = 'Bearer ' + $token }
+    }
+
+    $envName = Get-DerivedPatName -Org (Get-OrgName -Url $OrgUrl)
+    $pat = $ExplicitPat
+    if ([string]::IsNullOrWhiteSpace($pat)) {
+        $pat = [Environment]::GetEnvironmentVariable($envName)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($pat)) {
+        if ($script:AuthMode[$Side] -ne 'PAT') {
+            Write-Warning "Entra sign-in unavailable ($entraError); falling back to the $Side PAT."
+            $script:AuthMode[$Side] = 'PAT'
+        }
+        return Get-AuthHeader -Token $pat
+    }
+
+    throw "No $Side credential available: Entra sign-in failed ($entraError), no -${Side}Pat was supplied and `$ENV:$envName is not set. Sign in to Entra, or run Set-AutomationSecrets."
+}
+
+function Initialize-SourceAuth {
+    $script:SourceHeaders = Initialize-AdoAuth -OrgUrl $SourceOrgUrl -ExplicitPat $SourcePat -Side 'Source'
+}
+
+function Initialize-TargetAuth {
+    $script:TargetHeaders = Initialize-AdoAuth -OrgUrl $TargetOrgUrl -ExplicitPat $TargetPat -Side 'Target'
 }
 
 function Invoke-AdoRest {
@@ -242,15 +286,18 @@ function Set-TargetComment {
         [ValidateSet('markdown', 'html')] [string]$Format
     )
     $uri = "$targetBase/_apis/wit/workItems/$Id/comments/$CommentId`?format=$Format&api-version=7.1-preview.4"
-    Invoke-AdoRest -Uri $uri -Headers $targetHeaders -Method Patch -Body (@{ text = $Text } | ConvertTo-Json) | Out-Null
+    Invoke-AdoRest -Uri $uri -Headers $script:TargetHeaders -Method Patch -Body (@{ text = $Text } | ConvertTo-Json) | Out-Null
 }
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
 
 $sourceOrg = Get-OrgName -Url $SourceOrgUrl
 $targetOrg = Get-OrgName -Url $TargetOrgUrl
-$sourceHeaders = Get-AuthHeader -Token (Resolve-Pat -Explicit $SourcePat -Org $sourceOrg -Side 'Source')
-$targetHeaders = Get-AuthHeader -Token (Resolve-Pat -Explicit $TargetPat -Org $targetOrg -Side 'Target')
+# Ambient-first credential resolution: Entra then the -SourcePat/-TargetPat (or
+# AZDO_PAT_<ORG>) fallbacks, renewed per work item (see Initialize-AdoAuth).
+$script:AuthMode = @{ Source = $null; Target = $null }
+Initialize-SourceAuth
+Initialize-TargetAuth
 $targetBase = '{0}/{1}' -f $TargetOrgUrl.TrimEnd('/'), [uri]::EscapeDataString($TargetProject)
 
 # Attachment URLs under the SOURCE org, wherever they sit in the comment text -
@@ -296,8 +343,10 @@ if ($RepairFormatCsv) {
     foreach ($row in $rows) {
         $wi = [int]$row.WorkItemId; $cid = [int]$row.CommentId
         $done++
+        # Renew a near-expiry Entra token before each comment (cache hit otherwise).
+        Initialize-TargetAuth
         Write-Progress -Activity 'Comment format repair' -Status ("[{0}/{1}] WI {2} comment {3}" -f $done, @($rows).Count, $wi, $cid) -PercentComplete ([math]::Min(100, 100 * $done / [math]::Max(1, @($rows).Count)))
-        $comment = Invoke-AdoRest -Uri "$targetBase/_apis/wit/workItems/$wi/comments/$cid`?api-version=7.1-preview.4" -Headers $targetHeaders
+        $comment = Invoke-AdoRest -Uri "$targetBase/_apis/wit/workItems/$wi/comments/$cid`?api-version=7.1-preview.4" -Headers $script:TargetHeaders
         $format = Get-CommentFormat $comment
         if ($format -eq 'markdown') {
             Write-Host "  WI $wi comment ${cid}: already markdown - nothing to do" -ForegroundColor DarkGray
@@ -334,7 +383,7 @@ else {
     $lastId = 0
     while ($true) {
         $wiql = "Select [System.Id] From WorkItems Where [System.TeamProject] = '$TargetProject' And [System.CommentCount] > 0 And [System.Id] > $lastId Order By [System.Id]"
-        $result = Invoke-AdoRest -Uri "$targetBase/_apis/wit/wiql?`$top=19999&api-version=7.1" -Headers $targetHeaders -Method Post -Body (@{ query = $wiql } | ConvertTo-Json)
+        $result = Invoke-AdoRest -Uri "$targetBase/_apis/wit/wiql?`$top=19999&api-version=7.1" -Headers $script:TargetHeaders -Method Post -Body (@{ query = $wiql } | ConvertTo-Json)
         $batch = @($result.workItems | ForEach-Object { [int]$_.id })
         if (-not $batch.Count) { break }
         $batch | ForEach-Object { $collected.Add($_) }
@@ -390,6 +439,11 @@ $lastBeat = [TimeSpan]::Zero
 
 foreach ($id in $ids) {
     $processed++
+    # Re-resolve both credentials so an Entra token nearing expiry is renewed
+    # before this work item's reads, downloads and comment edits (cache hits
+    # otherwise - the module only re-acquires near expiry).
+    Initialize-SourceAuth
+    Initialize-TargetAuth
     $rate = if ($stopwatch.Elapsed.TotalMinutes -gt 0) { $processed / $stopwatch.Elapsed.TotalMinutes } else { 0 }
     $eta = if ($rate -gt 0 -and $total -gt $processed) { [TimeSpan]::FromMinutes(($total - $processed) / $rate).ToString('hh\:mm\:ss') } else { '--:--:--' }
     if ($total -gt 0) {
@@ -408,7 +462,7 @@ foreach ($id in $ids) {
     do {
         $uri = "$targetBase/_apis/wit/workItems/$id/comments?`$top=200&api-version=7.1-preview.4"
         if ($continuation) { $uri += "&continuationToken=$continuation" }
-        $page = Invoke-AdoRest -Uri $uri -Headers $targetHeaders
+        $page = Invoke-AdoRest -Uri $uri -Headers $script:TargetHeaders
         if ($page.comments) { $page.comments | ForEach-Object { $comments.Add($_) } }
         $continuation = if ($page.PSObject.Properties['continuationToken']) { $page.continuationToken } else { $null }
     } while ($continuation)
@@ -458,9 +512,9 @@ foreach ($id in $ids) {
                 if ($Commit) {
                     $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("caf-" + $guid)
                     try {
-                        Invoke-AdoRest -Uri $sourceUrl -Headers $sourceHeaders -OutFile $temp | Out-Null
+                        Invoke-AdoRest -Uri $sourceUrl -Headers $script:SourceHeaders -OutFile $temp | Out-Null
                         $uploadUri = "$targetBase/_apis/wit/attachments?fileName=$([uri]::EscapeDataString($fileName))&api-version=7.1"
-                        $uploaded = Invoke-AdoRest -Uri $uploadUri -Headers $targetHeaders -Method Post `
+                        $uploaded = Invoke-AdoRest -Uri $uploadUri -Headers $script:TargetHeaders -Method Post `
                             -Body ([System.IO.File]::ReadAllBytes($temp)) -ContentType 'application/octet-stream'
                         $attachmentMap[$guid] = $uploaded.url
                     }

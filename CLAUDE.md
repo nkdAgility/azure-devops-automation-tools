@@ -160,6 +160,7 @@ Invoke-Pester -Path .\tests
 
 - `Module.Tests.ps1` — manifest hygiene (every `Public/` file exported and vice versa), every `.ps1` parses, and structural guards that the toolkit holds no customer data: no `data/` folder, no `config.json`, `/data/` gitignored with no exception, and no script dot-sourcing includes relative to the current directory.
 - `WorkItemLink.Tests.ps1` — the REST link-inventory commands against a stubbed transport. The stub replaces the private `Invoke-AzureDevOpsApi` in the module's own scope (define it with `function script:` inside `& $module { }`, or it lands in a child scope and vanishes), so link type filtering, WIQL parsing, enrichment, comment matching and file output are all exercised without touching a collection.
+- `EngineAuth.Tests.ps1` — structural (AST) guards on the engines' ambient-first authentication contract: PAT parameters stay optional, every `Initialize-*Auth` tries `Get-AzureDevOpsAccessToken` before its PAT fallback and throws when neither is available, credentials are re-resolved mid-run, and the binder templates expand token placeholders leniently.
 
 Anything that talks to a collection is stubbed — the suite needs no PAT, no server and no network. Keep it that way so CI can run it.
 
@@ -219,6 +220,22 @@ on a machine that has never signed in to Azure.
 > REST call that used to fall through to the process identity must now say
 > `-UseDefaultCredentials`. `Get-EntraAccessToken` throws naming that switch when the
 > collection returns no tenant header. Every public REST command takes and forwards it.
+
+**Engines follow the same default.** Every engine that talks to an organisation
+(`Migrate-Repos`, `Migrate-Artifacts`, `Migrate-ReposToGitHub`, `Update-WikiWorkItemLinks`,
+`Update-CommentAttachmentLinks`, `Set-WorkItemStartId`) resolves credentials through a local
+`Initialize-*Auth` function per organisation: Entra via the module's
+`Get-AzureDevOpsAccessToken` first (re-resolved per repository / feed / work-item batch so
+the cached token renews near expiry across a long run — an Entra token works anywhere a PAT
+does: REST Bearer, git `http.extraheader`, and the packaging tools' basic-auth password),
+then the engine's optional PAT parameter (plus, where documented, the derived
+`AZDO_PAT_<ORG>` variable) with a one-time warning, then a throw naming both options. The
+binder templates expand `$ENV:AZDO_PAT_*` / `$ENV:GITHUB_TOKEN` placeholders leniently
+(`Expand-EnvPlaceholder -AllowMissing`), so an unset variable omits the fallback instead of
+failing the run. `tests/EngineAuth.Tests.ps1` asserts all of this structurally. The one
+exception is **devopsmigration.exe**: its `configuration-*.json` files bind
+`MigrationTools__...__AccessToken` environment variables and cannot use Entra, so those stay
+PAT-fed by `Set-AutomationSecrets` — leave them alone.
 
 Secrets follow the same shape: `Set-AutomationSecrets -NoClobber` leaves any variable that is
 already set, so a CI-provided secret or a deliberate per-shell override always beats the
