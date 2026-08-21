@@ -739,9 +739,21 @@ function Convert-RepoPerDecisions {
     Invoke-Git -GitArgs @('clone', '--mirror', $CloneDir, $RewriteDir)
     Push-Location $RewriteDir
     try {
-        if ($StripPaths) {
+        # --force: this is a disposable local copy, not somebody's fresh clone.
+        if ($StripPaths -and -not $LfsPaths) {
+            # Every decided file is a strip, so strip by BLOB SIZE rather than by
+            # path. The object scan reports only one path per blob, and the same
+            # oversize content often exists at paths it never showed (the same binary
+            # vendored into several release folders); a path-based strip leaves those
+            # behind, a size-based one cannot miss. 104857600 = the 100 MB scan limit.
+            Write-Host '    Stripping every blob over 100 MB from history (git filter-repo)...' -ForegroundColor Green
+            Invoke-Git -GitArgs @('filter-repo', '--strip-blobs-bigger-than', '104857600', '--force')
+        }
+        elseif ($StripPaths) {
+            # Mixed decisions: stay surgical so an 'lfs' file is never stripped. If
+            # the same content survives at an unreported path, the post-rewrite scan
+            # catches it and records the new path for a decision.
             Write-Host ("    Stripping {0} path(s) from history (git filter-repo)..." -f $StripPaths.Count) -ForegroundColor Green
-            # --force: this is a disposable local copy, not somebody's fresh clone.
             $filterArgs = @('filter-repo', '--invert-paths', '--force')
             foreach ($path in $StripPaths) { $filterArgs += @('--path', $path) }
             Invoke-Git -GitArgs $filterArgs
@@ -1217,11 +1229,21 @@ function Migrate-ApprovedRepo {
                 return
             }
 
-            # Whichever rewrite ran, prove it worked before any bytes move.
+            # Whichever rewrite ran, prove it worked before any bytes move. Anything
+            # that survived is content at a path the original scan never reported -
+            # refresh the report with what actually remains and record the new paths
+            # in the decisions file so the operator decides on them, not on stale data.
             $stillOversize = @(Test-OversizeBlobs -CloneDir $rewriteDir -RepoLabel $Row.SourceRepo)
             if ($stillOversize.Count -gt 0) {
+                $stillOversize | ForEach-Object { '{0} {1,10} MB {2}' -f $_.Sha, $_.SizeMB, $_.Path } |
+                    Set-Content -LiteralPath $reportPath -Encoding UTF8
+                $remedy = ''
+                if ($OversizeDecisions) {
+                    $null = Update-OversizeDecisions -Row $Row -Oversize $stillOversize
+                    $remedy = ' - the remaining paths were added to {0}, decide on them and re-run' -f (Split-Path -Leaf $OversizeDecisions)
+                }
                 New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
-                    -Status ("Blocked: {0} blob(s) still > 100MB after the rewrite - see {1}" -f $stillOversize.Count, (Split-Path -Leaf $reportPath))
+                    -Status ("Blocked: {0} blob(s) still > 100MB after the rewrite{1}; see {2}" -f $stillOversize.Count, $remedy, (Split-Path -Leaf $reportPath))
                 return
             }
             $pushDir = $rewriteDir
