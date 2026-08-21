@@ -120,6 +120,22 @@
     Skip the scan for blobs over GitHub's 100 MB limit. The push of an
     offending repository will then fail on GitHub's side instead.
 
+.PARAMETER LfsMigrateOversize
+    Opt-in: instead of Blocking a repository whose history contains blobs over
+    the limit, rewrite that history so every file over -LfsMigrateAboveMB
+    becomes a Git LFS pointer ('git lfs migrate import --everything') and push
+    the rewritten history. The rewrite happens in a separate local copy - the
+    cached source mirror stays faithful - and is deterministic, so re-runs
+    reproduce the same rewritten commits and push only deltas. Consequences to
+    agree with the customer BEFORE opting in: the GitHub history's commit ids
+    will not match the source's from the first rewritten commit onward, and
+    the migrated objects consume the GitHub organisation's LFS storage quota.
+
+.PARAMETER LfsMigrateAboveMB
+    File-size threshold for -LfsMigrateOversize, in MB. Default 100 (the
+    GitHub hard limit). Lower it (e.g. 50, where GitHub starts warning) to
+    move more of the large files into LFS during the same rewrite.
+
 .PARAMETER AcceptRenames
     Allow a row whose TargetName differs from the name it was previously
     migrated under to migrate to the new name. The previously migrated
@@ -183,6 +199,11 @@ param(
     [switch]$SkipLfs,
 
     [switch]$SkipOversizeCheck,
+
+    [switch]$LfsMigrateOversize,
+
+    [ValidateRange(1, 2048)]
+    [int]$LfsMigrateAboveMB = 100,
 
     [switch]$AcceptRenames
 )
@@ -599,6 +620,26 @@ function Test-OversizeBlobs {
 
 #region Push strategies --------------------------------------------------------
 
+function Convert-OversizeToLfs {
+    # Rewrites the repository history so every file over the threshold becomes a Git
+    # LFS pointer, in a SEPARATE local mirror copy - the cached source mirror must
+    # stay a faithful mirror so re-runs keep fetching cleanly. 'git lfs migrate
+    # import' is deterministic, so re-running produces identical rewritten commits
+    # and the subsequent push stays incremental. The migrated objects land in the
+    # rewrite copy's local LFS store, ready for Push-Lfs.
+    param([string]$CloneDir, [string]$RewriteDir, [int]$AboveMB)
+
+    if (Test-Path $RewriteDir) { Remove-Item -Path $RewriteDir -Recurse -Force }
+    Write-Host ("    Rewriting history: files over {0} MB -> Git LFS..." -f $AboveMB) -ForegroundColor Green
+    # Local mirror copy (object store is hardlinked where possible, so this is cheap).
+    Invoke-Git -GitArgs @('clone', '--mirror', $CloneDir, $RewriteDir)
+    Push-Location $RewriteDir
+    try {
+        Invoke-Git -GitArgs @('lfs', 'migrate', 'import', '--everything', ('--above={0}mb' -f $AboveMB))
+    }
+    finally { Pop-Location }
+}
+
 function Sync-SourceMirror {
     # Clones the source as a mirror if not present, otherwise fetches updates
     # into the existing cached mirror so re-runs stay in sync. The source remote
@@ -706,7 +747,11 @@ function Push-Lfs {
     param(
         [string]$CloneDir,
         [string]$SourceRemote = 'source',
-        [string]$TargetRemote = 'target'
+        [string]$TargetRemote = 'target',
+
+        # Set for an LFS-rewrite copy: its objects were placed in the local store by
+        # 'git lfs migrate' and its 'source' remote is a local path, not a server.
+        [switch]$SkipSourceFetch
     )
 
     if ($SkipLfs -or -not (Test-GitLfs)) { return }
@@ -725,7 +770,9 @@ function Push-Lfs {
     }
 
     # Fetch (only) the objects needed from the source into the local store.
-    Sync-SourceLfs -CloneDir $CloneDir -RemoteName $SourceRemote
+    if (-not $SkipSourceFetch) {
+        Sync-SourceLfs -CloneDir $CloneDir -RemoteName $SourceRemote
+    }
 
     Write-Host '    Pushing missing LFS objects to target...' -ForegroundColor Green
     Push-Location $CloneDir
@@ -940,33 +987,56 @@ function Migrate-ApprovedRepo {
     Sync-SourceMirror -CloneDir $cloneDir -RemoteUrl $repo.remoteUrl
 
     # Refuse to start a push GitHub is guaranteed to reject: any blob over 100 MB.
+    # With -LfsMigrateOversize (opt-in), the offending history is rewritten into Git
+    # LFS in a separate copy and the push proceeds from there instead.
+    $pushDir = $cloneDir
+    $isLfsRewrite = $false
     if (-not $SkipOversizeCheck) {
         $oversize = @(Test-OversizeBlobs -CloneDir $cloneDir -RepoLabel $Row.SourceRepo)
         if ($oversize.Count -gt 0) {
             $reportPath = Join-Path $WorkRoot ($Row.TargetName + '.oversize.txt')
             $oversize | ForEach-Object { '{0} {1,10} MB {2}' -f $_.Sha, $_.SizeMB, $_.Path } |
                 Set-Content -LiteralPath $reportPath -Encoding UTF8
-            Write-Warning ("    {0} blob(s) exceed GitHub's 100 MB limit; object list: {1}" -f $oversize.Count, $reportPath)
-            New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
-                -Status ("Blocked: {0} blob(s) > 100MB (GitHub hard limit) - see {1}; consider 'git lfs migrate' on the source" -f $oversize.Count, (Split-Path -Leaf $reportPath))
-            return
+
+            if ($LfsMigrateOversize -and (Test-GitLfs)) {
+                Write-Host ("    {0} blob(s) exceed GitHub's 100 MB limit; -LfsMigrateOversize is set." -f $oversize.Count) -ForegroundColor Yellow
+                $rewriteDir = Join-Path $WorkRoot ($Row.TargetName + '.lfsrewrite.git')
+                Convert-OversizeToLfs -CloneDir $cloneDir -RewriteDir $rewriteDir -AboveMB $LfsMigrateAboveMB
+                $stillOversize = @(Test-OversizeBlobs -CloneDir $rewriteDir -RepoLabel $Row.SourceRepo)
+                if ($stillOversize.Count -gt 0) {
+                    New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
+                        -Status ("Blocked: {0} blob(s) still > 100MB after the LFS rewrite - see {1}" -f $stillOversize.Count, (Split-Path -Leaf $reportPath))
+                    return
+                }
+                $pushDir = $rewriteDir
+                $isLfsRewrite = $true
+                $strategy = "$strategy (lfs rewrite)"
+            }
+            else {
+                Write-Warning ("    {0} blob(s) exceed GitHub's 100 MB limit; object list: {1}" -f $oversize.Count, $reportPath)
+                New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
+                    -Status ("Blocked: {0} blob(s) > 100MB (GitHub hard limit) - see {1}; with customer agreement re-run with -LfsMigrateOversize to rewrite them into Git LFS" -f $oversize.Count, (Split-Path -Leaf $reportPath))
+                return
+            }
         }
     }
 
     # Ensure the clone has a 'target' remote pointing at the GitHub repo.
     # Done before the LFS step so it can query what the target is missing.
-    Set-TargetRemote -CloneDir $cloneDir -TargetUrl $targetUrl -RemoteName 'target'
+    Set-TargetRemote -CloneDir $pushDir -TargetUrl $targetUrl -RemoteName 'target'
 
     # Transfer only the LFS objects the target is missing (fetched from source
     # on demand) before the refs are pushed so pointers never precede their
-    # content. Also backfills repos migrated before with missing objects.
-    Push-Lfs -CloneDir $cloneDir -SourceRemote 'source' -TargetRemote 'target'
+    # content. Also backfills repos migrated before with missing objects. For an
+    # LFS-rewrite copy the objects are already in the local store, so the source
+    # fetch is skipped.
+    Push-Lfs -CloneDir $pushDir -SourceRemote 'source' -TargetRemote 'target' -SkipSourceFetch:$isLfsRewrite
 
     if ($useSegmented) {
-        Push-Segmented -CloneDir $cloneDir -TargetRemote 'target' -BatchSize $CommitBatchSize
+        Push-Segmented -CloneDir $pushDir -TargetRemote 'target' -BatchSize $CommitBatchSize
     }
     else {
-        Push-Mirror -CloneDir $cloneDir -TargetRemote 'target'
+        Push-Mirror -CloneDir $pushDir -TargetRemote 'target'
     }
 
     $defaultBranch = if ($repo.PSObject.Properties['defaultBranch']) { [string]$repo.defaultBranch } else { '' }

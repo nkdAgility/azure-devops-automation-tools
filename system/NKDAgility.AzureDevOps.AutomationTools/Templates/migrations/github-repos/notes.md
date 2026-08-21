@@ -21,9 +21,10 @@
    inventory refresh -> migrate approved rows (all branches, tags and LFS objects).
 4. Re-run `.\Sync.ps1` any time: newly approved rows migrate, already-migrated repos
    re-sync idempotently (deltas only). Nothing on GitHub is ever deleted.
-5. Commit `repo-inventory.csv` and `output\github-repomigration.csv` after each run -
-   they are the engagement evidence, and the summary is also the rename-detection
-   baseline for the next run.
+5. Commit `repo-inventory.csv`, `output\github-repomigration.csv` and
+   `output\github-attention.md` after each run - they are the engagement evidence
+   (the summary is also the rename-detection baseline, and the attention report is
+   the one-place list of every repo that has not migrated, with full reasons).
 
 ## Rerun semantics
 
@@ -35,7 +36,7 @@
 | `TargetName` edited after migration | `Blocked` until the CSV is reverted or reconciled with `-AcceptRenames` |
 | Repo deleted from source | Marked `MissingFromSource`; `Skipped` even if approved |
 | Run failed for a repo | Recorded `Failed: ...`; retried automatically on the next run |
-| Blob over 100 MB (GitHub hard limit) | `Blocked`, offending objects listed next to the clone; consider `git lfs migrate` on the source (history rewrite - customer decision) |
+| Blob over 100 MB (GitHub hard limit) | `Blocked`, offending objects listed next to the clone AND inlined in `output\github-attention.md`. With customer agreement, set `LfsMigrateOversize: true` to rewrite those files into Git LFS on the way over (deterministic rewrite in a separate copy; GitHub commit ids diverge from the source, LFS quota applies) |
 
 ## Run log
 

@@ -94,7 +94,7 @@ function Expand-EnvPlaceholder {
 $fallbackTokenParams = @('SourcePat', 'GitHubToken')
 
 # Switch parameters on Migrate-ReposToGitHub.ps1: only include when set to $true.
-$switchParams = @('ForceSegmented', 'KeepClones', 'SkipLfs', 'SkipOversizeCheck', 'AcceptRenames')
+$switchParams = @('ForceSegmented', 'KeepClones', 'SkipLfs', 'SkipOversizeCheck', 'LfsMigrateOversize', 'AcceptRenames')
 
 # Builds a parameter hashtable from config properties: null/empty values are
 # skipped so the engine keeps its own defaults, switches are only included when
@@ -175,6 +175,18 @@ else {
     $totalBytes = ($summaries | Measure-Object -Property SizeBytes -Sum).Sum
     Write-Host ("Total: {0} repository(ies) processed, {1} migrated, {2:N2} GB." -f $repoCount, $migrated, [math]::Round($totalBytes / 1GB, 2)) -ForegroundColor Green
 
+    # The summary table truncates long statuses; repeat every not-migrated repo with
+    # its FULL reason so nothing has to be fished out of the CSV.
+    $needsAttention = @($summaries | Where-Object { $_.Status -ne 'Migrated' -and $_.Status -notlike 'WhatIf*' })
+    if ($needsAttention) {
+        Write-Host ''
+        Write-Host ('---- Needs attention ({0}) - full reasons ----' -f $needsAttention.Count) -ForegroundColor Yellow
+        foreach ($item in ($needsAttention | Sort-Object SourceProject, SourceRepo)) {
+            Write-Host ('  {0}/{1} -> {2}' -f $item.SourceProject, $item.SourceRepo, $item.TargetName) -ForegroundColor Yellow
+            Write-Host ('    {0}' -f $item.Status) -ForegroundColor DarkYellow
+        }
+    }
+
     # Under -WhatIf nothing moved: keep the last real run's evidence CSV intact.
     if (-not $WhatIfPreference) {
         $csvDir = Split-Path -Parent $csvPath
@@ -232,6 +244,46 @@ else {
             Sort-Object { [double]$_.size_mb } -Descending |
             Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
         Write-Host ("Wrote summary CSV: {0}" -f $csvPath) -ForegroundColor Green
+
+        # One committed place for every repository that has NOT migrated: the full
+        # reason per repo, with oversize object lists inlined so nothing has to be
+        # fished out of the gitignored work folder. Built from the MERGED summary, so
+        # it reflects the latest known state across runs, not just this run.
+        $attention = @($merged.Values | Where-Object {
+                $_.PSObject.Properties['status'] -and $_.status -and
+                $_.status -ne 'Migrated' -and $_.status -notlike 'WhatIf*'
+            })
+        $attentionPath = Join-Path (Split-Path -Parent $csvPath) 'github-attention.md'
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add('# GitHub migration - needs attention')
+        $lines.Add('')
+        $lines.Add(('Generated {0} by Run-Migrate-ReposToGitHub.ps1 after each committing run. Latest' -f (Get-Date -Format 'yyyy-MM-dd HH:mm')))
+        $lines.Add('known state of every approved repository that has not migrated; re-running')
+        $lines.Add('Sync.ps1 refreshes this file.')
+        if (-not $attention) {
+            $lines.Add('')
+            $lines.Add('**Nothing outstanding - every processed repository is Migrated.**')
+        }
+        foreach ($group in ($attention | Group-Object { ($_.status -split ':')[0] } | Sort-Object Name)) {
+            $lines.Add('')
+            $lines.Add(('## {0} ({1})' -f $group.Name, $group.Count))
+            foreach ($item in ($group.Group | Sort-Object project, repo)) {
+                $lines.Add('')
+                $lines.Add(('### {0} / {1} -> {2}' -f $item.project, $item.repo, $item.target_name))
+                $lines.Add('')
+                $lines.Add($item.status)
+                # Inline the offending-object list for oversize blocks.
+                $oversizePath = Join-Path $params['WorkPath'] ($item.target_name + '.oversize.txt')
+                if ($item.status -like '*100MB*' -and (Test-Path -LiteralPath $oversizePath)) {
+                    $lines.Add('')
+                    $lines.Add('```')
+                    foreach ($reportLine in (Get-Content -LiteralPath $oversizePath)) { $lines.Add($reportLine) }
+                    $lines.Add('```')
+                }
+            }
+        }
+        Set-Content -LiteralPath $attentionPath -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
+        Write-Host ("Wrote attention report: {0}" -f $attentionPath) -ForegroundColor Green
     }
 }
 Write-Host '===================================================' -ForegroundColor Cyan

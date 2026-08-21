@@ -427,6 +427,14 @@ Describe 'Migrate-ReposToGitHub engine shape' {
         $supports.Argument.Extent.Text | Should -BeExactly '$true'
     }
 
+    It 'keeps the LFS oversize rewrite strictly opt-in' {
+        # A history rewrite is a customer decision; the switch must exist and default off.
+        $parameter = $script:EngineAst.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'LfsMigrateOversize' }
+        $parameter | Should -Not -BeNullOrEmpty
+        $parameter.StaticType.Name | Should -BeExactly 'SwitchParameter'
+    }
+
     It 'does not require tokens - ambient identity is the default' {
         foreach ($name in 'SourcePat', 'GitHubToken') {
             $parameter = $script:EngineAst.ParamBlock.Parameters |

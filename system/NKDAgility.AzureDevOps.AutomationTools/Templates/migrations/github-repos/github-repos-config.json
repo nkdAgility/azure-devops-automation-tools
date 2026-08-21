@@ -10,5 +10,7 @@
   "WorkPath": null,
   "KeepClones": true,
   "SkipLfs": false,
-  "SkipOversizeCheck": false
+  "SkipOversizeCheck": false,
+  "LfsMigrateOversize": false,
+  "LfsMigrateAboveMB": 100
 }
