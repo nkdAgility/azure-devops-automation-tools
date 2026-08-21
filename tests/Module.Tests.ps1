@@ -160,14 +160,14 @@ Describe 'Module is self-contained' {
     }
 
     It 'ships the engines its binder templates invoke' {
-        foreach ($engine in 'Migrate-Repos.ps1', 'Migrate-Artifacts.ps1') {
+        foreach ($engine in 'Migrate-Repos.ps1', 'Migrate-Artifacts.ps1', 'Migrate-ReposToGitHub.ps1') {
             Join-Path $script:ModuleRoot (Join-Path 'Engines' $engine) |
                 Should -Exist -Because 'Run-Migrate-*.ps1 resolves it from ModuleBase\Engines, so it must travel with the module'
         }
     }
 
     It 'ships the templates it scaffolds from' {
-        foreach ($folder in 'customer-repo', 'migrations\data-import', 'migrations\migration-tools', 'migrations\migration-platform') {
+        foreach ($folder in 'customer-repo', 'migrations\data-import', 'migrations\migration-tools', 'migrations\migration-platform', 'migrations\github-repos') {
             Join-Path $script:ModuleRoot (Join-Path 'Templates' $folder) |
                 Should -Exist -Because 'New-AutomationWorkspace and New-Migration resolve templates from inside the module'
         }

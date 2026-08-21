@@ -46,10 +46,10 @@ Two conventions worth knowing before you read any runbook:
 | `bootstrap.ps1` | Remote-runnable bootstrap for client workspaces (see [How it works](#how-it-works)) |
 | `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, workspace/secrets/logging context, and scaffolding commands. Self-contained: it is copied into client workspaces, so it never resolves anything above its own root |
 | `system/…/Templates/customer-repo/` | Scaffold templates for a customer workspace, used by `New-AutomationWorkspace` (`init.ps1`, `workspace.json`, customer `CLAUDE.md`, ...) |
-| `system/…/Templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`) |
+| `system/…/Templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`, `github-repos`) |
 | `src/_includes/` | Legacy shared code dot-sourced by the scripts: `setup.ps1` (config + environment), `logging.ps1` (PoShLog wrappers), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (now a shim that imports the module) |
 | `src/DataImportTools/` | Assets supporting the Microsoft Azure DevOps Data Import Tool |
-| `system/…/Engines/` | The reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` engines (repo + artifact-feed migration), invoked by the `Run-Migrate-*.ps1` binders in an engagement folder |
+| `system/…/Engines/` | The reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` / `Migrate-ReposToGitHub.ps1` engines (repo, artifact-feed and ADO→GitHub migration), invoked by the `Run-*.ps1` binders in an engagement folder |
 | `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, execution, and the older `Migrate-GitRepos.ps1` repo mirroring script |
 | `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
 | `src/processMigrator/` | Wrapper around microsoft/process-migrator |

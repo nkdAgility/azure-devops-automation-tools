@@ -1,6 +1,6 @@
 @{
     RootModule        = 'NKDAgility.AzureDevOps.AutomationTools.psm1'
-    ModuleVersion     = '0.3.0'
+    ModuleVersion     = '0.4.0'
     GUID              = '691d41a2-3ab0-4105-86cd-d66496c014f3'
     Author            = 'Martin Hinshelwood'
     CompanyName       = 'naked Agility Limited'
@@ -69,6 +69,11 @@
         'Get-WorkItemLinkType'
         'Get-WorkItemLink'
         'Export-WorkItemLinkInventory'
+        # GitMigration - REST (Azure DevOps + GitHub)
+        'Get-TeamProject'
+        'Get-GitRepository'
+        'Get-GitHubRepository'
+        'Export-GitRepoInventory'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

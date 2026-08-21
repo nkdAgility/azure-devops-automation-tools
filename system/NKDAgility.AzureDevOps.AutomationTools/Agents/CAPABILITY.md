@@ -2,12 +2,12 @@
 
 Azure DevOps migration engagements, across three toolchains: the Microsoft Data Import
 Tool (`Migrator.exe` / `witadmin.exe`), the Azure DevOps Migration Tools, and the Azure
-DevOps Migration Platform.
+DevOps Migration Platform — plus Azure DevOps → GitHub repository migrations.
 
 ### Scaffolding an engagement
 
 ```powershell
-New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform
+New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform|GitHubRepos
 New-ExportSnapshot -Source <Collection>
 ```
 
@@ -44,6 +44,34 @@ yours to edit; the template never overwrites them again.
 `Set-MigrationContext -Collection … -Project …` sets session defaults so runbook lines do
 not repeat them; `Clear-MigrationContext` undoes it.
 
+### Azure DevOps → GitHub repo migration
+
+The `GitHubRepos` engagement type migrates git repositories (all branches, tags and LFS
+objects — code only) from an Azure DevOps organisation into a GitHub organisation, driven
+by a committed approval CSV:
+
+1. `Run-Export-RepoInventory.ps1` enumerates every project and repo into
+   `repo-inventory.csv` — commit it; the customer marks rows `Approved = yes` and may
+   edit the pre-filled `TargetName`; commit their edits.
+2. `Sync.ps1 -WhatIf` first, always. Then a single-repo smoke test
+   (`Sync.ps1 -RepoFilter '<small repo>'`), then the full `Sync.ps1`.
+3. Re-running is the workflow: newly approved rows migrate; already-migrated repos
+   re-sync idempotently. Nothing on GitHub is ever deleted.
+
+Rules:
+
+- **Anything that writes to the GitHub organisation is destructive** — same standing as a
+  `-Collection` write: preview first, never run unprompted.
+- The inventory CSV and `output\github-repomigration.csv` are **committed engagement
+  evidence** (the summary is also the next run's rename-detection baseline). Customer
+  edits to `TargetName`/`Approved`/`Notes` are always preserved by inventory refreshes.
+- A `TargetName` edited *after* its repo migrated is **Blocked**, not migrated twice —
+  revert the CSV, or reconcile on GitHub and re-run with `-AcceptRenames`.
+- Repos with blobs over GitHub's hard 100 MB limit are **Blocked**, not failed mid-push;
+  `git lfs migrate` rewrites history and is a customer decision, never automated.
+- **Never print, log or echo `GITHUB_TOKEN`** — the same secrets rules as PATs apply; git
+  auth goes via `http.extraheader`, never in a remote URL.
+
 ### Reference shapes
 
 Microsoft's `process-customization-scripts` repo holds the out-of-box template shapes the
@@ -53,10 +81,10 @@ come from there. Verify state mappings against `Get-WitWorkItemTypeState` before
 
 ### Transports
 
-Two, each with one private invoker that every public function goes through. Never call
+Three, each with one private invoker that every public function goes through. Never call
 `witadmin.exe` or `Invoke-RestMethod` directly from a public function.
 
-| | witadmin / Migrator.exe | REST |
-| - | - | - |
-| Invoker | `Invoke-WitAdminFix` | `Invoke-AzureDevOpsApi` |
-| Good for | schema and process definitions | the data itself: work items, links, queries |
+| | witadmin / Migrator.exe | Azure DevOps REST | GitHub REST |
+| - | - | - | - |
+| Invoker | `Invoke-WitAdminFix` | `Invoke-AzureDevOpsApi` | `Invoke-GitHubApi` |
+| Good for | schema and process definitions | the data itself: work items, links, queries, repos | GitHub repos: probe, create, configure |

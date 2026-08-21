@@ -165,15 +165,16 @@ Anything that talks to a collection is stubbed — the suite needs no PAT, no se
 
 ## Module transport split: witadmin vs REST
 
-The module talks to collections two ways, and each has one private invoker that every command of that kind goes through. Do not call `witadmin.exe` or `Invoke-RestMethod` directly from a public function.
+The module talks to collections and to GitHub three ways, and each has one private invoker that every command of that kind goes through. Do not call `witadmin.exe` or `Invoke-RestMethod` directly from a public function.
 
-| | witadmin / Migrator.exe | REST |
-| - | - | - |
-| Private invoker | `Invoke-WitAdminFix` (+ `Resolve-WitAdminPath`, `Resolve-MigratorPath`) | `Invoke-AzureDevOpsApi` (+ `Get-WorkItemDetailMap`) |
-| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra** (see below) |
-| Command name | `<Verb>-Wit<Noun>` — the prefix IS the signal | plain noun |
-| Public folder | `Public/DataImportTool` | `Public/WorkItemTracking` |
-| Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries |
+| | witadmin / Migrator.exe | Azure DevOps REST | GitHub REST |
+| - | - | - | - |
+| Private invoker | `Invoke-WitAdminFix` (+ `Resolve-WitAdminPath`, `Resolve-MigratorPath`) | `Invoke-AzureDevOpsApi` (+ `Get-WorkItemDetailMap`) | `Invoke-GitHubApi` (+ `Get-GitHubRetryDelay`) |
+| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra** (see below) | `-Token` as a Bearer header, always explicit |
+| Command name | `<Verb>-Wit<Noun>` — the prefix IS the signal | plain noun | plain noun (`GitHub` in the noun) |
+| Public folder | `Public/DataImportTool` | `Public/WorkItemTracking`, `Public/GitMigration` | `Public/GitMigration` |
+| Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries, projects, repos | GitHub repos: probe, create, configure |
+| Paging | n/a | `-FollowContinuation` follows `x-ms-continuationtoken` and returns the aggregated `.value` array | `-AllPages` follows `Link: rel="next"` |
 
 **The name says the transport.** A command that shells out to `witadmin.exe` carries a `Wit`
 noun-prefix; a REST command does not. So `Get-WitWorkItemType` (witadmin, on-premises
@@ -280,12 +281,22 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `Get-WorkItemLink` | Enumerates every link of the given types with both endpoints resolved |
 | `Export-WorkItemLinkInventory` | Writes that inventory as `.json` + readable `.csv` — the record that makes link-type deletion recoverable as related links |
 
+### `Public/GitMigration` — REST, Azure DevOps → GitHub repo migration
+
+| Command | Does |
+| ------- | ---- |
+| `Get-TeamProject` | Lists every project in an organisation, following continuation-token paging. The org URL is used verbatim, so `*.visualstudio.com` orgs work unchanged |
+| `Get-GitRepository` | Lists a project's git repositories; disabled repos excluded unless `-IncludeDisabled` |
+| `Get-GitHubRepository` | Lists a GitHub org's repositories (Link-header paging), or probes one by `-Name` returning `$null` on 404 |
+| `Export-GitRepoInventory` | Builds/refreshes the committed inventory/approval CSV: merges by repo id, preserves customer-edited `TargetName`/`Approved`/`Notes`, refreshes facts, marks vanished repos `MissingFromSource`, pre-fills collision-free slugified target names |
+
 ### `Engines/` — standalone scripts, invoked by path
 
 | Engine | Does |
 | ------ | ---- |
 | `Migrate-Repos.ps1` | Git repos incl. LFS and segmented pushes for repos over the push limit, **and project wikis** (`-SkipWiki`, `-SkipWikiLinkRewrite`, `-CloneDir`, `-SourceRemote`, `-TargetRemote`) |
 | `Migrate-Artifacts.ps1` | Artifact feeds and packages (NuGet, npm, PyPI, Maven, Universal), upstreams and permissions. `-SkipArtifacts` for a feed-only sync, `-Inventory` for read-only discovery |
+| `Migrate-ReposToGitHub.ps1` | Git repos (branches, tags, LFS) from Azure DevOps to a GitHub org, driven by the approved rows of an inventory CSV. Segmented pushes over GitHub's 2 GB push limit, up-front block on blobs over the 100 MB file limit, rename detection via the previous summary CSV. Re-runs are idempotent; nothing on GitHub is ever deleted |
 | `Update-WikiWorkItemLinks.ps1` | Repoints wiki work item links through `Custom.ReflectedWorkItemId`. Preview by default, `-Commit` to write, never pushes |
 | `Update-CommentAttachmentLinks.ps1` | Migrates attachments referenced by **markdown** links in work item comments (the migration fixes HTML, not markdown) and rewrites the comments. Heals comments left html-flagged or escaped by the convert-to-markdown button. Preview by default; `[n/total]` progress with rate and ETA; a `-Commit` run checkpoints and resumes (`-Restart` starts over) |
 | `Set-WorkItemStartId.ps1` | Advances an organisation's work item ID counter by creating and permanently destroying throwaway items, so migrated ids line up with the source |
