@@ -181,6 +181,47 @@ Describe 'Invoke-GitHubApi' {
     }
 }
 
+Describe 'Invoke-AzureDevOpsApi Entra-to-PAT fallback' {
+
+    BeforeAll {
+        Import-Module $script:ManifestPath -Force
+        $script:Module = Get-Module NKDAgility.AzureDevOps.AutomationTools
+
+        # An org that is not Entra-backed: acquisition throws, and the invoker must
+        # fall back to a PAT resolved for the collection instead of surfacing it.
+        & $script:Module {
+            function script:Get-EntraAccessToken {
+                param([string]$Collection, [switch]$Force)
+                throw "'$Collection' is not Entra-backed"
+            }
+            function script:Invoke-RestMethod {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $ErrorAction, [string]$ResponseHeadersVariable)
+                $script:LastAdoAuthHeader = $Headers.Authorization
+                [pscustomobject]@{ value = @() }
+            }
+        }
+        $script:SavedContosoPat = $env:AZDO_PAT_CONTOSO
+    }
+
+    AfterAll {
+        $env:AZDO_PAT_CONTOSO = $script:SavedContosoPat
+    }
+
+    It 'falls back to the derived AZDO_PAT_<ORG> variable for a visualstudio.com org' {
+        $env:AZDO_PAT_CONTOSO = 'fallback-pat'
+        $expected = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(':fallback-pat'))
+
+        Get-TeamProject -Collection 'https://contoso.visualstudio.com' -WarningAction SilentlyContinue | Out-Null
+        & $script:Module { $script:LastAdoAuthHeader } | Should -BeExactly $expected
+    }
+
+    It 'still throws when no PAT can be resolved either' {
+        $env:AZDO_PAT_CONTOSO = ''
+        # A different collection so neither the PAT cache nor the warn-once cache hides the failure.
+        { Get-TeamProject -Collection 'https://nowhere.visualstudio.com' } | Should -Throw '*not Entra-backed*'
+    }
+}
+
 Describe 'Export-GitRepoInventory' {
 
     BeforeAll {

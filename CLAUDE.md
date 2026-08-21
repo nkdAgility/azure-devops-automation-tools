@@ -170,7 +170,7 @@ The module talks to collections and to GitHub three ways, and each has one priva
 | | witadmin / Migrator.exe | Azure DevOps REST | GitHub REST |
 | - | - | - | - |
 | Private invoker | `Invoke-WitAdminFix` (+ `Resolve-WitAdminPath`, `Resolve-MigratorPath`) | `Invoke-AzureDevOpsApi` (+ `Get-WorkItemDetailMap`) | `Invoke-GitHubApi` (+ `Get-GitHubRetryDelay`) |
-| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra** (see below) | `-Token` as a Bearer header, else the **gh CLI**, else `GITHUB_TOKEN` (`Get-GitHubAccessToken`) |
+| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra**, else the secrets PAT for the collection (see below) | `-Token` as a Bearer header, else the **gh CLI**, else `GITHUB_TOKEN` (`Get-GitHubAccessToken`) |
 | Command name | `<Verb>-Wit<Noun>` — the prefix IS the signal | plain noun | plain noun (`GitHub` in the noun) |
 | Public folder | `Public/DataImportTool` | `Public/WorkItemTracking`, `Public/GitMigration` | `Public/GitMigration` |
 | Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries, projects, repos | GitHub repos: probe, create, configure |
@@ -202,6 +202,10 @@ Precedence in `Invoke-AzureDevOpsApi`, and therefore in every REST command:
 1. `-Pat` — an explicit token wins.
 2. `-UseDefaultCredentials` — authenticate as the process identity.
 3. Otherwise **Entra**. Not a fallback: the other two are opt-outs.
+4. When Entra sign-in is unavailable for the collection (not Entra-backed, sign-in
+   fails), `Resolve-CollectionPat` falls back to a PAT from the workspace secrets —
+   matched by URL or org name, then the derived `AZDO_PAT_<ORG>` variable — with a
+   once-per-collection warning. Only when that also finds nothing does the call fail.
 
 `Get-AzureDevOpsTenantId` discovers the tenant from the `X-VSS-ResourceTenant` header on an
 unauthenticated `connectionData` probe and caches it; `Get-EntraAccessToken` signs in pinned

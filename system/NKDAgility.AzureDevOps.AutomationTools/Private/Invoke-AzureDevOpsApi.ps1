@@ -44,9 +44,12 @@ function Invoke-AzureDevOpsApi {
         ErrorAction = 'Stop'
     }
     # Auth precedence: an explicit PAT, then an explicit -UseDefaultCredentials, then
-    # Entra. Entra is the DEFAULT - the other two are opt-outs. On-premises Server
-    # collections have no Entra tenant, so they must pass -UseDefaultCredentials; the
-    # error from Get-EntraAccessToken says exactly that.
+    # Entra. Entra is the DEFAULT - the other two are opt-outs. When Entra sign-in is
+    # unavailable (the collection is not Entra-backed, or acquisition fails) a PAT
+    # resolved from the workspace secrets for this collection is the fallback, so a
+    # runbook line needs no -Pat as long as secrets.json knows the organisation.
+    # On-premises Server collections authenticate the process identity instead and
+    # must pass -UseDefaultCredentials; the Entra error says exactly that.
     if ($Pat) {
         $arguments.Headers = Get-AzureDevOpsAuthHeader -Pat $Pat
     }
@@ -54,7 +57,21 @@ function Invoke-AzureDevOpsApi {
         $arguments.UseDefaultCredentials = $true
     }
     else {
-        $arguments.Headers = @{ Authorization = 'Bearer ' + (Get-EntraAccessToken -Collection $Collection) }
+        try {
+            $arguments.Headers = @{ Authorization = 'Bearer ' + (Get-EntraAccessToken -Collection $Collection) }
+        }
+        catch {
+            $fallbackPat = Resolve-CollectionPat -Collection $Collection
+            if (-not $fallbackPat) { throw }
+            # Warn once per collection, not once per call - an enumeration makes many.
+            if (-not $script:EntraPatFallbackWarned) { $script:EntraPatFallbackWarned = @{} }
+            $warnKey = $Collection.TrimEnd('/').ToLowerInvariant()
+            if (-not $script:EntraPatFallbackWarned.ContainsKey($warnKey)) {
+                Write-Warning ("Entra sign-in unavailable for {0}; using the PAT from secrets. ({1})" -f $Collection, $_.Exception.Message)
+                $script:EntraPatFallbackWarned[$warnKey] = $true
+            }
+            $arguments.Headers = Get-AzureDevOpsAuthHeader -Pat $fallbackPat
+        }
     }
     if ($null -ne $Body) {
         $arguments.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 10 }

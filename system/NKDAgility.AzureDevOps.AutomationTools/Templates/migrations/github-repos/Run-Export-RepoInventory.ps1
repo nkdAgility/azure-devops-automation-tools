@@ -96,16 +96,23 @@ catch {
 # The GitHub side is optional here: with it, pre-filled TargetNames are also
 # collision-checked against repositories that already exist in the target org.
 # Same policy: the gh CLI / GITHUB_TOKEN resolve inside the module; the config
-# token is only passed when that ambient resolution fails.
+# token is only passed when that ambient resolution fails. With no GitHub
+# credential at all the inventory still runs - the collision check is skipped
+# with a warning, because the inventory itself only needs the source.
 if ($config.PSObject.Properties['GitHubOrg'] -and $config.GitHubOrg) {
-    $params.GitHubOrg = Expand-EnvPlaceholder -Value $config.GitHubOrg
     try {
         $null = Get-GitHubAccessToken
+        $params.GitHubOrg = Expand-EnvPlaceholder -Value $config.GitHubOrg
     }
     catch {
         $githubToken = Expand-EnvPlaceholder -Value $config.GitHubToken -AllowMissing
-        if (-not $githubToken) { throw }
-        $params.GitHubToken = $githubToken
+        if ($githubToken) {
+            $params.GitHubOrg = Expand-EnvPlaceholder -Value $config.GitHubOrg
+            $params.GitHubToken = $githubToken
+        }
+        else {
+            Write-Warning ("No GitHub credential available; skipping the collision check against '{0}'. ({1})" -f $config.GitHubOrg, $_.Exception.Message)
+        }
     }
 }
 if ($IncludeDisabled) { $params.IncludeDisabled = $true }

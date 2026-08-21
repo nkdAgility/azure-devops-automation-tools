@@ -62,7 +62,9 @@ Authentication is **ambient identity first, stored token as fallback**: Entra fo
 source (`Get-AzureDevOpsAccessToken` — an Entra token works anywhere a PAT does, REST and
 git alike, and is renewed per repository across a long run), the signed-in gh CLI for
 GitHub (`Get-GitHubAccessToken`, then `GITHUB_TOKEN`). PATs/tokens in `secrets.json` are
-only used when ambient sign-in is unavailable — worth configuring for unattended runs.
+only used when ambient sign-in is unavailable — worth configuring for unattended runs and
+required for organisations that are not Entra-backed, where every REST command falls back
+to the secrets PAT for the collection automatically.
 
 Rules:
 

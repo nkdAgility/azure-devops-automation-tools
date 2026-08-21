@@ -39,6 +39,10 @@
 
 .PARAMETER TargetPat
     Personal Access Token for the target organization (Work Items Read).
+    Optional: Entra is the default. When the automation module is loaded the
+    script acquires an Entra access token via Get-AzureDevOpsAccessToken
+    (re-resolved per work item batch so the cached token renews across a long
+    run); the PAT is only used when Entra sign-in is unavailable or fails.
 
 .PARAMETER TargetProject
     Target project name.
@@ -71,10 +75,11 @@
 
 .EXAMPLE
     # Preview only (no commit, no push) against an already-cloned wiki mirror.
-    . .\scripts\Set-MigrationSecrets.ps1
-    .\scripts\Update-WikiWorkItemLinks.ps1 `
+    # Ambient identity: Entra for the target, no PAT (pass -TargetPat as a
+    # fallback for unattended runs).
+    .\Update-WikiWorkItemLinks.ps1 `
         -SourceOrg https://dev.azure.com/georgfischer -SourceProject GF.MS.S3R.Kebnekaise `
-        -TargetOrg https://dev.azure.com/machining -TargetPat $env:AZDO_PAT_MACHINING -TargetProject UM-S3R-WSM `
+        -TargetOrg https://dev.azure.com/machining -TargetProject UM-S3R-WSM `
         -CloneDir 'C:\Users\default-admin\source\export\georgfischer\GF.MS.S3R.Kebnekaise\repos\GF.MS.S3R.Kebnekaise.wiki.git'
 
 .OUTPUTS
@@ -97,7 +102,6 @@ param(
     [ValidatePattern('^https://')]
     [string]$TargetOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$TargetPat,
 
     [Parameter(Mandatory = $true)]
@@ -130,6 +134,43 @@ function Get-AuthHeader {
     @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat")) }
 }
 
+function Initialize-TargetAuth {
+    # Ambient identity first: an Entra access token works anywhere a PAT does, so
+    # Entra is the default and -TargetPat only the fallback. Called before every
+    # work item detail batch, not just once: the module caches the token and renews
+    # it shortly before expiry, so re-resolving keeps a long run authenticated.
+    # Announces the mode once - never the credential.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $TargetOrg }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        $script:TargetHeaders = @{ Authorization = 'Bearer ' + $token }
+        if ($script:TargetAuthMode -ne 'Entra') {
+            Write-Host '==> Target auth: Entra.' -ForegroundColor DarkGray
+            $script:TargetAuthMode = 'Entra'
+        }
+        return
+    }
+
+    if ($TargetPat) {
+        $script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
+        if ($script:TargetAuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the target PAT." -f $entraError)
+            $script:TargetAuthMode = 'PAT'
+        }
+        return
+    }
+
+    throw ("No target credential available: Entra sign-in failed ({0}) and no -TargetPat was supplied. Sign in to Entra, or add the target PAT to secrets\secrets.json." -f $entraError)
+}
+
 function Invoke-AdoApi {
     param([string]$Uri, [hashtable]$Headers, [string]$Method = 'Get', [object]$Body)
     $params = @{ Uri = $Uri; Headers = $Headers; Method = $Method }
@@ -144,7 +185,6 @@ function Get-TargetWorkItemIdMap {
     # Builds source work item ID -> target work item ID from the target project's
     # Custom.ReflectedWorkItemId field. The trailing integer of that field is the
     # original source ID; System.Id is the new target ID (they differ).
-    param([hashtable]$Headers)
 
     $reflectedField = 'Custom.ReflectedWorkItemId'
     $org = Get-OrgName -OrgUrl $TargetOrg
@@ -154,16 +194,18 @@ function Get-TargetWorkItemIdMap {
     $wiqlUrl = "https://dev.azure.com/$org/$projSeg/_apis/wit/wiql?api-version=7.1"
 
     $map = @{}
-    $result = Invoke-AdoApi -Uri $wiqlUrl -Headers $Headers -Method Post -Body $wiql
+    $result = Invoke-AdoApi -Uri $wiqlUrl -Headers $script:TargetHeaders -Method Post -Body $wiql
     $ids = @($result.workItems | ForEach-Object { $_.id })
     if (-not $ids) { return $map }
 
     # The work items API caps at 200 IDs per request.
     for ($i = 0; $i -lt $ids.Count; $i += 200) {
+        # Renew a near-expiry Entra token before each batch (cache hit otherwise).
+        Initialize-TargetAuth
         $batch = $ids[$i..([math]::Min($i + 199, $ids.Count - 1))]
         $idList = $batch -join ','
         $detailUrl = "https://dev.azure.com/$org/_apis/wit/workitems?ids=$idList&fields=System.Id,$reflectedField&api-version=7.1"
-        $details = Invoke-AdoApi -Uri $detailUrl -Headers $Headers
+        $details = Invoke-AdoApi -Uri $detailUrl -Headers $script:TargetHeaders
         foreach ($wi in $details.value) {
             $reflected = $wi.fields.$reflectedField
             if (-not $reflected) { continue }
@@ -192,12 +234,15 @@ if (-not (Test-Path -LiteralPath (Join-Path $CloneDir 'HEAD'))) {
     throw "CloneDir does not look like a git repository (no HEAD): $CloneDir"
 }
 
-$headers = Get-AuthHeader -Pat $TargetPat
+# Ambient-first credential resolution: Entra then the -TargetPat fallback,
+# renewed per work item detail batch (see Initialize-TargetAuth).
+$script:TargetAuthMode = $null
+Initialize-TargetAuth
 $srcOrg = Get-OrgName -OrgUrl $SourceOrg
 $tgtOrg = Get-OrgName -OrgUrl $TargetOrg
 
 Write-Host "==> Building source -> target work item ID map from '$TargetProject'..." -ForegroundColor Cyan
-$idMap = Get-TargetWorkItemIdMap -Headers $headers
+$idMap = Get-TargetWorkItemIdMap
 if (-not $idMap.Count) {
     Write-Warning 'No migrated work items found in target (Custom.ReflectedWorkItemId is empty everywhere). Links left unchanged; re-run after work items are migrated.'
     return

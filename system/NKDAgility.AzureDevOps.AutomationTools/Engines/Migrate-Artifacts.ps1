@@ -16,9 +16,18 @@
 
     Supported package types: NuGet, npm, Python (PyPI), Maven, Universal Packages.
 
-    Authentication uses Personal Access Tokens (PATs) passed as parameters. The
-    source PAT needs Packaging (Read) scope; the target PAT needs Packaging
-    (Read & Write) and feed creation rights.
+    Authentication is ambient-identity first, stored token as the fallback:
+    Entra by default for BOTH organizations. When the automation module is
+    loaded (the binder guarantees it) the engine acquires an Entra access token
+    per organization via Get-AzureDevOpsAccessToken - used as a Bearer header
+    for REST, and as the basic-auth password for the packaging tools (nuget,
+    npm, twine), which Azure Artifacts accepts anywhere a PAT works. Tokens are
+    re-resolved before every feed and package, so the module's cache renews
+    them near expiry across a long run. -SourcePat and -TargetPat are the
+    fallbacks, used when Entra sign-in is unavailable or fails; the source
+    credential needs Packaging (Read), the target Packaging (Read & Write) and
+    feed creation rights. Universal Packages go through the az CLI, which
+    carries its own ambient identity (az login, or AZURE_DEVOPS_EXT_PAT).
 
     Required external tooling (only for the package types you actually migrate):
       - dotnet SDK / nuget   -> NuGet
@@ -32,12 +41,16 @@
 
 .PARAMETER SourcePat
     Personal Access Token for the source organization (Packaging Read).
+    Optional: Entra is the default; the PAT is only used when Entra sign-in is
+    unavailable or fails.
 
 .PARAMETER TargetOrg
     Target organization URL, e.g. https://dev.azure.com/contoso-target
 
 .PARAMETER TargetPat
     Personal Access Token for the target organization (Packaging Read & Write).
+    Optional: Entra is the default; the PAT is only used when Entra sign-in is
+    unavailable or fails.
 
 .PARAMETER SourceProject
     Optional. Project name when migrating project-scoped feeds. Omit for
@@ -97,11 +110,13 @@
     directory is created if needed. Works for both inventory and migration.
 
 .EXAMPLE
+    # Ambient identity: Entra for both organizations, no PATs.
     .\Migrate-Artifacts.ps1 `
-        -SourceOrg https://dev.azure.com/contoso-source -SourcePat $srcPat `
-        -TargetOrg https://dev.azure.com/contoso-target -TargetPat $tgtPat
+        -SourceOrg https://dev.azure.com/contoso-source `
+        -TargetOrg https://dev.azure.com/contoso-target
 
 .EXAMPLE
+    # Explicit fallback PATs (e.g. unattended runs).
     .\Migrate-Artifacts.ps1 `
         -SourceOrg https://dev.azure.com/contoso-source -SourcePat $srcPat `
         -TargetOrg https://dev.azure.com/contoso-target -TargetPat $tgtPat `
@@ -112,9 +127,10 @@
     changes. Re-running is safe: existing target feeds are reused and packages
     that already exist are skipped by the target service.
 
-    PATs: in a customer workspace, run Set-AutomationSecrets (from the
+    Fallback PATs: in a customer workspace, run Set-AutomationSecrets (from the
     NKDAgility.AzureDevOps.AutomationTools module) first and reference tokens
-    as $ENV:AZDO_PAT_<ORG> in the per-migration config.
+    as $ENV:AZDO_PAT_<ORG> in the per-migration config. Entra is tried first
+    either way.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -122,14 +138,12 @@ param(
     [ValidatePattern('^https://')]
     [string]$SourceOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$SourcePat,
 
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^https://')]
     [string]$TargetOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$TargetPat,
 
     [string]$SourceProject,
@@ -193,6 +207,84 @@ function Get-AuthHeader {
 function Get-OrgName {
     param([string]$OrgUrl)
     ($OrgUrl.TrimEnd('/') -split '/')[-1]
+}
+
+function Initialize-SourceAuth {
+    # Ambient identity first: an Entra access token works anywhere a PAT does
+    # (Bearer for REST, basic-auth password for the packaging tools), so Entra is
+    # the default and -SourcePat only the fallback. Called before every feed and
+    # package, not just once: the module caches the token and renews it shortly
+    # before expiry, so re-resolving keeps a long run authenticated. Announces
+    # the mode once - never the credential.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $SourceOrg }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        $script:SourceHeaders = @{ Authorization = 'Bearer ' + $token }
+        $script:SourceToken = $token
+        if ($script:SourceAuthMode -ne 'Entra') {
+            Write-Host '==> Source auth: Entra.' -ForegroundColor DarkGray
+            $script:SourceAuthMode = 'Entra'
+        }
+        return
+    }
+
+    if ($SourcePat) {
+        $script:SourceHeaders = Get-AuthHeader -Pat $SourcePat
+        $script:SourceToken = $SourcePat
+        if ($script:SourceAuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the source PAT." -f $entraError)
+            $script:SourceAuthMode = 'PAT'
+        }
+        return
+    }
+
+    throw ("No source credential available: Entra sign-in failed ({0}) and no -SourcePat was supplied. Sign in to Entra, or add the source PAT to secrets\secrets.json." -f $entraError)
+}
+
+function Initialize-TargetAuth {
+    # Same ambient-first resolution as Initialize-SourceAuth, for the target
+    # organization. -TargetPat is the fallback. $script:TargetToken is what the
+    # packaging tools (nuget.config, .npmrc, twine) receive as their basic-auth
+    # password - Azure Artifacts accepts an Entra token there just like a PAT.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $TargetOrg }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        $script:TargetHeaders = @{ Authorization = 'Bearer ' + $token }
+        $script:TargetToken = $token
+        if ($script:TargetAuthMode -ne 'Entra') {
+            Write-Host '==> Target auth: Entra.' -ForegroundColor DarkGray
+            $script:TargetAuthMode = 'Entra'
+        }
+        return
+    }
+
+    if ($TargetPat) {
+        $script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
+        $script:TargetToken = $TargetPat
+        if ($script:TargetAuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the target PAT." -f $entraError)
+            $script:TargetAuthMode = 'PAT'
+        }
+        return
+    }
+
+    throw ("No target credential available: Entra sign-in failed ({0}) and no -TargetPat was supplied. Sign in to Entra, or add the target PAT to secrets\secrets.json." -f $entraError)
 }
 
 function Get-VssPsBaseUrl {
@@ -1216,10 +1308,12 @@ function Get-TargetFeedSourceUrl {
 }
 
 function Get-NuGetConfig {
-    # Writes (once per feed) a nuget.config into the cache that registers the
-    # target feed as source 'target' with the target PAT as credentials, so
-    # 'dotnet nuget push' can authenticate. Azure DevOps ignores the --api-key
-    # for auth and requires real source credentials. Returns the config path.
+    # Writes a nuget.config into the cache that registers the target feed as
+    # source 'target' with the resolved credential (Entra token or fallback PAT)
+    # as the basic-auth password, so 'dotnet nuget push' can authenticate. Azure
+    # DevOps ignores the --api-key for auth and requires real source
+    # credentials. Rewritten on every push so a renewed Entra token is always
+    # the one on disk. Returns the config path.
     param($Feed, [string]$TargetSource)
 
     $dir = Get-CacheDir -Feed $Feed -Protocol 'nuget'
@@ -1234,7 +1328,7 @@ function Get-NuGetConfig {
   <packageSourceCredentials>
     <target>
       <add key="Username" value="ado" />
-      <add key="ClearTextPassword" value="$TargetPat" />
+      <add key="ClearTextPassword" value="$script:TargetToken" />
     </target>
   </packageSourceCredentials>
 </configuration>
@@ -1267,9 +1361,10 @@ function Migrate-NpmPackage {
     $file = @(Save-VersionToCache -Feed $Feed -Package $Package -Version $Version -Protocol 'npm')[0]
     $script:LastPackageBytes = (Get-Item -LiteralPath $file).Length
 
-    # Configure a scoped .npmrc for the target registry with PAT auth.
+    # Configure a scoped .npmrc for the target registry with the resolved
+    # credential (Entra token or fallback PAT) as the basic-auth password.
     $registry = $TargetSource -replace '^https:', ''
-    $b64Pat = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($TargetPat))
+    $b64Pat = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($script:TargetToken))
     $npmrc = Join-Path (Get-CacheDir -Feed $Feed -Protocol 'npm') '.npmrc'
     @(
         "registry=$TargetSource"
@@ -1313,7 +1408,7 @@ function Migrate-PyPiPackage {
         Get-Item | Measure-Object Length -Sum).Sum
 
     $env:TWINE_USERNAME = 'ado'
-    $env:TWINE_PASSWORD = $TargetPat
+    $env:TWINE_PASSWORD = $script:TargetToken
     # Note: Azure Artifacts' PyPI upload endpoint does not support twine's
     # --skip-existing flag ('UnsupportedConfiguration'). Versions already present
     # on the target are filtered out earlier by Test-TargetHasVersion, so a plain

@@ -28,16 +28,25 @@
     support was added. Requires git-lfs on PATH; if it is missing (or -SkipLfs
     is supplied) LFS transfer is skipped with a warning.
 
-    Authentication uses Personal Access Tokens (PATs) passed as parameters. The
-    source PAT needs Code (Read); the target PAT needs Code (Read & Write) and
-    permission to create repositories. PATs are passed per-invocation via
-    http.extraheader so they never end up in the remote URL or reflog.
+    Authentication is ambient-identity first, stored token as the fallback:
+    Entra by default for BOTH organizations. When the automation module is
+    loaded (the binder guarantees it) the engine acquires an Entra access token
+    per organization via Get-AzureDevOpsAccessToken and uses it as a Bearer
+    header for both REST and git - an Entra token works anywhere a PAT does.
+    Tokens are re-resolved before every repository and wiki, so the module's
+    cache renews them near expiry across a long run. -SourcePat and -TargetPat
+    are the fallbacks, used when Entra sign-in is unavailable or fails.
+    Credentials are passed per-invocation via http.extraheader so they never
+    end up in the remote URL or reflog.
 
 .PARAMETER SourceOrg
     Source organization URL, e.g. https://dev.azure.com/contoso-source
 
 .PARAMETER SourcePat
-    Personal Access Token for the source organization (Code Read).
+    Personal Access Token for the source organization (Code Read). Optional:
+    Entra is the default; the PAT is only used when Entra sign-in is
+    unavailable or fails. Worth supplying for unattended runs and for single
+    repositories so large that one transfer outlives an Entra token.
 
 .PARAMETER SourceProject
     Source project name.
@@ -47,6 +56,8 @@
 
 .PARAMETER TargetPat
     Personal Access Token for the target organization (Code Read & Write).
+    Optional: Entra is the default; the PAT is only used when Entra sign-in is
+    unavailable or fails.
 
 .PARAMETER TargetProject
     Target project name. Defaults to SourceProject when not supplied.
@@ -99,11 +110,19 @@
     work items) are left unchanged so a later re-run can fix them. Use this
     switch to migrate the wiki verbatim without touching its links.
 
-    PATs: in a customer workspace, run Set-AutomationSecrets (from the
+    Fallback PATs: in a customer workspace, run Set-AutomationSecrets (from the
     NKDAgility.AzureDevOps.AutomationTools module) first and reference tokens
-    as $ENV:AZDO_PAT_<ORG> in the per-migration config.
+    as $ENV:AZDO_PAT_<ORG> in the per-migration config. Entra is tried first
+    either way.
 
 .EXAMPLE
+    # Ambient identity: Entra for both organizations, no PATs.
+    .\Migrate-Repos.ps1 `
+        -SourceOrg https://dev.azure.com/contoso-source -SourceProject "Payments" `
+        -TargetOrg https://dev.azure.com/contoso-target -TargetProject "Payments" -WhatIf
+
+.EXAMPLE
+    # Explicit fallback PATs (e.g. unattended runs).
     .\Migrate-Repos.ps1 `
         -SourceOrg https://dev.azure.com/contoso-source -SourcePat $srcPat -SourceProject "Payments" `
         -TargetOrg https://dev.azure.com/contoso-target -TargetPat $tgtPat -TargetProject "Payments"
@@ -128,7 +147,6 @@ param(
     [ValidatePattern('^https://')]
     [string]$SourceOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$SourcePat,
 
     [Parameter(Mandatory = $true)]
@@ -138,7 +156,6 @@ param(
     [ValidatePattern('^https://')]
     [string]$TargetOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$TargetPat,
 
     [string]$TargetProject,
@@ -186,6 +203,81 @@ function Get-GitExtraHeader {
 function Get-OrgName {
     param([string]$OrgUrl)
     ($OrgUrl.TrimEnd('/') -split '/')[-1]
+}
+
+function Initialize-SourceAuth {
+    # Ambient identity first: an Entra access token works anywhere a PAT does (Bearer
+    # for REST, http.extraheader for git), so Entra is the default and -SourcePat only
+    # the fallback. Called before every repository and wiki, not just once: the module
+    # caches the token and renews it shortly before expiry, so re-resolving per repo
+    # keeps a long run authenticated. Announces the mode once - never the credential.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $SourceOrg }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        $script:SourceHeaders = @{ Authorization = 'Bearer ' + $token }
+        $script:SourceHeader = "AUTHORIZATION: Bearer $token"
+        if ($script:SourceAuthMode -ne 'Entra') {
+            Write-Host '==> Source auth: Entra.' -ForegroundColor DarkGray
+            $script:SourceAuthMode = 'Entra'
+        }
+        return
+    }
+
+    if ($SourcePat) {
+        $script:SourceHeaders = Get-AuthHeader -Pat $SourcePat
+        $script:SourceHeader = Get-GitExtraHeader -Pat $SourcePat
+        if ($script:SourceAuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the source PAT." -f $entraError)
+            $script:SourceAuthMode = 'PAT'
+        }
+        return
+    }
+
+    throw ("No source credential available: Entra sign-in failed ({0}) and no -SourcePat was supplied. Sign in to Entra, or add the source PAT to secrets\secrets.json." -f $entraError)
+}
+
+function Initialize-TargetAuth {
+    # Same ambient-first resolution as Initialize-SourceAuth, for the target
+    # organization. -TargetPat is the fallback.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $TargetOrg }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        $script:TargetHeaders = @{ Authorization = 'Bearer ' + $token }
+        $script:TargetHeader = "AUTHORIZATION: Bearer $token"
+        if ($script:TargetAuthMode -ne 'Entra') {
+            Write-Host '==> Target auth: Entra.' -ForegroundColor DarkGray
+            $script:TargetAuthMode = 'Entra'
+        }
+        return
+    }
+
+    if ($TargetPat) {
+        $script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
+        $script:TargetHeader = Get-GitExtraHeader -Pat $TargetPat
+        if ($script:TargetAuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the target PAT." -f $entraError)
+            $script:TargetAuthMode = 'PAT'
+        }
+        return
+    }
+
+    throw ("No target credential available: Entra sign-in failed ({0}) and no -TargetPat was supplied. Sign in to Entra, or add the target PAT to secrets\secrets.json." -f $entraError)
 }
 
 function Invoke-AdoApi {
@@ -615,6 +707,11 @@ function Migrate-Repo {
     $progress = if ($Total) { "[$Index/$Total] " } else { '' }
     Write-Step "${progress}$SourceProject == Repository: $($Repo.name)"
 
+    # Re-resolve both credentials so an Entra token nearing expiry is renewed
+    # before this repository's REST calls and git transfers start.
+    Initialize-SourceAuth
+    Initialize-TargetAuth
+
     $sizeBytes = if ($Repo.PSObject.Properties.Name -contains 'size') { [int64]$Repo.size } else { 0 }
     $sizeGB = [math]::Round($sizeBytes / 1GB, 2)
     $thresholdBytes = [int64]$MaxPushSizeGB * 1GB
@@ -672,6 +769,11 @@ function Migrate-Wiki {
     $progress = if ($Total) { "[$Index/$Total] " } else { '' }
     Write-Step "${progress}$SourceProject == Wiki: $($Wiki.name)"
 
+    # Re-resolve both credentials so an Entra token nearing expiry is renewed
+    # before this wiki's REST calls and git transfers start.
+    Initialize-SourceAuth
+    Initialize-TargetAuth
+
     $targetWiki = New-TargetWiki
     if (-not $targetWiki -and -not $WhatIfPreference) {
         New-RepoSummary -Name $Wiki.name -SizeBytes 0 -SizeGB 0 -Strategy 'wiki' -Status 'Skipped (no target wiki)'
@@ -702,9 +804,19 @@ function Migrate-Wiki {
     # previews only, which is how the rewrite can be validated before a push).
     if (-not $SkipWikiLinkRewrite) {
         $linkScript = Join-Path $PSScriptRoot 'Update-WikiWorkItemLinks.ps1'
-        & $linkScript -SourceOrg $SourceOrg -SourceProject $SourceProject `
-            -TargetOrg $TargetOrg -TargetPat $TargetPat -TargetProject $TargetProject `
-            -CloneDir $cloneDir -Branch 'wikiMaster' -Commit | Out-Null
+        # The link rewriter resolves its own credential Entra-first; the target
+        # PAT is only forwarded when this run actually has one to fall back on.
+        $linkArgs = @{
+            SourceOrg     = $SourceOrg
+            SourceProject = $SourceProject
+            TargetOrg     = $TargetOrg
+            TargetProject = $TargetProject
+            CloneDir      = $cloneDir
+            Branch        = 'wikiMaster'
+            Commit        = $true
+        }
+        if ($TargetPat) { $linkArgs.TargetPat = $TargetPat }
+        & $linkScript @linkArgs | Out-Null
     }
 
     Push-Mirror -CloneDir $cloneDir -TargetRemote 'target' -Force
@@ -720,10 +832,12 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw 'Git was not found on PATH. Install Git 2.x and try again.'
 }
 
-$script:SourceHeaders = Get-AuthHeader -Pat $SourcePat
-$script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
-$script:SourceHeader = Get-GitExtraHeader -Pat $SourcePat
-$script:TargetHeader = Get-GitExtraHeader -Pat $TargetPat
+# Ambient-first credential resolution: Entra then the -SourcePat/-TargetPat
+# fallbacks, renewed per repository and wiki (see Initialize-SourceAuth).
+$script:SourceAuthMode = $null
+$script:TargetAuthMode = $null
+Initialize-SourceAuth
+Initialize-TargetAuth
 
 # Lazily probed by Test-GitLfs on first use; cached for the rest of the run.
 $script:GitLfsChecked = $false
