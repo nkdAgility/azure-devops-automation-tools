@@ -136,6 +136,16 @@
     GitHub hard limit). Lower it (e.g. 50, where GitHub starts warning) to
     move more of the large files into LFS during the same rewrite.
 
+.PARAMETER OversizeDecisions
+    Path of the per-file decisions JSON. Every oversize file the run finds is
+    recorded there with action 'pending'; the operator sets each file's action
+    to 'lfs' (rewrite into Git LFS) or 'strip' (remove from history with
+    git filter-repo) and re-runs. A repository whose oversize files all carry
+    a decision is rewritten accordingly - in a separate copy, deterministic,
+    source untouched - and pushed; any file still 'pending' keeps the
+    repository Blocked. Takes precedence over the blanket -LfsMigrateOversize.
+    Commit the file: it is the customer's remediation record.
+
 .PARAMETER AcceptRenames
     Allow a row whose TargetName differs from the name it was previously
     migrated under to migrate to the new name. The previously migrated
@@ -204,6 +214,8 @@ param(
 
     [ValidateRange(1, 2048)]
     [int]$LfsMigrateAboveMB = 100,
+
+    [string]$OversizeDecisions,
 
     [switch]$AcceptRenames
 )
@@ -652,6 +664,96 @@ function Test-OversizeBlobs {
 
 #region Push strategies --------------------------------------------------------
 
+function Test-GitFilterRepo {
+    # Returns $true when git-filter-repo is available (checked once and cached).
+    if ($script:GitFilterRepoChecked) { return $script:GitFilterRepoAvailable }
+    $script:GitFilterRepoChecked = $true
+    $PSNativeCommandUseErrorActionPreference = $false
+    & git filter-repo --version 2>$null | Out-Null
+    $script:GitFilterRepoAvailable = ($LASTEXITCODE -eq 0)
+    if (-not $script:GitFilterRepoAvailable) {
+        Write-Warning "git-filter-repo was not found ('pip install git-filter-repo'). Repositories with 'strip' decisions stay Blocked until it is installed."
+    }
+    return $script:GitFilterRepoAvailable
+}
+
+function Update-OversizeDecisions {
+    # Merges this repository's oversize findings into the decisions JSON and returns
+    # the repository's entry. The operator records an action per file - 'lfs' or
+    # 'strip' - and a re-run applies it; files still 'pending' keep the repository
+    # Blocked. Operator-set actions are never overwritten; files that vanish from
+    # the scan are kept as evidence.
+    param($Row, [object[]]$Oversize)
+
+    $document = $null
+    if (Test-Path -LiteralPath $OversizeDecisions) {
+        $document = Get-Content -LiteralPath $OversizeDecisions -Raw | ConvertFrom-Json
+    }
+    if (-not $document -or -not $document.PSObject.Properties['repositories']) {
+        $document = [pscustomobject]@{
+            '$comment'   = "Per-file decisions for files over GitHub's 100 MB limit. For each file set action to 'lfs' (rewrite into Git LFS) or 'strip' (remove from all history with git filter-repo), then re-run Sync.ps1; 'pending' keeps the repository Blocked. Both rewrites change the GitHub commit ids from the first affected commit; the source repository is never touched. Commit this file - it is the remediation record."
+            repositories = @()
+        }
+    }
+
+    $repositories = @($document.repositories)
+    $entry = $repositories | Where-Object { $_.sourceRepoId -eq $Row.SourceRepoId } | Select-Object -First 1
+    if (-not $entry) {
+        $entry = [pscustomobject]@{
+            sourceRepoId  = $Row.SourceRepoId
+            sourceProject = $Row.SourceProject
+            sourceRepo    = $Row.SourceRepo
+            targetName    = $Row.TargetName
+            files         = @()
+        }
+        $repositories += $entry
+        $document.repositories = $repositories
+    }
+
+    $files = @($entry.files)
+    foreach ($group in ($Oversize | Where-Object { $_.Path } | Group-Object Path)) {
+        $sizeMB = ($group.Group | Measure-Object -Property SizeMB -Maximum).Maximum
+        $existing = $files | Where-Object { $_.path -eq $group.Name } | Select-Object -First 1
+        if ($existing) {
+            $existing.sizeMB = $sizeMB
+        }
+        else {
+            $files += [pscustomobject]@{ path = $group.Name; sizeMB = $sizeMB; action = 'pending' }
+        }
+    }
+    $entry.files = $files
+
+    $document | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OversizeDecisions -Encoding UTF8
+    return $entry
+}
+
+function Convert-RepoPerDecisions {
+    # Applies the operator's per-file decisions in a fresh local mirror copy: 'strip'
+    # paths are removed from all history with git filter-repo, then 'lfs' paths are
+    # rewritten into Git LFS pointers. Both rewrites are deterministic, so re-runs
+    # reproduce the same commits and the push stays incremental. The cached source
+    # mirror is never rewritten.
+    param([string]$CloneDir, [string]$RewriteDir, [string[]]$StripPaths, [string[]]$LfsPaths)
+
+    if (Test-Path $RewriteDir) { Remove-Item -Path $RewriteDir -Recurse -Force }
+    Invoke-Git -GitArgs @('clone', '--mirror', $CloneDir, $RewriteDir)
+    Push-Location $RewriteDir
+    try {
+        if ($StripPaths) {
+            Write-Host ("    Stripping {0} path(s) from history (git filter-repo)..." -f $StripPaths.Count) -ForegroundColor Green
+            # --force: this is a disposable local copy, not somebody's fresh clone.
+            $filterArgs = @('filter-repo', '--invert-paths', '--force')
+            foreach ($path in $StripPaths) { $filterArgs += @('--path', $path) }
+            Invoke-Git -GitArgs $filterArgs
+        }
+        if ($LfsPaths) {
+            Write-Host ("    Rewriting {0} path(s) into Git LFS..." -f $LfsPaths.Count) -ForegroundColor Green
+            Invoke-Git -GitArgs @('lfs', 'migrate', 'import', '--everything', ('--include={0}' -f ($LfsPaths -join ',')))
+        }
+    }
+    finally { Pop-Location }
+}
+
 function Convert-OversizeToLfs {
     # Rewrites the repository history so every file over the threshold becomes a Git
     # LFS pointer, in a SEPARATE local mirror copy - the cached source mirror must
@@ -1058,26 +1160,72 @@ function Migrate-ApprovedRepo {
             $oversize | ForEach-Object { '{0} {1,10} MB {2}' -f $_.Sha, $_.SizeMB, $_.Path } |
                 Set-Content -LiteralPath $reportPath -Encoding UTF8
 
-            if ($LfsMigrateOversize -and (Test-GitLfs)) {
-                Write-Host ("    {0} blob(s) exceed GitHub's 100 MB limit; -LfsMigrateOversize is set." -f $oversize.Count) -ForegroundColor Yellow
-                $rewriteDir = Join-Path $WorkRoot ($Row.TargetName + '.lfsrewrite.git')
-                Convert-OversizeToLfs -CloneDir $cloneDir -RewriteDir $rewriteDir -AboveMB $LfsMigrateAboveMB
-                $stillOversize = @(Test-OversizeBlobs -CloneDir $rewriteDir -RepoLabel $Row.SourceRepo)
-                if ($stillOversize.Count -gt 0) {
+            # Per-file decisions from the committed JSON take precedence; the blanket
+            # -LfsMigrateOversize switch is the fallback; otherwise Blocked.
+            $stripPaths = @()
+            $lfsPaths = @()
+            $pendingPaths = @()
+            $decision = $null
+            if ($OversizeDecisions) {
+                $decision = Update-OversizeDecisions -Row $Row -Oversize $oversize
+                foreach ($path in @($oversize | Where-Object { $_.Path } | Select-Object -ExpandProperty Path -Unique)) {
+                    $file = @($decision.files) | Where-Object { $_.path -eq $path } | Select-Object -First 1
+                    $action = if ($file -and $file.PSObject.Properties['action']) { [string]$file.action } else { 'pending' }
+                    switch -Regex ($action) {
+                        '^(?i)(strip|filter-repo)$' { $stripPaths += $path }
+                        '^(?i)lfs$' { $lfsPaths += $path }
+                        default { $pendingPaths += $path }
+                    }
+                }
+            }
+
+            if ($decision -and -not $pendingPaths -and ($stripPaths -or $lfsPaths)) {
+                if ($stripPaths -and -not (Test-GitFilterRepo)) {
                     New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
-                        -Status ("Blocked: {0} blob(s) still > 100MB after the LFS rewrite - see {1}" -f $stillOversize.Count, (Split-Path -Leaf $reportPath))
+                        -Status "Blocked: 'strip' decisions need git-filter-repo ('pip install git-filter-repo')"
                     return
                 }
-                $pushDir = $rewriteDir
-                $isLfsRewrite = $true
+                if ($lfsPaths -and -not (Test-GitLfs)) {
+                    New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
+                        -Status "Blocked: 'lfs' decisions need git-lfs on PATH"
+                    return
+                }
+                Write-Host ("    {0} oversize blob(s); applying decisions: {1} strip, {2} lfs." -f $oversize.Count, $stripPaths.Count, $lfsPaths.Count) -ForegroundColor Yellow
+                $rewriteDir = Join-Path $WorkRoot ($Row.TargetName + '.rewrite.git')
+                Convert-RepoPerDecisions -CloneDir $cloneDir -RewriteDir $rewriteDir -StripPaths $stripPaths -LfsPaths $lfsPaths
+                $rewriteKinds = @()
+                if ($stripPaths) { $rewriteKinds += 'strip' }
+                if ($lfsPaths) { $rewriteKinds += 'lfs' }
+                $strategy = "$strategy ($($rewriteKinds -join '+') rewrite)"
+            }
+            elseif ($LfsMigrateOversize -and (Test-GitLfs)) {
+                Write-Host ("    {0} blob(s) exceed GitHub's 100 MB limit; -LfsMigrateOversize is set." -f $oversize.Count) -ForegroundColor Yellow
+                $rewriteDir = Join-Path $WorkRoot ($Row.TargetName + '.rewrite.git')
+                Convert-OversizeToLfs -CloneDir $cloneDir -RewriteDir $rewriteDir -AboveMB $LfsMigrateAboveMB
                 $strategy = "$strategy (lfs rewrite)"
             }
             else {
                 Write-Warning ("    {0} blob(s) exceed GitHub's 100 MB limit; object list: {1}" -f $oversize.Count, $reportPath)
+                $remedy = if ($OversizeDecisions) {
+                    "set each file's action to 'lfs' or 'strip' in {0} and re-run" -f (Split-Path -Leaf $OversizeDecisions)
+                }
+                else {
+                    "with customer agreement re-run with -LfsMigrateOversize to rewrite them into Git LFS"
+                }
                 New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
-                    -Status ("Blocked: {0} blob(s) > 100MB (GitHub hard limit) - see {1}; with customer agreement re-run with -LfsMigrateOversize to rewrite them into Git LFS" -f $oversize.Count, (Split-Path -Leaf $reportPath))
+                    -Status ("Blocked: {0} blob(s) > 100MB (GitHub hard limit), {1} awaiting a decision - {2}; object list: {3}" -f $oversize.Count, $pendingPaths.Count, $remedy, (Split-Path -Leaf $reportPath))
                 return
             }
+
+            # Whichever rewrite ran, prove it worked before any bytes move.
+            $stillOversize = @(Test-OversizeBlobs -CloneDir $rewriteDir -RepoLabel $Row.SourceRepo)
+            if ($stillOversize.Count -gt 0) {
+                New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy `
+                    -Status ("Blocked: {0} blob(s) still > 100MB after the rewrite - see {1}" -f $stillOversize.Count, (Split-Path -Leaf $reportPath))
+                return
+            }
+            $pushDir = $rewriteDir
+            $isLfsRewrite = $true
         }
     }
 
@@ -1129,9 +1277,11 @@ $script:GhHeaders = @{
     'User-Agent'           = 'NKDAgility.AzureDevOps.AutomationTools'
 }
 
-# Lazily probed by Test-GitLfs on first use; cached for the rest of the run.
+# Lazily probed by Test-GitLfs / Test-GitFilterRepo on first use; cached for the run.
 $script:GitLfsChecked = $false
 $script:GitLfsAvailable = $false
+$script:GitFilterRepoChecked = $false
+$script:GitFilterRepoAvailable = $false
 
 # Per-repo warning collector; Migrate-ApprovedRepo resets it for each repository.
 $script:CurrentRepoWarnings = $null

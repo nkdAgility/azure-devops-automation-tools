@@ -427,6 +427,12 @@ Describe 'Migrate-ReposToGitHub engine shape' {
         $supports.Argument.Extent.Text | Should -BeExactly '$true'
     }
 
+    It 'accepts a per-file oversize decisions file' {
+        $parameter = $script:EngineAst.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'OversizeDecisions' }
+        $parameter | Should -Not -BeNullOrEmpty -Because 'per-file lfs/strip decisions are the remediation workflow for oversize blobs'
+    }
+
     It 'keeps the LFS oversize rewrite strictly opt-in' {
         # A history rewrite is a customer decision; the switch must exist and default off.
         $parameter = $script:EngineAst.ParamBlock.Parameters |

@@ -4,6 +4,7 @@
   "GitHubOrg": "your-github-org",
   "GitHubToken": "$ENV:GITHUB_TOKEN",
   "InventoryCsv": "repo-inventory.csv",
+  "OversizeDecisions": "oversize-decisions.json",
   "Visibility": "Private",
   "MaxPushSizeGB": 2,
   "CommitBatchSize": 2000,

@@ -124,9 +124,12 @@ foreach ($entry in $settings.GetEnumerator()) {
     $params[$name] = $value
 }
 
-# The inventory CSV lives next to this script unless the config gives a rooted path.
-if ($params.ContainsKey('InventoryCsv') -and -not [System.IO.Path]::IsPathRooted($params['InventoryCsv'])) {
-    $params['InventoryCsv'] = Join-Path $PSScriptRoot $params['InventoryCsv']
+# The inventory CSV and the oversize-decisions JSON live next to this script unless
+# the config gives rooted paths.
+foreach ($pathParam in 'InventoryCsv', 'OversizeDecisions') {
+    if ($params.ContainsKey($pathParam) -and -not [System.IO.Path]::IsPathRooted($params[$pathParam])) {
+        $params[$pathParam] = Join-Path $PSScriptRoot $params[$pathParam]
+    }
 }
 
 # Default the working root under the workspace output folder (machine-local,

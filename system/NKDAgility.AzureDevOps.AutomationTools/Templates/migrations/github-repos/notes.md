@@ -36,7 +36,7 @@
 | `TargetName` edited after migration | `Blocked` until the CSV is reverted or reconciled with `-AcceptRenames` |
 | Repo deleted from source | Marked `MissingFromSource`; `Skipped` even if approved |
 | Run failed for a repo | Recorded `Failed: ...`; retried automatically on the next run |
-| Blob over 100 MB (GitHub hard limit) | `Blocked`, offending objects listed next to the clone AND inlined in `output\github-attention.md`. With customer agreement, set `LfsMigrateOversize: true` to rewrite those files into Git LFS on the way over (deterministic rewrite in a separate copy; GitHub commit ids diverge from the source, LFS quota applies) |
+| Blob over 100 MB (GitHub hard limit) | `Blocked`, and the file is recorded in `oversize-decisions.json` with action `pending`. With customer agreement set each file's action to `lfs` (rewrite into Git LFS) or `strip` (remove from history with git filter-repo) and re-run - the rewrite is deterministic, happens in a separate copy, and the source is never touched. GitHub commit ids diverge from the source; `lfs` consumes LFS quota. `LfsMigrateOversize: true` remains the blanket everything-to-LFS alternative. Commit the decisions file - it is the remediation record |
 
 ## Run log
 
