@@ -170,7 +170,7 @@ The module talks to collections and to GitHub three ways, and each has one priva
 | | witadmin / Migrator.exe | Azure DevOps REST | GitHub REST |
 | - | - | - | - |
 | Private invoker | `Invoke-WitAdminFix` (+ `Resolve-WitAdminPath`, `Resolve-MigratorPath`) | `Invoke-AzureDevOpsApi` (+ `Get-WorkItemDetailMap`) | `Invoke-GitHubApi` (+ `Get-GitHubRetryDelay`) |
-| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra** (see below) | `-Token` as a Bearer header, always explicit |
+| Auth | the process identity | `-Pat`, else `-UseDefaultCredentials`, else **Entra** (see below) | `-Token` as a Bearer header, else the **gh CLI**, else `GITHUB_TOKEN` (`Get-GitHubAccessToken`) |
 | Command name | `<Verb>-Wit<Noun>` — the prefix IS the signal | plain noun | plain noun (`GitHub` in the noun) |
 | Public folder | `Public/DataImportTool` | `Public/WorkItemTracking`, `Public/GitMigration` | `Public/GitMigration` |
 | Good for | schema and process definitions: fields, work item types, categories, rules, link type definitions | the data itself: work items, links, queries, projects, repos | GitHub repos: probe, create, configure |
@@ -240,6 +240,7 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `Set-AutomationSecrets` | Exports PATs from `secrets/secrets.json` as `AZDO_PAT_<ORG>` plus any explicit `EnvVars` names. `-NoClobber` leaves variables already set |
 | `Get-Organisation` | Organisation entries from `organisations.json` with PATs merged in from secrets |
 | `Get-AzureDevOpsAuthHeader` | Basic-auth header hashtable from a PAT |
+| `Get-AzureDevOpsAccessToken` | Entra access token for a collection — usable anywhere a PAT is (REST Bearer, git http.extraheader). Cached, renewed near expiry. Entra-first callers try this and fall back to a PAT only when it throws |
 | `Invoke-FixStep` | Runs a named runbook step once — optional `-Verify` scriptblock, checkpoint JSON, SKIPs on re-run, `-Force` overrides |
 | `Write-FixSection` | Console banner marking which runbook section is running |
 | `Initialize-AutomationLogging` | Starts the PoShLog file sink under `output/log` |
@@ -288,6 +289,7 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `Get-TeamProject` | Lists every project in an organisation, following continuation-token paging. The org URL is used verbatim, so `*.visualstudio.com` orgs work unchanged |
 | `Get-GitRepository` | Lists a project's git repositories; disabled repos excluded unless `-IncludeDisabled` |
 | `Get-GitHubRepository` | Lists a GitHub org's repositories (Link-header paging), or probes one by `-Name` returning `$null` on 404 |
+| `Get-GitHubAccessToken` | Resolves a GitHub token: the signed-in gh CLI first, then `GITHUB_TOKEN` — the GitHub counterpart of the Entra default. Throws with guidance when neither yields one |
 | `Export-GitRepoInventory` | Builds/refreshes the committed inventory/approval CSV: merges by repo id, preserves customer-edited `TargetName`/`Approved`/`Notes`, refreshes facts, marks vanished repos `MissingFromSource`, pre-fills collision-free slugified target names |
 
 ### `Engines/` — standalone scripts, invoked by path

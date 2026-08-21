@@ -58,6 +58,12 @@ by a committed approval CSV:
 3. Re-running is the workflow: newly approved rows migrate; already-migrated repos
    re-sync idempotently. Nothing on GitHub is ever deleted.
 
+Authentication is **ambient identity first, stored token as fallback**: Entra for the
+source (`Get-AzureDevOpsAccessToken` — an Entra token works anywhere a PAT does, REST and
+git alike, and is renewed per repository across a long run), the signed-in gh CLI for
+GitHub (`Get-GitHubAccessToken`, then `GITHUB_TOKEN`). PATs/tokens in `secrets.json` are
+only used when ambient sign-in is unavailable — worth configuring for unattended runs.
+
 Rules:
 
 - **Anything that writes to the GitHub organisation is destructive** — same standing as a

@@ -8,9 +8,11 @@ function Invoke-GitHubApi {
     module goes through here so that URL building, authentication, pagination, rate-limit
     handling and error surfacing are written once.
 
-    Authentication is a token passed as -Token (a classic PAT or fine-grained token), sent
-    as a Bearer header. The token is never written to the URL, the log, or an exception
-    message.
+    Authentication is a Bearer token: -Token when supplied, otherwise resolved by
+    Get-GitHubAccessToken (the signed-in gh CLI first, then GITHUB_TOKEN) - ambient
+    identity is the default and a stored token is the fallback, mirroring the Entra
+    default on the Azure DevOps side. The token is never written to the URL, the log,
+    or an exception message.
 
     GitHub pages list endpoints with an RFC-5988 'Link' response header rather than a
     continuation token; -AllPages follows rel="next" links and returns the aggregated
@@ -24,7 +26,7 @@ function Invoke-GitHubApi {
         [ValidateSet('Get', 'Post', 'Patch', 'Put', 'Delete')] [string]$Method = 'Get',
         [hashtable]$Query,
         $Body,
-        [Parameter(Mandatory)] [string]$Token,
+        [string]$Token,
 
         # Follow 'Link: rel="next"' pagination and return the aggregated array.
         [switch]$AllPages,
@@ -32,6 +34,8 @@ function Invoke-GitHubApi {
         # Return $null on 404 instead of throwing, for existence probes.
         [switch]$AllowNotFound
     )
+
+    if (-not $Token) { $Token = Get-GitHubAccessToken }
 
     $parameters = @{}
     if ($Query) { foreach ($key in $Query.Keys) { $parameters[$key] = $Query[$key] } }

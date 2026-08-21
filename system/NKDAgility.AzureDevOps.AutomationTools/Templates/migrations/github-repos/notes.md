@@ -7,9 +7,12 @@
 
 ## Workflow
 
-1. Fill `github-repos-config.json`. Tokens stay as `$ENV:AZDO_PAT_<ORG>` /
-   `$ENV:GITHUB_TOKEN` placeholders - `Set-AutomationSecrets` supplies them from
-   `..\..\secrets\secrets.json` (the GitHub entry lists `GITHUB_TOKEN` in its `EnvVars`).
+1. Fill `github-repos-config.json`. Auth is ambient-first: Entra sign-in for the source
+   and the signed-in gh CLI for GitHub, so no stored tokens are needed for interactive
+   runs. The config's token fields stay as `$ENV:AZDO_PAT_<ORG>` / `$ENV:GITHUB_TOKEN`
+   placeholders - fallbacks for unattended runs, supplied by `Set-AutomationSecrets`
+   from `..\..\secrets\secrets.json` (the GitHub entry lists `GITHUB_TOKEN` in
+   `EnvVars`). An unset fallback is fine.
 2. `.\Run-Export-RepoInventory.ps1` builds `repo-inventory.csv`: every project, every git
    repo. Commit it, hand it to the customer to mark `Approved = yes` per repo (editing
    `TargetName` where the pre-filled slug is not wanted), and commit their edits.

@@ -67,19 +67,31 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 # Expands "$ENV:NAME" / "${ENV:NAME}" placeholders in a config string using the
 # process environment. JSON is not expanded by PowerShell, so we resolve any
 # environment-variable references (tokens loaded by Set-AutomationSecrets)
-# ourselves before splatting them into the engine.
+# ourselves before splatting them into the engine. Tokens are fallbacks behind
+# ambient identity (Entra / the gh CLI), so -AllowMissing returns $null for an
+# unset variable instead of throwing.
 function Expand-EnvPlaceholder {
-    param([string]$Value)
-    [regex]::Replace($Value, '\$(?:ENV:(?<n>\w+)|\{ENV:(?<n>\w+)\})', {
-        param($m)
-        $name = $m.Groups['n'].Value
-        $resolved = [Environment]::GetEnvironmentVariable($name)
-        if ([string]::IsNullOrEmpty($resolved)) {
-            throw "Environment variable '$name' referenced in config is not set. Run Set-AutomationSecrets first (Sync.ps1 does this automatically)."
-        }
-        $resolved
-    }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    param([string]$Value, [switch]$AllowMissing)
+    try {
+        [regex]::Replace($Value, '\$(?:ENV:(?<n>\w+)|\{ENV:(?<n>\w+)\})', {
+            param($m)
+            $name = $m.Groups['n'].Value
+            $resolved = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrEmpty($resolved)) {
+                throw "Environment variable '$name' referenced in config is not set. Run Set-AutomationSecrets first (Sync.ps1 does this automatically)."
+            }
+            $resolved
+        }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    catch {
+        if ($AllowMissing) { return $null }
+        throw
+    }
 }
+
+# The engine prefers ambient identity (Entra for the source, the gh CLI for GitHub)
+# and only uses these as fallbacks - so a missing token is not an error here.
+$fallbackTokenParams = @('SourcePat', 'GitHubToken')
 
 # Switch parameters on Migrate-ReposToGitHub.ps1: only include when set to $true.
 $switchParams = @('ForceSegmented', 'KeepClones', 'SkipLfs', 'SkipOversizeCheck', 'AcceptRenames')
@@ -105,7 +117,8 @@ foreach ($entry in $settings.GetEnumerator()) {
     }
 
     if ($value -is [string]) {
-        $value = Expand-EnvPlaceholder -Value $value
+        $value = Expand-EnvPlaceholder -Value $value -AllowMissing:($fallbackTokenParams -contains $name)
+        if ($null -eq $value) { continue }
     }
 
     $params[$name] = $value

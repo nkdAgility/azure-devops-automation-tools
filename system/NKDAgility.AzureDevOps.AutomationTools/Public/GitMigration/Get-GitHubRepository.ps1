@@ -16,20 +16,21 @@ function Get-GitHubRepository {
     Repository name to probe for. Omit to list the whole organisation.
 
     .PARAMETER Token
-    GitHub token. Reading private organisation repositories requires the repo scope
-    (classic) or Contents: read (fine-grained).
+    GitHub token. Omit to use the signed-in gh CLI, then GITHUB_TOKEN (see
+    Get-GitHubAccessToken). Reading private organisation repositories requires the repo
+    scope (classic) or Contents: read (fine-grained).
 
     .EXAMPLE
-    Get-GitHubRepository -Org 'CompuCal-Solutions' -Token $env:GITHUB_TOKEN | Format-Table name, visibility
+    Get-GitHubRepository -Org 'CompuCal-Solutions' | Format-Table name, visibility
 
     .EXAMPLE
-    if (-not (Get-GitHubRepository -Org $org -Name 'payments' -Token $token)) { 'needs creating' }
+    if (-not (Get-GitHubRepository -Org $org -Name 'payments')) { 'needs creating' }
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Org,
         [string]$Name,
-        [Parameter(Mandatory)] [string]$Token
+        [string]$Token
     )
 
     $orgSeg = [uri]::EscapeDataString($Org)

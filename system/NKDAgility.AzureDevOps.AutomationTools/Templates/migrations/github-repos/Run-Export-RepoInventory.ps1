@@ -47,18 +47,25 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 # Expands "$ENV:NAME" / "${ENV:NAME}" placeholders in a config string using the
 # process environment. JSON is not expanded by PowerShell, so we resolve any
 # environment-variable references (tokens loaded by Set-AutomationSecrets)
-# ourselves before use.
+# ourselves before use. Tokens are fallbacks behind ambient identity, so
+# -AllowMissing returns $null for an unset variable instead of throwing.
 function Expand-EnvPlaceholder {
-    param([string]$Value)
-    [regex]::Replace($Value, '\$(?:ENV:(?<n>\w+)|\{ENV:(?<n>\w+)\})', {
-        param($m)
-        $name = $m.Groups['n'].Value
-        $resolved = [Environment]::GetEnvironmentVariable($name)
-        if ([string]::IsNullOrEmpty($resolved)) {
-            throw "Environment variable '$name' referenced in config is not set. Run Set-AutomationSecrets first (Sync.ps1 does this automatically)."
-        }
-        $resolved
-    }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    param([string]$Value, [switch]$AllowMissing)
+    try {
+        [regex]::Replace($Value, '\$(?:ENV:(?<n>\w+)|\{ENV:(?<n>\w+)\})', {
+            param($m)
+            $name = $m.Groups['n'].Value
+            $resolved = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrEmpty($resolved)) {
+                throw "Environment variable '$name' referenced in config is not set. Run Set-AutomationSecrets first (Sync.ps1 does this automatically)."
+            }
+            $resolved
+        }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    catch {
+        if ($AllowMissing) { return $null }
+        throw
+    }
 }
 
 $inventoryPath = $config.InventoryCsv
@@ -66,16 +73,40 @@ if (-not [System.IO.Path]::IsPathRooted($inventoryPath)) {
     $inventoryPath = Join-Path $PSScriptRoot $inventoryPath
 }
 
+$sourceOrg = Expand-EnvPlaceholder -Value $config.SourceOrg
 $params = @{
-    Collection = Expand-EnvPlaceholder -Value $config.SourceOrg
-    Pat        = Expand-EnvPlaceholder -Value $config.SourcePat
+    Collection = $sourceOrg
     Path       = $inventoryPath
 }
+
+# Ambient identity first: probe Entra (the module caches the token, so the inventory
+# call reuses it) and only fall back to the configured PAT when Entra is unavailable.
+try {
+    $null = Get-AzureDevOpsAccessToken -Collection $sourceOrg
+}
+catch {
+    $sourcePat = Expand-EnvPlaceholder -Value $config.SourcePat -AllowMissing
+    if (-not $sourcePat) {
+        throw ("Neither Entra sign-in nor a source PAT is available for {0}: {1}" -f $sourceOrg, $_.Exception.Message)
+    }
+    Write-Warning ("Entra sign-in unavailable ({0}); using the configured source PAT." -f $_.Exception.Message)
+    $params.Pat = $sourcePat
+}
+
 # The GitHub side is optional here: with it, pre-filled TargetNames are also
 # collision-checked against repositories that already exist in the target org.
+# Same policy: the gh CLI / GITHUB_TOKEN resolve inside the module; the config
+# token is only passed when that ambient resolution fails.
 if ($config.PSObject.Properties['GitHubOrg'] -and $config.GitHubOrg) {
     $params.GitHubOrg = Expand-EnvPlaceholder -Value $config.GitHubOrg
-    $params.GitHubToken = Expand-EnvPlaceholder -Value $config.GitHubToken
+    try {
+        $null = Get-GitHubAccessToken
+    }
+    catch {
+        $githubToken = Expand-EnvPlaceholder -Value $config.GitHubToken -AllowMissing
+        if (-not $githubToken) { throw }
+        $params.GitHubToken = $githubToken
+    }
 }
 if ($IncludeDisabled) { $params.IncludeDisabled = $true }
 

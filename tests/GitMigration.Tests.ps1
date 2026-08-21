@@ -36,11 +36,82 @@ Describe 'ConvertTo-GitHubRepoName' {
     }
 }
 
+Describe 'Get-AzureDevOpsAccessToken' {
+
+    BeforeAll {
+        Import-Module $script:ManifestPath -Force
+        $script:Module = Get-Module NKDAgility.AzureDevOps.AutomationTools
+        # Stub the private Entra acquisition so the public wrapper is exercised
+        # without Az.Accounts or a sign-in.
+        & $script:Module {
+            function script:Get-EntraAccessToken {
+                param([string]$Collection, [switch]$Force)
+                "entra-token-for-$Collection"
+            }
+        }
+    }
+
+    It 'returns the Entra token for the collection' {
+        Get-AzureDevOpsAccessToken -Collection 'https://compucal.visualstudio.com' |
+            Should -BeExactly 'entra-token-for-https://compucal.visualstudio.com'
+    }
+}
+
+Describe 'Get-GitHubAccessToken' {
+
+    BeforeAll {
+        Import-Module $script:ManifestPath -Force
+        $script:Module = Get-Module NKDAgility.AzureDevOps.AutomationTools
+
+        # A gh stub in module scope shadows any real gh on PATH for calls made from
+        # inside the module, making the CLI leg deterministic on any machine.
+        & $script:Module {
+            $script:GhCliToken = $null
+            function script:gh {
+                param([Parameter(ValueFromRemainingArguments = $true)]$CliArgs)
+                if ($script:GhCliToken) {
+                    $global:LASTEXITCODE = 0
+                    return $script:GhCliToken
+                }
+                $global:LASTEXITCODE = 1
+            }
+        }
+        $script:SavedGitHubToken = $env:GITHUB_TOKEN
+    }
+
+    AfterAll {
+        $env:GITHUB_TOKEN = $script:SavedGitHubToken
+    }
+
+    It 'prefers the signed-in gh CLI over GITHUB_TOKEN' {
+        & $script:Module { $script:GhCliToken = 'gh-cli-token' }
+        $env:GITHUB_TOKEN = 'env-token'
+        Get-GitHubAccessToken | Should -BeExactly 'gh-cli-token'
+    }
+
+    It 'falls back to GITHUB_TOKEN when gh is signed out' {
+        & $script:Module { $script:GhCliToken = $null }
+        $env:GITHUB_TOKEN = 'env-token'
+        Get-GitHubAccessToken | Should -BeExactly 'env-token'
+    }
+
+    It 'throws with guidance when neither is available' {
+        & $script:Module { $script:GhCliToken = $null }
+        $env:GITHUB_TOKEN = ''
+        { Get-GitHubAccessToken } | Should -Throw '*No GitHub credential available*'
+    }
+}
+
 Describe 'Invoke-GitHubApi' {
 
     BeforeAll {
         Import-Module $script:ManifestPath -Force
         $script:Module = Get-Module NKDAgility.AzureDevOps.AutomationTools
+
+        # Ambient resolution stub, so the tokenless path needs no gh CLI or env var.
+        & $script:Module {
+            function script:Get-GitHubAccessToken { 'ambient-token' }
+        }
 
         # Stub Invoke-RestMethod inside the module so the invoker's own paging, 404
         # and error-surfacing logic runs for real without any network. The stub honours
@@ -63,6 +134,8 @@ Describe 'Invoke-GitHubApi' {
             }
             function script:Invoke-RestMethod {
                 param($Uri, $Method, $Headers, $ContentType, $Body, $ErrorAction, [string]$ResponseHeadersVariable)
+
+                $script:LastAuthHeader = $Headers.Authorization
 
                 if ($Uri -like '*/repos/x/missing') {
                     $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::NotFound)
@@ -100,6 +173,11 @@ Describe 'Invoke-GitHubApi' {
 
     It 'throws on 404 without -AllowNotFound' {
         { & $script:Module { Invoke-GitHubApi -Path 'repos/x/missing' -Token 't' } } | Should -Throw 'GitHub REST call failed*'
+    }
+
+    It 'resolves the token ambiently when none is supplied' {
+        & $script:Module { Invoke-GitHubApi -Path 'repos/x/present' } | Out-Null
+        & $script:Module { $script:LastAuthHeader } | Should -BeExactly 'Bearer ambient-token'
     }
 }
 
@@ -284,6 +362,20 @@ Describe 'Migrate-ReposToGitHub engine shape' {
             Where-Object { $_.ArgumentName -eq 'SupportsShouldProcess' }
         $supports | Should -Not -BeNullOrEmpty -Because 'anything that writes to a GitHub org must be previewable'
         $supports.Argument.Extent.Text | Should -BeExactly '$true'
+    }
+
+    It 'does not require tokens - ambient identity is the default' {
+        foreach ($name in 'SourcePat', 'GitHubToken') {
+            $parameter = $script:EngineAst.ParamBlock.Parameters |
+                Where-Object { $_.Name.VariablePath.UserPath -eq $name }
+            $parameter | Should -Not -BeNullOrEmpty
+            $mandatory = $parameter.Attributes | Where-Object {
+                $_ -is [System.Management.Automation.Language.AttributeAst] -and
+                $_.TypeName.FullName -match 'Parameter' -and
+                ($_.NamedArguments | Where-Object { $_.ArgumentName -eq 'Mandatory' -and $_.Argument.Extent.Text -eq '$true' })
+            }
+            $mandatory | Should -BeNullOrEmpty -Because "$name is the fallback behind Entra / the gh CLI, not a requirement"
+        }
     }
 
     It 'defaults MaxPushSizeGB to the GitHub 2 GB push limit' {

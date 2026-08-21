@@ -35,14 +35,16 @@ function Export-GitRepoInventory {
     engagement's approval record.
 
     .PARAMETER Pat
-    Personal access token for the source organisation (Code Read).
+    Personal access token for the source organisation (Code Read). Omit to authenticate
+    via Entra - the default across the module.
 
     .PARAMETER GitHubOrg
     Optional GitHub organisation to collision-check new TargetNames against, so a
     pre-filled name never silently collides with a repository that already exists there.
 
     .PARAMETER GitHubToken
-    GitHub token for -GitHubOrg. Required when -GitHubOrg is supplied.
+    GitHub token for -GitHubOrg. Omit to use the signed-in gh CLI, then GITHUB_TOKEN
+    (see Get-GitHubAccessToken).
 
     .PARAMETER IncludeDisabled
     Add rows for disabled source repositories too.
@@ -67,10 +69,6 @@ function Export-GitRepoInventory {
 
         [switch]$UseDefaultCredentials
     )
-
-    if ($GitHubOrg -and -not $GitHubToken) {
-        throw 'GitHubToken is required when GitHubOrg is supplied.'
-    }
 
     $columns = @('SourceProject', 'SourceRepo', 'SourceRepoId', 'DefaultBranch', 'SizeMB',
         'IsDisabled', 'WebUrl', 'Status', 'TargetName', 'Approved', 'Notes')

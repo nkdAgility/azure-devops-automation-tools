@@ -22,6 +22,7 @@
         # Common - organisations and secrets
         'Get-Organisation'
         'Get-AzureDevOpsAuthHeader'
+        'Get-AzureDevOpsAccessToken'
         'Set-AutomationSecrets'
         # Common - workspace
         'Initialize-AutomationWorkspace'
@@ -73,6 +74,7 @@
         'Get-TeamProject'
         'Get-GitRepository'
         'Get-GitHubRepository'
+        'Get-GitHubAccessToken'
         'Export-GitRepoInventory'
     )
     CmdletsToExport   = @()

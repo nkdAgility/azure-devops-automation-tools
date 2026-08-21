@@ -32,12 +32,21 @@
     missing. Requires git-lfs on PATH; if it is missing (or -SkipLfs is
     supplied) LFS transfer is skipped with a warning.
 
-    Authentication: the Azure DevOps PAT and the GitHub token are passed
-    per-invocation via http.extraheader so they never end up in the remote URL
-    or reflog. The source PAT needs Code (Read); the GitHub token needs
-    permission to create repositories in the organization and push to them
-    (classic 'repo' scope, or fine-grained Administration: write plus
-    Contents: write).
+    Authentication is ambient-identity first, stored token as the fallback:
+      - Source: Entra by default. When the automation module is loaded (the
+        binder guarantees it) the engine acquires an Entra access token via
+        Get-AzureDevOpsAccessToken and uses it as a Bearer header for both REST
+        and git - an Entra token works anywhere a PAT does. The token is
+        re-resolved before every repository, so the module's cache renews it
+        near expiry across a long run. -SourcePat is the fallback, used when
+        Entra sign-in is unavailable or fails.
+      - GitHub: the signed-in gh CLI ('gh auth token') by default;
+        -GitHubToken, then GITHUB_TOKEN, as fallbacks. The credential needs
+        permission to create repositories in the organization and push
+        (classic 'repo' scope, or fine-grained Administration: write plus
+        Contents: write).
+    Credentials are passed per-invocation via http.extraheader so they never
+    end up in the remote URL or reflog.
 
     Re-running is safe and is the intended way to pick up newly approved rows:
     an existing GitHub repository is reused, the cached mirror only fetches new
@@ -52,13 +61,18 @@
     and https://<org>.visualstudio.com work.
 
 .PARAMETER SourcePat
-    Personal Access Token for the source organization (Code Read).
+    Personal Access Token for the source organization (Code Read). Optional:
+    Entra is the default; the PAT is only used when Entra sign-in is
+    unavailable or fails. A PAT is worth supplying for unattended runs and for
+    single repositories so large that one transfer outlives an Entra token.
 
 .PARAMETER GitHubOrg
     Target GitHub organization name (the org slug, not a URL).
 
 .PARAMETER GitHubToken
     GitHub token able to create repositories in the organization and push.
+    Optional: the signed-in gh CLI is the default; this token (then
+    GITHUB_TOKEN) is the fallback.
 
 .PARAMETER InventoryCsv
     Path of the inventory/approval CSV (see Export-GitRepoInventory). Only rows
@@ -112,13 +126,14 @@
     repository is NOT deleted - reconcile it on GitHub yourself.
 
 .EXAMPLE
+    # Ambient identity: Entra for the source, the signed-in gh CLI for GitHub.
     .\Migrate-ReposToGitHub.ps1 `
-        -SourceOrg https://compucal.visualstudio.com -SourcePat $srcPat `
-        -GitHubOrg CompuCal-Solutions -GitHubToken $ghToken `
+        -SourceOrg https://compucal.visualstudio.com `
+        -GitHubOrg CompuCal-Solutions `
         -InventoryCsv .\repo-inventory.csv -WhatIf
 
 .EXAMPLE
-    # Smoke-test one approved repository.
+    # Smoke-test one approved repository with explicit fallback tokens.
     .\Migrate-ReposToGitHub.ps1 `
         -SourceOrg https://compucal.visualstudio.com -SourcePat $srcPat `
         -GitHubOrg CompuCal-Solutions -GitHubToken $ghToken `
@@ -134,13 +149,11 @@ param(
     [ValidatePattern('^https://')]
     [string]$SourceOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$SourcePat,
 
     [Parameter(Mandatory = $true)]
     [string]$GitHubOrg,
 
-    [Parameter(Mandatory = $true)]
     [string]$GitHubToken,
 
     [Parameter(Mandatory = $true)]
@@ -197,6 +210,70 @@ function Get-GitHubExtraHeader {
     param([string]$Token)
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("x-access-token:$Token"))
     "AUTHORIZATION: Basic $b64"
+}
+
+function Initialize-SourceAuth {
+    # Ambient identity first: an Entra access token works anywhere a PAT does (Bearer
+    # for REST, http.extraheader for git), so Entra is the default and -SourcePat only
+    # the fallback. Called before every repository, not just once: the module caches
+    # the token and renews it shortly before expiry, so re-resolving per repo keeps a
+    # long run authenticated. Announces the mode once - never the credential.
+    $token = $null
+    $entraError = $null
+    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
+        try { $token = Get-AzureDevOpsAccessToken -Collection $SourceOrg }
+        catch { $entraError = $_.Exception.Message }
+    }
+    else {
+        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
+    }
+
+    if ($token) {
+        $script:SourceHeaders = @{ Authorization = 'Bearer ' + $token }
+        $script:SourceHeader = "AUTHORIZATION: Bearer $token"
+        if ($script:SourceAuthMode -ne 'Entra') {
+            Write-Host '==> Source auth: Entra.' -ForegroundColor DarkGray
+            $script:SourceAuthMode = 'Entra'
+        }
+        return
+    }
+
+    if ($SourcePat) {
+        $script:SourceHeaders = Get-AdoAuthHeader -Pat $SourcePat
+        $script:SourceHeader = Get-AdoExtraHeader -Pat $SourcePat
+        if ($script:SourceAuthMode -ne 'PAT') {
+            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the source PAT." -f $entraError)
+            $script:SourceAuthMode = 'PAT'
+        }
+        return
+    }
+
+    throw ("No source credential available: Entra sign-in failed ({0}) and no -SourcePat was supplied. Sign in to Entra, or add the source PAT to secrets\secrets.json." -f $entraError)
+}
+
+function Resolve-GitHubToken {
+    # Ambient identity first here too: the signed-in gh CLI, then the supplied token,
+    # then GITHUB_TOKEN. gh tokens are long-lived, so one resolution per run is enough.
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        # A signed-out gh exits non-zero; that is the fallback path, not an error.
+        $PSNativeCommandUseErrorActionPreference = $false
+        $token = $null
+        try { $token = @(& gh auth token 2>$null) | Select-Object -First 1 } catch { $token = $null }
+        if ($LASTEXITCODE -ne 0) { $token = $null }
+        if (-not [string]::IsNullOrWhiteSpace($token)) {
+            Write-Host '==> GitHub auth: gh CLI.' -ForegroundColor DarkGray
+            return $token
+        }
+    }
+    if ($GitHubToken) {
+        Write-Host '==> GitHub auth: supplied token.' -ForegroundColor DarkGray
+        return $GitHubToken
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+        Write-Host '==> GitHub auth: GITHUB_TOKEN.' -ForegroundColor DarkGray
+        return $env:GITHUB_TOKEN
+    }
+    throw "No GitHub credential available. Sign in with 'gh auth login', or supply -GitHubToken (add the token to secrets\secrets.json with EnvVars ['GITHUB_TOKEN'])."
 }
 
 function Invoke-AdoApi {
@@ -761,6 +838,10 @@ function Migrate-ApprovedRepo {
     $progress = if ($Total) { "[$Index/$Total] " } else { '' }
     Write-Step "${progress}$($Row.SourceProject)/$($Row.SourceRepo) => $GitHubOrg/$($Row.TargetName)"
 
+    # Re-resolve the source credential so an Entra token nearing expiry is renewed
+    # before this repository's REST calls and git transfers start.
+    Initialize-SourceAuth
+
     $summaryArgs = @{
         SourceProject = $Row.SourceProject
         SourceRepo    = $Row.SourceRepo
@@ -872,11 +953,15 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 
 $script:SourceOrgBase = $SourceOrg.TrimEnd('/')
-$script:SourceHeaders = Get-AdoAuthHeader -Pat $SourcePat
-$script:SourceHeader = Get-AdoExtraHeader -Pat $SourcePat
-$script:TargetHeader = Get-GitHubExtraHeader -Token $GitHubToken
+
+# Ambient-first credential resolution: Entra then -SourcePat for the source (renewed
+# per repository), the gh CLI then -GitHubToken/GITHUB_TOKEN for the target.
+$script:SourceAuthMode = $null
+Initialize-SourceAuth
+$resolvedGitHubToken = Resolve-GitHubToken
+$script:TargetHeader = Get-GitHubExtraHeader -Token $resolvedGitHubToken
 $script:GhHeaders = @{
-    Authorization          = 'Bearer ' + $GitHubToken
+    Authorization          = 'Bearer ' + $resolvedGitHubToken
     Accept                 = 'application/vnd.github+json'
     'X-GitHub-Api-Version' = '2022-11-28'
     # GitHub rejects requests that carry no User-Agent.
