@@ -253,7 +253,13 @@ function Initialize-SourceAuth {
 
 function Resolve-GitHubToken {
     # Ambient identity first here too: the signed-in gh CLI, then the supplied token,
-    # then GITHUB_TOKEN. gh tokens are long-lived, so one resolution per run is enough.
+    # then GITHUB_TOKEN. Every candidate is VALIDATED against the target org before it
+    # wins, because against a SAML/Entra-SSO org the gh CLI's OAuth token only works
+    # while the user's SSO session is active - handing over a token that answers 403
+    # 'SAML enforcement' would fail every repository, when an SSO-authorised PAT in the
+    # fallbacks would have worked.
+    $candidates = [System.Collections.Generic.List[object]]::new()
+
     if (Get-Command gh -ErrorAction SilentlyContinue) {
         # A signed-out gh exits non-zero; that is the fallback path, not an error.
         $PSNativeCommandUseErrorActionPreference = $false
@@ -261,19 +267,44 @@ function Resolve-GitHubToken {
         try { $token = @(& gh auth token 2>$null) | Select-Object -First 1 } catch { $token = $null }
         if ($LASTEXITCODE -ne 0) { $token = $null }
         if (-not [string]::IsNullOrWhiteSpace($token)) {
-            Write-Host '==> GitHub auth: gh CLI.' -ForegroundColor DarkGray
-            return $token
+            $candidates.Add(@{ Source = 'gh CLI'; Token = $token })
         }
     }
-    if ($GitHubToken) {
-        Write-Host '==> GitHub auth: supplied token.' -ForegroundColor DarkGray
-        return $GitHubToken
-    }
+    if ($GitHubToken) { $candidates.Add(@{ Source = 'supplied token'; Token = $GitHubToken }) }
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
-        Write-Host '==> GitHub auth: GITHUB_TOKEN.' -ForegroundColor DarkGray
-        return $env:GITHUB_TOKEN
+        $candidates.Add(@{ Source = 'GITHUB_TOKEN'; Token = $env:GITHUB_TOKEN })
     }
-    throw "No GitHub credential available. Sign in with 'gh auth login', or supply -GitHubToken (add the token to secrets\secrets.json with EnvVars ['GITHUB_TOKEN'])."
+
+    $orgSeg = [uri]::EscapeDataString($GitHubOrg)
+    $lastError = $null
+    foreach ($candidate in $candidates) {
+        try {
+            $probe = @{
+                Uri         = "https://api.github.com/orgs/$orgSeg"
+                Headers     = @{
+                    Authorization          = 'Bearer ' + $candidate.Token
+                    Accept                 = 'application/vnd.github+json'
+                    'X-GitHub-Api-Version' = '2022-11-28'
+                    'User-Agent'           = 'NKDAgility.AzureDevOps.AutomationTools'
+                }
+                ErrorAction = 'Stop'
+            }
+            $null = Invoke-RestMethod @probe
+            Write-Host ("==> GitHub auth: {0} (validated against {1})." -f $candidate.Source, $GitHubOrg) -ForegroundColor DarkGray
+            return $candidate.Token
+        }
+        catch {
+            $detail = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+            $lastError = $detail
+            Write-Warning ("The GitHub credential from the {0} cannot access '{1}'; trying the next credential. ({2})" -f `
+                    $candidate.Source, $GitHubOrg, (@($detail -split "`n" | Where-Object { $_ -match '\S' })[0]))
+        }
+    }
+
+    $message = "No usable GitHub credential for '$GitHubOrg'. Sign in with 'gh auth login', or supply -GitHubToken (add the token to secrets\secrets.json with EnvVars ['GITHUB_TOKEN']). " +
+    "If the org enforces SAML/Entra SSO: refresh your session at https://github.com/orgs/$GitHubOrg/sso, or use a classic PAT authorised for the org (token settings -> Configure SSO -> Authorize) - an authorised PAT does not need an active SSO session."
+    if ($lastError) { $message += "`nLast error: $lastError" }
+    throw $message
 }
 
 function Invoke-AdoApi {

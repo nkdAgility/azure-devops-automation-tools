@@ -101,7 +101,7 @@ catch {
 # with a warning, because the inventory itself only needs the source.
 if ($config.PSObject.Properties['GitHubOrg'] -and $config.GitHubOrg) {
     try {
-        $null = Get-GitHubAccessToken
+        $null = Get-GitHubAccessToken -Org (Expand-EnvPlaceholder -Value $config.GitHubOrg)
         $params.GitHubOrg = Expand-EnvPlaceholder -Value $config.GitHubOrg
     }
     catch {

@@ -96,12 +96,19 @@ function Export-GitRepoInventory {
 
     # Repositories that already exist in the GitHub org and are NOT claimed by a row
     # also block a pre-filled name: creating over them would land a migration in
-    # somebody else's repository.
+    # somebody else's repository. A GitHub-side failure (no credential, expired SSO
+    # session) downgrades to a warning - the inventory itself only needs the source.
     if ($GitHubOrg) {
-        foreach ($ghRepo in @(Get-GitHubRepository -Org $GitHubOrg -Token $GitHubToken)) {
-            if ($ghRepo -and $ghRepo.name -and -not $claimedNames.Contains($ghRepo.name)) {
-                [void]$claimedNames.Add($ghRepo.name)
+        try {
+            foreach ($ghRepo in @(Get-GitHubRepository -Org $GitHubOrg -Token $GitHubToken)) {
+                if ($ghRepo -and $ghRepo.name -and -not $claimedNames.Contains($ghRepo.name)) {
+                    [void]$claimedNames.Add($ghRepo.name)
+                }
             }
+        }
+        catch {
+            Write-Warning ("Could not list '{0}' on GitHub; new TargetNames are collision-checked against the CSV only. ({1})" -f `
+                    $GitHubOrg, (@($_.Exception.Message -split "`n" | Where-Object { $_ -match '\S' })[0]))
         }
     }
 

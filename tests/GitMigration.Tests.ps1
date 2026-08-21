@@ -98,7 +98,29 @@ Describe 'Get-GitHubAccessToken' {
     It 'throws with guidance when neither is available' {
         & $script:Module { $script:GhCliToken = $null }
         $env:GITHUB_TOKEN = ''
-        { Get-GitHubAccessToken } | Should -Throw '*No GitHub credential available*'
+        { Get-GitHubAccessToken } | Should -Throw '*No usable GitHub credential*'
+    }
+
+    It 'skips a candidate the org rejects (expired SAML session) and uses the next' {
+        # The gh token exists but answers 403 SAML-enforcement for the org; the
+        # SSO-authorised PAT in GITHUB_TOKEN must win instead of the run failing.
+        & $script:Module {
+            $script:GhCliToken = 'saml-dead-gh-token'
+            function script:Invoke-GitHubApi {
+                param($Path, $Method = 'Get', $Query, $Body, $Token, [switch]$AllPages, [switch]$AllowNotFound)
+                if ($Token -eq 'saml-dead-gh-token') {
+                    throw "GitHub REST call failed: Get https://api.github.com/orgs/x`nResource protected by organization SAML enforcement."
+                }
+            }
+        }
+        $env:GITHUB_TOKEN = 'sso-authorised-pat'
+        Get-GitHubAccessToken -Org 'x' -WarningAction SilentlyContinue | Should -BeExactly 'sso-authorised-pat'
+    }
+
+    It 'throws SSO guidance when every candidate is rejected by the org' {
+        & $script:Module { $script:GhCliToken = 'saml-dead-gh-token' }
+        $env:GITHUB_TOKEN = 'saml-dead-gh-token'
+        { Get-GitHubAccessToken -Org 'x' -WarningAction SilentlyContinue } | Should -Throw '*Configure SSO*'
     }
 }
 
