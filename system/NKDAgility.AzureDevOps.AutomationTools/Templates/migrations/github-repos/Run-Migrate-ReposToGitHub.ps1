@@ -175,15 +175,24 @@ else {
     $totalBytes = ($summaries | Measure-Object -Property SizeBytes -Sum).Sum
     Write-Host ("Total: {0} repository(ies) processed, {1} migrated, {2:N2} GB." -f $repoCount, $migrated, [math]::Round($totalBytes / 1GB, 2)) -ForegroundColor Green
 
-    # The summary table truncates long statuses; repeat every not-migrated repo with
-    # its FULL reason so nothing has to be fished out of the CSV.
-    $needsAttention = @($summaries | Where-Object { $_.Status -ne 'Migrated' -and $_.Status -notlike 'WhatIf*' })
+    # The summary table truncates long statuses; repeat every repo that is not a
+    # clean 'Migrated' - or that migrated WITH warnings - with the full text, so
+    # nothing has to be fished out of the CSV.
+    $needsAttention = @($summaries | Where-Object {
+            $_.Status -notlike 'WhatIf*' -and
+            ($_.Status -ne 'Migrated' -or ($_.PSObject.Properties['Warnings'] -and $_.Warnings))
+        })
     if ($needsAttention) {
         Write-Host ''
         Write-Host ('---- Needs attention ({0}) - full reasons ----' -f $needsAttention.Count) -ForegroundColor Yellow
         foreach ($item in ($needsAttention | Sort-Object SourceProject, SourceRepo)) {
             Write-Host ('  {0}/{1} -> {2}' -f $item.SourceProject, $item.SourceRepo, $item.TargetName) -ForegroundColor Yellow
             Write-Host ('    {0}' -f $item.Status) -ForegroundColor DarkYellow
+            if ($item.PSObject.Properties['Warnings'] -and $item.Warnings) {
+                foreach ($warning in ($item.Warnings -split ' \| ')) {
+                    Write-Host ('    warning: {0}' -f $warning) -ForegroundColor DarkYellow
+                }
+            }
         }
     }
 
@@ -204,6 +213,7 @@ else {
                 @{ Name = 'size_mb';            Expression = { [math]::Round($_.SizeBytes / 1MB, 2) } }
                 @{ Name = 'strategy';           Expression = { $_.Strategy } }
                 @{ Name = 'status';             Expression = { $_.Status } }
+                @{ Name = 'warnings';           Expression = { if ($_.PSObject.Properties['Warnings']) { $_.Warnings } else { '' } } }
                 # The name this repo actually lives under on GitHub - the engine's
                 # rename-detection baseline. Set below: this run's name when it
                 # migrated, otherwise inherited from the previous summary so a later
@@ -224,6 +234,15 @@ else {
         }
         foreach ($record in $newRecords) {
             $id = [string]$record.source_repo_id
+            # Remote-side warnings (GH001 etc.) only fire when objects actually
+            # transfer, so an idempotent re-run reports none - inherit the previous
+            # row's warnings rather than losing them.
+            if (-not $record.warnings -and $merged.Contains($id)) {
+                $previousRow = $merged[$id]
+                if ($previousRow.PSObject.Properties['warnings'] -and $previousRow.warnings) {
+                    $record.warnings = $previousRow.warnings
+                }
+            }
             if ($record.status -eq 'Migrated') {
                 $record.last_migrated_name = $record.target_name
             }
@@ -245,26 +264,32 @@ else {
             Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
         Write-Host ("Wrote summary CSV: {0}" -f $csvPath) -ForegroundColor Green
 
-        # One committed place for every repository that has NOT migrated: the full
-        # reason per repo, with oversize object lists inlined so nothing has to be
-        # fished out of the gitignored work folder. Built from the MERGED summary, so
-        # it reflects the latest known state across runs, not just this run.
+        # One committed place for every repository that needs a conversation: not
+        # migrated, migrated-but-empty, or migrated with warnings (GH001 large-file
+        # advisories, partial LFS transfers). Full reasons, with oversize object
+        # lists inlined so nothing has to be fished out of the gitignored work
+        # folder. Built from the MERGED summary, so it reflects the latest known
+        # state across runs, not just this run.
         $attention = @($merged.Values | Where-Object {
-                $_.PSObject.Properties['status'] -and $_.status -and
-                $_.status -ne 'Migrated' -and $_.status -notlike 'WhatIf*'
+                $_.PSObject.Properties['status'] -and $_.status -and $_.status -notlike 'WhatIf*' -and
+                ($_.status -ne 'Migrated' -or ($_.PSObject.Properties['warnings'] -and $_.warnings))
             })
         $attentionPath = Join-Path (Split-Path -Parent $csvPath) 'github-attention.md'
         $lines = [System.Collections.Generic.List[string]]::new()
         $lines.Add('# GitHub migration - needs attention')
         $lines.Add('')
         $lines.Add(('Generated {0} by Run-Migrate-ReposToGitHub.ps1 after each committing run. Latest' -f (Get-Date -Format 'yyyy-MM-dd HH:mm')))
-        $lines.Add('known state of every approved repository that has not migrated; re-running')
+        $lines.Add('known state of every approved repository that is not cleanly migrated - blocked,')
+        $lines.Add('failed, skipped, empty at the source, or migrated with warnings. Re-running')
         $lines.Add('Sync.ps1 refreshes this file.')
         if (-not $attention) {
             $lines.Add('')
-            $lines.Add('**Nothing outstanding - every processed repository is Migrated.**')
+            $lines.Add('**Nothing outstanding - every processed repository is cleanly Migrated.**')
         }
-        foreach ($group in ($attention | Group-Object { ($_.status -split ':')[0] } | Sort-Object Name)) {
+        $groupKey = {
+            if ($_.status -eq 'Migrated') { 'Migrated with warnings' } else { ($_.status -split ':')[0] }
+        }
+        foreach ($group in ($attention | Group-Object $groupKey | Sort-Object Name)) {
             $lines.Add('')
             $lines.Add(('## {0} ({1})' -f $group.Name, $group.Count))
             foreach ($item in ($group.Group | Sort-Object project, repo)) {
@@ -272,6 +297,12 @@ else {
                 $lines.Add(('### {0} / {1} -> {2}' -f $item.project, $item.repo, $item.target_name))
                 $lines.Add('')
                 $lines.Add($item.status)
+                if ($item.PSObject.Properties['warnings'] -and $item.warnings) {
+                    $lines.Add('')
+                    foreach ($warning in ($item.warnings -split ' \| ')) {
+                        $lines.Add(('- {0}' -f $warning))
+                    }
+                }
                 # Inline the offending-object list for oversize blocks.
                 $oversizePath = Join-Path $params['WorkPath'] ($item.target_name + '.oversize.txt')
                 if ($item.status -like '*100MB*' -and (Test-Path -LiteralPath $oversizePath)) {

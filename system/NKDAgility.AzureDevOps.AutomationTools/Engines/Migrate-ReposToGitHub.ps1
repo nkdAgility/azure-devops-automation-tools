@@ -418,8 +418,31 @@ function Invoke-GhApi {
     }
 }
 
+function Register-GitStderr {
+    # Echoes captured git stderr and records warning lines (remote-side GH001 large
+    # file advisories, LFS errors, ...) against the current repository, so they land
+    # in the summary CSV and the attention report instead of scrolling away.
+    param([string]$Path)
+    foreach ($line in @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)) {
+        if (-not "$line".Trim()) { continue }
+        if ($line -match '(?i)warning|error|GH\d{3}|failed') {
+            Write-Host "    git: $line" -ForegroundColor Yellow
+            if ($null -ne $script:CurrentRepoWarnings -and $line -match '(?i)warning|error|GH\d{3}') {
+                [void]$script:CurrentRepoWarnings.Add("$line".Trim())
+            }
+        }
+        else {
+            Write-Host "    git: $line" -ForegroundColor DarkGray
+        }
+    }
+}
+
 function Invoke-Git {
-    # Runs git with a scoped auth header so tokens never touch the remote URL.
+    # Runs git with a scoped auth header so tokens never touch the remote URL. Stderr
+    # is captured to a file: that is where git puts remote-side messages (GH001 large
+    # file advisories and the like) and its own errors, and capturing them is what
+    # lets the run report per-repo warnings. Progress output disappears as a side
+    # effect - git disables it for a non-tty stderr - which is an acceptable trade.
     param(
         [string]$ExtraHeader,
         [Parameter(ValueFromRemainingArguments = $true)]
@@ -428,9 +451,18 @@ function Invoke-Git {
     $allArgs = @()
     if ($ExtraHeader) { $allArgs += @('-c', "http.extraheader=$ExtraHeader") }
     $allArgs += $GitArgs
-    & git @allArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "git $($GitArgs -join ' ') failed with exit code $LASTEXITCODE"
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    try {
+        & git @allArgs 2>$stderrFile
+        $exitCode = $LASTEXITCODE
+        Register-GitStderr -Path $stderrFile
+        if ($exitCode -ne 0) {
+            $tail = @(Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue | Select-Object -Last 5) -join '; '
+            throw "git $($GitArgs -join ' ') failed with exit code $exitCode$(if ($tail) { ": $tail" })"
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -701,8 +733,12 @@ function Sync-SourceLfs {
     Write-Host '    Fetching all LFS objects from source...' -ForegroundColor Green
     Push-Location $CloneDir
     try {
-        & git -c "http.extraheader=$script:SourceHeader" lfs fetch --all $RemoteName
-        if ($LASTEXITCODE -ne 0) {
+        $stderrFile = [System.IO.Path]::GetTempFileName()
+        & git -c "http.extraheader=$script:SourceHeader" lfs fetch --all $RemoteName 2>$stderrFile
+        $exitCode = $LASTEXITCODE
+        Register-GitStderr -Path $stderrFile
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+        if ($exitCode -ne 0) {
             Write-Warning "    'git lfs fetch --all' reported errors; some LFS objects may be missing on the source."
         }
     }
@@ -777,8 +813,12 @@ function Push-Lfs {
     Write-Host '    Pushing missing LFS objects to target...' -ForegroundColor Green
     Push-Location $CloneDir
     try {
-        & git -c "http.extraheader=$script:TargetHeader" lfs push --all $TargetRemote
-        if ($LASTEXITCODE -ne 0) {
+        $stderrFile = [System.IO.Path]::GetTempFileName()
+        & git -c "http.extraheader=$script:TargetHeader" lfs push --all $TargetRemote 2>$stderrFile
+        $exitCode = $LASTEXITCODE
+        Register-GitStderr -Path $stderrFile
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+        if ($exitCode -ne 0) {
             Write-Warning "    'git lfs push --all' reported errors; some LFS objects may not have been uploaded."
         }
     }
@@ -907,6 +947,10 @@ function New-RepoSummary {
         SizeGB        = $SizeGB
         Strategy      = $Strategy
         Status        = $Status
+        # Everything git/LFS warned about for this repo (GH001 large-file advisories,
+        # partial LFS transfers, ...), deduplicated - the summary CSV and the
+        # attention report carry these to the customer conversation.
+        Warnings      = if ($script:CurrentRepoWarnings) { @($script:CurrentRepoWarnings | Select-Object -Unique) -join ' | ' } else { '' }
     }
 }
 
@@ -915,6 +959,10 @@ function Migrate-ApprovedRepo {
 
     $progress = if ($Total) { "[$Index/$Total] " } else { '' }
     Write-Step "${progress}$($Row.SourceProject)/$($Row.SourceRepo) => $GitHubOrg/$($Row.TargetName)"
+
+    # Fresh warning collector per repository; Register-GitStderr fills it and
+    # New-RepoSummary attaches it to whichever record this repo ends up with.
+    $script:CurrentRepoWarnings = [System.Collections.Generic.List[string]]::new()
 
     # Re-resolve the source credential so an Entra token nearing expiry is renewed
     # before this repository's REST calls and git transfers start.
@@ -985,6 +1033,18 @@ function Migrate-ApprovedRepo {
 
     # Clone the source as a mirror, or update the existing cached mirror.
     Sync-SourceMirror -CloneDir $cloneDir -RemoteUrl $repo.remoteUrl
+
+    # An initialized-but-never-pushed source repo has no refs at all. There is
+    # nothing to transfer, and 'git lfs push --all' would fail with 'Error getting
+    # local refs' - say so plainly instead.
+    Push-Location $cloneDir
+    try { $refCount = @(& git for-each-ref --format='x' 'refs/heads' 'refs/tags').Count }
+    finally { Pop-Location }
+    if ($refCount -eq 0) {
+        Write-Host '    Source repository has no branches or tags; nothing to push.' -ForegroundColor DarkGray
+        New-RepoSummary @summaryArgs -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy 'mirror' -Status 'Migrated (empty source)'
+        return
+    }
 
     # Refuse to start a push GitHub is guaranteed to reject: any blob over 100 MB.
     # With -LfsMigrateOversize (opt-in), the offending history is rewritten into Git
@@ -1072,6 +1132,9 @@ $script:GhHeaders = @{
 # Lazily probed by Test-GitLfs on first use; cached for the rest of the run.
 $script:GitLfsChecked = $false
 $script:GitLfsAvailable = $false
+
+# Per-repo warning collector; Migrate-ApprovedRepo resets it for each repository.
+$script:CurrentRepoWarnings = $null
 
 $script:PreviousTargets = Import-PreviousTargets
 
