@@ -140,7 +140,14 @@ jobs:
       - name: Install Pester and PSScriptAnalyzer
         shell: pwsh
         run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          $ErrorActionPreference = 'Stop'
+          # Some runner images come up with no repositories registered at all, and
+          # Set-PSRepository then fails with "No repository with the name
+          # 'PSGallery' was found". Register the defaults first when that happens.
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+              Register-PSRepository -Default -ErrorAction SilentlyContinue
+          }
+          Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
           Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
           Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
 
