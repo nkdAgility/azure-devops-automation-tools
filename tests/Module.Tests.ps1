@@ -186,43 +186,107 @@ Describe 'Workspace init.ps1' {
         $assignment = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                $node.Left.Extent.Text -eq '$resolveEnginePath'
+                $node.Left.Extent.Text -eq '$resolveEngine'
             }, $true)
-        $assignment | Should -Not -BeNullOrEmpty -Because 'the resolver must still be named $resolveEnginePath for this test to reach it'
-        $script:ResolveEnginePath = [scriptblock]::Create($assignment.Right.Extent.Text.Trim('{}'))
+        $assignment | Should -Not -BeNullOrEmpty -Because 'the resolver must still be named $resolveEngine for this test to reach it'
+        $script:ResolveEngine = [scriptblock]::Create($assignment.Right.Extent.Text.Trim('{}'))
+
+        $script:Governance = [pscustomobject]@{
+            name   = 'governance'
+            module = 'NKDAgility.AzureDevOps.Governance'
+            repo   = 'https://github.com/nkdAgility/azure-devops-governance-as-code.git'
+        }
     }
 
-    It 'resolves a rooted path when nothing overrides it' {
-        # The single-candidate case: no workspace.local.json, no environment override, so
-        # only the default survives the filter. Piping to Where-Object unwraps a lone
-        # survivor to a bare string, and [0] on a string is its first character - this
-        # returned 'C' and broke every fresh clone.
+    It 'defaults to the gallery on the production ring when nothing is configured' {
+        # The safe default: a workspace that has said nothing gets a pinned, published
+        # version rather than whatever happens to be in a clone on this machine.
+        $local = $null
+        $resolved = & $script:ResolveEngine $script:Governance
+
+        $resolved.Source | Should -BeExactly 'gallery'
+        $resolved.Ring | Should -BeExactly 'production'
+        $resolved.RepoName | Should -BeExactly 'azure-devops-governance-as-code'
+    }
+
+    It 'takes the ring from capabilities.json when it names one' {
+        $local = $null
+        $capability = [pscustomobject]@{
+            name   = 'governance'
+            module = 'NKDAgility.AzureDevOps.Governance'
+            repo   = 'https://github.com/nkdAgility/azure-devops-governance-as-code.git'
+            ring   = 'preview'
+        }
+        (& $script:ResolveEngine $capability).Ring | Should -BeExactly 'preview'
+    }
+
+    It 'lets a local ring override beat capabilities.json' {
+        # workspace.local.json is gitignored, so a ring chosen on one machine must not
+        # reach the shared repo - but it must win locally.
+        $local = [pscustomobject]@{ engineRings = [pscustomobject]@{ governance = 'preview' } }
+        $capability = [pscustomobject]@{
+            name   = 'governance'
+            module = 'NKDAgility.AzureDevOps.Governance'
+            repo   = 'https://github.com/nkdAgility/azure-devops-governance-as-code.git'
+            ring   = 'production'
+        }
+        (& $script:ResolveEngine $capability).Ring | Should -BeExactly 'preview'
+    }
+
+    It 'resolves a rooted path when capabilities.json asks for a clone' {
+        # Guards the original regression: a lone surviving candidate used to be unwrapped
+        # to a bare string, and [0] on a string is its first character - this returned 'C'
+        # and broke every fresh clone.
         $local = $null
         $capability = [pscustomobject]@{
             name   = 'automation'
             module = 'NKDAgility.AzureDevOps.AutomationTools'
             repo   = 'https://github.com/nkdAgility/azure-devops-automation-tools.git'
+            source = 'clone'
         }
-        $resolved = & $script:ResolveEnginePath $capability
+        $resolved = & $script:ResolveEngine $capability
 
+        $resolved.Source | Should -BeExactly 'clone'
         $resolved.RepoName | Should -BeExactly 'azure-devops-automation-tools'
         $resolved.Path.Length | Should -BeGreaterThan 3 -Because 'a single-character path means the array was unwrapped to a string'
         [System.IO.Path]::IsPathRooted($resolved.Path) | Should -BeTrue
         $resolved.Path | Should -BeLike '*azure-devops-automation-tools'
     }
 
-    It 'prefers an explicit environment override' {
+    It 'prefers an explicit environment override, and that means clone mode' {
         $local = $null
-        $capability = [pscustomobject]@{
-            name   = 'governance'
-            module = 'NKDAgility.AzureDevOps.Governance'
-            repo   = 'https://github.com/nkdAgility/azure-devops-governance-as-code.git'
-        }
         try {
             $env:AZDO_ENGINE_GOVERNANCE = 'D:\somewhere\else'
-            (& $script:ResolveEnginePath $capability).Path | Should -BeExactly 'D:\somewhere\else'
+            $resolved = & $script:ResolveEngine $script:Governance
+            $resolved.Source | Should -BeExactly 'clone'
+            $resolved.Path | Should -BeExactly 'D:\somewhere\else'
         }
         finally { Remove-Item Env:\AZDO_ENGINE_GOVERNANCE -ErrorAction SilentlyContinue }
+    }
+
+    It 'reads a clone path and fork remote from workspace.local.json' {
+        $local = [pscustomobject]@{
+            enginePaths = [pscustomobject]@{
+                governance = [pscustomobject]@{
+                    path = 'D:\src\my-fork'
+                    repo = 'https://github.com/me/azure-devops-governance-as-code.git'
+                }
+            }
+        }
+        $resolved = & $script:ResolveEngine $script:Governance
+
+        $resolved.Source | Should -BeExactly 'clone'
+        $resolved.Path | Should -BeExactly 'D:\src\my-fork'
+        $resolved.Repo | Should -BeExactly 'https://github.com/me/azure-devops-governance-as-code.git'
+    }
+
+    It 'still accepts the historical plain-string enginePaths form' {
+        $local = [pscustomobject]@{ enginePaths = [pscustomobject]@{ governance = 'D:\src\older-form' } }
+        $resolved = & $script:ResolveEngine $script:Governance
+
+        $resolved.Source | Should -BeExactly 'clone'
+        $resolved.Path | Should -BeExactly 'D:\src\older-form'
+        $resolved.Repo | Should -BeExactly 'https://github.com/nkdAgility/azure-devops-governance-as-code.git' -Because 'a bare path says nothing about the remote, so the upstream repo stands'
     }
 }
 

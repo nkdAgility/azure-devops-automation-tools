@@ -16,10 +16,9 @@
     capabilities.json declares which nkdAgility engines this workspace uses. For
     each one, init.ps1:
 
-      1. Resolves the engine clone (see below), cloning it if missing and
-         fast-forward pulling it if clean.
-      2. COPIES system\<Module> out of that clone into .system\<Module> and
-         records what it copied in .system\<Module>\.source.json.
+      1. Materialises the engine, from ONE OF TWO SOURCES (see below).
+      2. COPIES system\<Module> into .system\<Module> and records what it copied
+         in .system\<Module>\.source.json.
       3. Scaffolds the engine's Templates\customer-repo\** into this workspace,
          only-if-missing, then overwrites the files listed in that template's
          .managed file.
@@ -30,11 +29,46 @@
     Finally it imports the automation tools module and calls
     Initialize-AutomationWorkspace against this folder.
 
-    An engine clone is resolved in order:
-      1. $env:AZDO_ENGINE_<NAME>            (e.g. AZDO_ENGINE_GOVERNANCE)
-      2. $env:AZDO_AUTOMATION_TOOLS        (the 'automation' capability only)
-      3. 'enginePaths.<name>' or 'toolsPath' in workspace.local.json (gitignored)
-      4. %USERPROFILE%\source\repos\<repo-name>
+    THE TWO SOURCES
+    ---------------
+    gallery (the default)
+        Installs the published module from the PowerShell Gallery at a ring:
+        'production' for stable releases, 'preview' for prereleases. Versioned
+        and reproducible - this is what a scheduled audit should always run.
+
+    clone
+        Uses a git clone's WORKING TREE, uncommitted edits included, so an engine
+        change takes effect in this workspace immediately with no publish step.
+        The clone can be of the upstream repo or of your own fork; init.ps1 only
+        ever reads the working tree, so a fork is just a clone with a different
+        remote. NOT reproducible: two machines can differ.
+
+    Switching between them, at any time:
+
+        . .\init.ps1                                     # whatever is configured
+        . .\init.ps1 -Source gallery -Ring preview       # gallery, prereleases
+        . .\init.ps1 -Source gallery -Ring production    # gallery, stable
+        . .\init.ps1 -Source clone -Engine governance    # your clone
+        . .\init.ps1 -Source clone -Engine governance -Path C:\src\my-fork
+        . .\init.ps1 -Source clone -Engine governance -Repo https://github.com/me/fork.git
+
+    WHERE THE CHOICE IS REMEMBERED
+    ------------------------------
+    capabilities.json     committed, shared: the workspace's default 'source',
+                          'ring' and optional exact 'version' per engine.
+    workspace.local.json  gitignored, yours alone: per-engine clone paths and
+                          ring overrides written by the switches above.
+
+    That split is deliberate. Pointing an engine at your clone must never follow
+    you into the shared repo, or your teammates and CI would silently run an
+    engine that exists on one laptop.
+
+    Resolution order per engine, first match wins:
+      1. $env:AZDO_ENGINE_<NAME>          -> clone at that path (CI override)
+      2. $env:AZDO_AUTOMATION_TOOLS       -> clone ('automation' only)
+      3. enginePaths.<name> in workspace.local.json  -> clone
+      4. capabilities.json 'source'       -> gallery (default) or clone
+      5. nothing set at all               -> gallery, production ring
 
     .system\ is GENERATED and read-only. Never edit it: the next run overwrites
     it, and init.ps1 stops with an error if it notices a hand-edit rather than
@@ -42,13 +76,40 @@
     the copy takes uncommitted edits, so that is the normal way to test an
     engine change against a real workspace.
 
+.PARAMETER Source
+    'gallery' or 'clone'. Persisted, so it holds until you change it again.
+    Without -Engine, applies to every declared engine.
+
+.PARAMETER Ring
+    'production' (stable) or 'preview' (prereleases). Gallery source only.
+
+.PARAMETER Engine
+    Limit -Source / -Ring to one capability, e.g. 'governance'.
+
+.PARAMETER Path
+    With '-Source clone': the clone to use. Defaults to
+    %USERPROFILE%\source\repos\<repo-name>.
+
+.PARAMETER Repo
+    With '-Source clone': the URL to clone from if -Path does not exist yet.
+    Point this at your fork. Defaults to the upstream repo in capabilities.json.
+
 .PARAMETER NoSync
-    Skip the git clone/pull step (offline work, or when iterating on local
-    engine changes). Everything is still materialised from whatever the local
-    clones currently hold.
+    Skip the network step - no git pull, no gallery check. Everything is still
+    materialised from whatever is already local.
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('gallery', 'clone')]
+    [string]$Source,
+
+    [ValidateSet('production', 'preview')]
+    [string]$Ring,
+
+    [string]$Engine,
+    [string]$Path,
+    [string]$Repo,
+
     [switch]$NoSync
 )
 
@@ -70,12 +131,61 @@ $capabilities = if (Test-Path -LiteralPath $capabilitiesFile) {
     @((Get-Content -LiteralPath $capabilitiesFile -Raw | ConvertFrom-Json).capabilities)
 }
 else {
-    # A workspace scaffolded before capabilities.json existed still works.
+    # A workspace scaffolded before capabilities.json existed still works, and a
+    # bare folder bootstrapped by downloading this file gets a working default.
     @([pscustomobject]@{
             name   = 'automation'
             module = 'NKDAgility.AzureDevOps.AutomationTools'
             repo   = 'https://github.com/nkdAgility/azure-devops-automation-tools.git'
         })
+}
+
+# --- Apply and persist a -Source / -Ring switch -----------------------------
+# Written to workspace.local.json, which is gitignored: choosing to run against
+# your own clone is a per-machine decision and must not reach the shared repo.
+if ($Source -or $Ring) {
+    $targets = if ($Engine) {
+        $match = @($capabilities | Where-Object { $_.name -eq $Engine })
+        if (-not $match) {
+            throw "No capability named '$Engine' in capabilities.json. Declared: $(($capabilities.name) -join ', ')."
+        }
+        $match
+    }
+    else { $capabilities }
+
+    if (-not $local) { $local = [pscustomobject]@{} }
+    foreach ($property in 'enginePaths', 'engineRings') {
+        if (-not $local.PSObject.Properties[$property]) {
+            $local | Add-Member -NotePropertyName $property -NotePropertyValue ([pscustomobject]@{})
+        }
+    }
+
+    foreach ($target in $targets) {
+        $name = $target.name
+
+        if ($Source -eq 'clone') {
+            $repoName = [System.IO.Path]::GetFileNameWithoutExtension(($target.repo -split '/')[-1])
+            $clonePath = if ($Path) { $Path } else { Join-Path $env:USERPROFILE (Join-Path 'source\repos' $repoName) }
+            $entry = [pscustomobject]@{ path = $clonePath }
+            if ($Repo) { $entry | Add-Member -NotePropertyName 'repo' -NotePropertyValue $Repo }
+            $local.enginePaths | Add-Member -NotePropertyName $name -NotePropertyValue $entry -Force
+            Write-Host "==> $name : development mode, from '$clonePath'" -ForegroundColor Yellow
+        }
+        elseif ($Source -eq 'gallery') {
+            if ($local.enginePaths.PSObject.Properties[$name]) {
+                $local.enginePaths.PSObject.Properties.Remove($name)
+            }
+            Write-Host "==> $name : consumption mode, from the PowerShell Gallery" -ForegroundColor Cyan
+        }
+
+        if ($Ring) {
+            $local.engineRings | Add-Member -NotePropertyName $name -NotePropertyValue $Ring -Force
+            Write-Host "    ring: $Ring" -ForegroundColor Cyan
+        }
+    }
+
+    $local | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $localFile
+    Write-Host "    remembered in workspace.local.json (gitignored)" -ForegroundColor DarkGray
 }
 
 # --- Helpers ----------------------------------------------------------------
@@ -98,23 +208,100 @@ $treeHash = {
     (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash
 }
 
-$resolveEnginePath = { param($capability)
+# Decide where one engine comes from. A clone override always wins: it is only ever
+# set deliberately, by an env var or by -Source clone.
+$resolveEngine = { param($capability)
     $repoName = [System.IO.Path]::GetFileNameWithoutExtension(($capability.repo -split '/')[-1])
     $envName = "AZDO_ENGINE_$($capability.name.ToUpperInvariant() -replace '[^A-Z0-9]', '_')"
-    $candidates = @(@(
-        [Environment]::GetEnvironmentVariable($envName)
-        if ($capability.name -eq 'automation') { $env:AZDO_AUTOMATION_TOOLS }
-        if ($local -and $local.PSObject.Properties['enginePaths'] -and $local.enginePaths.PSObject.Properties[$capability.name]) {
-            $local.enginePaths.$($capability.name)
+    $name = $capability.name
+
+    $clonePath = $null
+    $cloneRepo = $capability.repo
+
+    $fromEnv = [Environment]::GetEnvironmentVariable($envName)
+    if ($fromEnv) { $clonePath = $fromEnv }
+    elseif ($name -eq 'automation' -and $env:AZDO_AUTOMATION_TOOLS) { $clonePath = $env:AZDO_AUTOMATION_TOOLS }
+    elseif ($local -and $local.PSObject.Properties['enginePaths'] -and $local.enginePaths.PSObject.Properties[$name]) {
+        $entry = $local.enginePaths.$name
+        # Accept the historical plain-string form as a bare path.
+        if ($entry -is [string]) { $clonePath = $entry }
+        else {
+            $clonePath = $entry.path
+            if ($entry.repo) { $cloneRepo = $entry.repo }
         }
-        if ($capability.name -eq 'automation' -and $local -and $local.PSObject.Properties['toolsPath']) { $local.toolsPath }
-        (Join-Path $env:USERPROFILE (Join-Path 'source\repos' $repoName))
-    ) | Where-Object { $_ })
-    # The @() around the whole pipeline matters: piping to Where-Object unwraps a
-    # single survivor to a bare string, and [0] on a string is its first CHARACTER.
-    # With no workspace.local.json - the normal case on a fresh clone - only the
-    # default candidate survives, and the engine path resolved to 'C'.
-    @{ Path = $candidates[0]; RepoName = $repoName }
+    }
+    elseif ($name -eq 'automation' -and $local -and $local.PSObject.Properties['toolsPath']) { $clonePath = $local.toolsPath }
+
+    # capabilities.json can ask for clone mode without naming a path.
+    if (-not $clonePath -and $capability.source -eq 'clone') {
+        $clonePath = Join-Path $env:USERPROFILE (Join-Path 'source\repos' $repoName)
+    }
+
+    if ($clonePath) {
+        return @{ Source = 'clone'; Path = $clonePath; Repo = $cloneRepo; RepoName = $repoName }
+    }
+
+    # Otherwise the gallery. Nothing configured at all means production.
+    $resolvedRing =
+        if ($local -and $local.PSObject.Properties['engineRings'] -and $local.engineRings.PSObject.Properties[$name]) { $local.engineRings.$name }
+        elseif ($capability.ring) { $capability.ring }
+        else { 'production' }
+
+    @{ Source = 'gallery'; Ring = $resolvedRing; Version = $capability.version; RepoName = $repoName }
+}
+
+# Install (or update) the published module and hand back where it landed.
+$materialiseFromGallery = { param($capability, $resolved)
+    $module = $capability.module
+    $allowPrerelease = ($resolved.Ring -eq 'preview')
+
+    $findArgs = @{ Name = $module; Repository = 'PSGallery'; ErrorAction = 'SilentlyContinue' }
+    if ($allowPrerelease) { $findArgs['AllowPrerelease'] = $true }
+    if ($resolved.Version) { $findArgs['RequiredVersion'] = $resolved.Version }
+
+    $wanted = if ($NoSync) { $null } else { Find-Module @findArgs }
+
+    if (-not $wanted -and -not $NoSync) {
+        # Say what IS there rather than leaving a bare "no match found".
+        $available = @(Find-Module -Name $module -Repository PSGallery -AllVersions -AllowPrerelease -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty Version -First 10)
+        $detail = if ($available) { "Available versions: $($available -join ', ')." }
+                  else { "No versions of '$module' are published to the PowerShell Gallery yet." }
+        $hint = if ($resolved.Ring -eq 'production') {
+            "The '$($capability.name)' engine has no stable release on the production ring. Use a prerelease with '. .\init.ps1 -Source gallery -Ring preview -Engine $($capability.name)', or work from a clone with '. .\init.ps1 -Source clone -Engine $($capability.name)'."
+        }
+        else {
+            "Nothing matched on the '$($resolved.Ring)' ring$(if ($resolved.Version) { " for version '$($resolved.Version)'" })."
+        }
+        throw "$hint $detail"
+    }
+
+    $installed = @(Get-Module -ListAvailable -Name $module)
+    $have = $installed | Sort-Object Version -Descending | Select-Object -First 1
+
+    if ($wanted -and (-not $have -or $have.Version -ne $wanted.Version)) {
+        Write-Host "==> $($capability.name): installing $module $($wanted.Version) ($($resolved.Ring) ring)" -ForegroundColor Cyan
+        # -AllowClobber because these modules export generically-named helpers
+        # (Write-InfoLog and friends) that collide with whatever else is loaded.
+        # The workspace runs the .system\ copy anyway, so what lands in the user
+        # module path is only a staging area.
+        $installArgs = @{ Name = $module; Repository = 'PSGallery'; Scope = 'CurrentUser'; Force = $true; AllowClobber = $true; RequiredVersion = $wanted.Version }
+        if ($allowPrerelease) { $installArgs['AllowPrerelease'] = $true }
+        Install-Module @installArgs
+        $have = Get-Module -ListAvailable -Name $module | Sort-Object Version -Descending | Select-Object -First 1
+    }
+
+    if (-not $have) {
+        throw "Capability '$($capability.name)': '$module' is not installed and could not be fetched$(if ($NoSync) { ' (-NoSync)' }). Remove -NoSync, or switch to a clone with '. .\init.ps1 -Source clone -Engine $($capability.name)'."
+    }
+
+    # Get-Module reports ModuleVersion only, so the prerelease tag has to be put
+    # back on: '0.1.0' and '0.1.0-Preview1' are different builds, and .source.json
+    # is what an audit result is attributed to.
+    $tag = $have.PrivateData.PSData.Prerelease
+    $full = "$($have.Version)" + $(if ($tag) { "-$($tag.TrimStart('-'))" } else { '' })
+
+    @{ ModuleBase = $have.ModuleBase; Version = $full }
 }
 
 $systemRoot = Join-Path $workspaceRoot '.system'
@@ -123,31 +310,52 @@ $loadedCapabilities = [System.Collections.Generic.List[hashtable]]::new()
 
 # --- Per capability: sync, materialise, scaffold ----------------------------
 foreach ($capability in $capabilities) {
-    $resolved = & $resolveEnginePath $capability
-    $enginePath = $resolved.Path
-
-    # 1. Clone or fast-forward pull. A dirty clone is left alone: the local edits are
-    #    almost always the point, and clobbering them would be worse than being stale.
-    if (-not $NoSync) {
-        if (-not (Test-Path -LiteralPath $enginePath)) {
-            Write-Host "==> Cloning $($capability.repo)" -ForegroundColor Cyan
-            git clone $capability.repo $enginePath
-            if ($LASTEXITCODE -ne 0) { Write-Warning "Clone failed for $($capability.repo); continuing." }
-        }
-        elseif (git -C $enginePath status --porcelain) {
-            Write-Warning "$($resolved.RepoName) has local changes; skipping pull."
-        }
-        else {
-            git -C $enginePath pull --ff-only 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { Write-Warning "$($resolved.RepoName) pull failed (offline?); continuing with the existing clone." }
-        }
-    }
-
-    $moduleSource = Join-Path $enginePath (Join-Path 'system' $capability.module)
-    if (-not (Test-Path -LiteralPath $moduleSource)) {
-        throw "Capability '$($capability.name)': module not found at '$moduleSource'. Expected a clone of $($capability.repo) at '$enginePath'."
-    }
+    $resolved = & $resolveEngine $capability
     $modulePath = Join-Path $systemRoot $capability.module
+
+    $provenance = @{
+        capability = $capability.name
+        module     = $capability.module
+        mode       = $resolved.Source
+    }
+
+    if ($resolved.Source -eq 'clone') {
+        $enginePath = $resolved.Path
+
+        # 1. Clone or fast-forward pull. A dirty clone is left alone: the local edits are
+        #    almost always the point, and clobbering them would be worse than being stale.
+        if (-not $NoSync) {
+            if (-not (Test-Path -LiteralPath $enginePath)) {
+                Write-Host "==> Cloning $($resolved.Repo)" -ForegroundColor Cyan
+                git clone $resolved.Repo $enginePath
+                if ($LASTEXITCODE -ne 0) { Write-Warning "Clone failed for $($resolved.Repo); continuing." }
+            }
+            elseif (git -C $enginePath status --porcelain) {
+                Write-Warning "$($resolved.RepoName) has local changes; skipping pull."
+            }
+            else {
+                git -C $enginePath pull --ff-only 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { Write-Warning "$($resolved.RepoName) pull failed (offline?); continuing with the existing clone." }
+            }
+        }
+
+        $moduleSource = Join-Path $enginePath (Join-Path 'system' $capability.module)
+        if (-not (Test-Path -LiteralPath $moduleSource)) {
+            throw "Capability '$($capability.name)': module not found at '$moduleSource'. Expected a clone of $($resolved.Repo) at '$enginePath'."
+        }
+
+        $provenance['source'] = $enginePath
+        $provenance['sha'] = $(if ($sha = git -C $enginePath rev-parse HEAD 2>$null) { $sha } else { 'unknown' })
+        $provenance['dirty'] = [bool](git -C $enginePath status --porcelain 2>$null)
+    }
+    else {
+        $gallery = & $materialiseFromGallery $capability $resolved
+        $moduleSource = $gallery.ModuleBase
+        $provenance['source'] = 'PSGallery'
+        $provenance['ring'] = $resolved.Ring
+        $provenance['version'] = $gallery.Version
+        $provenance['dirty'] = $false
+    }
 
     # 2. Materialise. Refuse to discard a hand-edit silently.
     $recordPath = Join-Path $modulePath '.source.json'
@@ -158,27 +366,21 @@ foreach ($capability in $capabilities) {
         }
     }
 
-    $sourceSha = (git -C $enginePath rev-parse HEAD 2>$null)
-    $sourceDirty = [bool](git -C $enginePath status --porcelain 2>$null)
     if (Test-Path -LiteralPath $modulePath) {
         Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }
         Remove-Item -LiteralPath $modulePath -Recurse -Force
     }
     New-Item -Path $systemRoot -ItemType Directory -Force | Out-Null
     Copy-Item -LiteralPath $moduleSource -Destination $modulePath -Recurse
-    Write-Host "==> $($capability.name): copied $($capability.module) into .system\" -ForegroundColor Cyan
+    $from = if ($resolved.Source -eq 'clone') { "clone $($resolved.Path)" } else { "gallery $($provenance['version']) ($($resolved.Ring))" }
+    Write-Host "==> $($capability.name): copied $($capability.module) into .system\ from $from" -ForegroundColor Cyan
 
-    @{
-        capability = $capability.name
-        module     = $capability.module
-        source     = $enginePath
-        sha        = if ($sourceSha) { $sourceSha } else { 'unknown' }
-        dirty      = $sourceDirty
-        treeHash   = (& $treeHash $modulePath)
-        copiedAt   = (Get-Date).ToString('o')
-    } | ConvertTo-Json | Set-Content -LiteralPath $recordPath
-    if ($sourceDirty) {
-        Write-Warning "$($resolved.RepoName) has uncommitted changes; .system\ holds them. Commit them before relying on this run being reproducible."
+    $provenance['treeHash'] = (& $treeHash $modulePath)
+    $provenance['copiedAt'] = (Get-Date).ToString('o')
+    $provenance | ConvertTo-Json | Set-Content -LiteralPath $recordPath
+
+    if ($provenance['dirty']) {
+        Write-Warning "$($resolved.RepoName) has uncommitted changes; .system\ holds them. This run is NOT reproducible - commit them, or switch to the gallery with '. .\init.ps1 -Source gallery -Engine $($capability.name)', before treating its output as evidence."
     }
     # Read-only so an accidental save in the editor fails loudly instead of being lost.
     Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $true }
@@ -235,7 +437,8 @@ foreach ($capability in $capabilities) {
 }
 
 # This running copy is now the stale one, so hand over to the new file. The
-# env guard stops a bad template turning the handover into a loop.
+# env guard stops a bad template turning the handover into a loop. The switches
+# have already been persisted, so the handover does not need to repeat them.
 if ($selfUpdated -and -not $env:AZDO_INIT_RELOADED) {
     $env:AZDO_INIT_RELOADED = '1'
     try { . $PSCommandPath -NoSync:$NoSync }
@@ -324,7 +527,8 @@ foreach ($target in $renderTargets) {
 }
 
 # --- Import the automation tools and initialise the workspace ---------------
-# From .system\, never from a clone: the workspace runs the copy it recorded.
+# From .system\, never from a clone or the module path: the workspace runs the
+# copy it recorded.
 $automation = $loadedCapabilities | Where-Object { $_.Module -eq 'NKDAgility.AzureDevOps.AutomationTools' } | Select-Object -First 1
 if (-not $automation) {
     throw "capabilities.json must include the 'NKDAgility.AzureDevOps.AutomationTools' module: it owns the workspace itself."
