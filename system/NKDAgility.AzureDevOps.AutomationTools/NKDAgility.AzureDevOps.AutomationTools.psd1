@@ -4,7 +4,7 @@
     GUID              = '691d41a2-3ab0-4105-86cd-d66496c014f3'
     Author            = 'Martin Hinshelwood'
     CompanyName       = 'naked Agility Limited'
-    Copyright         = '(c) naked Agility Limited. All rights reserved.'
+    Copyright         = '(c) 2026 naked Agility Limited. Licensed under the GNU AGPL v3.'
     Description       = 'Automation tasks used when migrating Azure DevOps data with the Azure DevOps Data Import Tool, the Azure DevOps Migration Tools, or the Azure DevOps Migration Platform.'
     PowerShellVersion = '7.0'
     FunctionsToExport = @(
@@ -98,6 +98,8 @@
         PSData = @{
             Tags       = @('AzureDevOps', 'Migration', 'DataImportTool', 'witadmin')
             ProjectUri = 'https://github.com/nkdAgility/azure-devops-automation-tools'
+            LicenseUri = 'https://github.com/nkdAgility/azure-devops-automation-tools/blob/main/LICENSE'
+            ReleaseNotes = 'https://github.com/nkdAgility/azure-devops-automation-tools/releases'
         }
     }
 }

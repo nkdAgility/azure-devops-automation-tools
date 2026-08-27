@@ -1,0 +1,288 @@
+name: main
+
+# Single pipeline for this repo: Prepare -> Build & Package -> Release -> Finalise.
+#
+# Ring control follows GitVersion's pre-release label, the same as the other
+# nkdAgility engines:
+#   release/**  -> no label     -> Production ring -> PSGallery stable
+#   main        -> 'Preview'    -> Preview ring    -> PSGallery prerelease
+#   anything else / PRs         -> Canary ring     -> never shipped
+#
+# A pull request always lands in Canary, so it is built and fully tested but
+# never published to the Gallery and never cuts a GitHub release.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    tags-ignore: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ForceRelease:
+        description: 'Release even when nothing under the module changed'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.head.repo.fork }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+
+  # 1. Prepare
+  Prepare:
+    name: "Prepare"
+    runs-on: ubuntu-latest
+    outputs:
+      GitVersion_MajorMinorPatch: ${{ steps.gitversion.outputs.GitVersion_MajorMinorPatch }}
+      HasChanged_module: ${{ steps.filter.outputs.module }}
+      nkdAgility_Ring: ${{ steps.RingDetection.outputs.Ring }}
+      nkdAgility_RunRelease: ${{ steps.nkdagility.outputs.RunRelease }}
+      nkdAgility_ModuleVersion: ${{ steps.nkdagility.outputs.ModuleVersion }}
+      nkdAgility_Prerelease: ${{ steps.nkdagility.outputs.Prerelease }}
+      nkdAgility_FullVersion: ${{ steps.nkdagility.outputs.FullVersion }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v3.0.2
+        with:
+          versionSpec: "5.x"
+          includePrerelease: true
+
+      - name: Execute GitVersion
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v3.0.2
+        with:
+          useConfigFile: true
+
+      - name: "Ring Detection"
+        shell: pwsh
+        id: RingDetection
+        run: |
+          Write-Output "::group::Ring Control Setup"
+          $Ring = "Canary"
+          $preReleaseLabel = "${{ steps.gitversion.outputs.GitVersion_PreReleaseLabel }}"
+          Write-Output "GitVersion_PreReleaseLabel: '$preReleaseLabel'"
+
+          switch ($preReleaseLabel) {
+              ""        { $Ring = "Production" }
+              "Preview" { $Ring = "Preview" }
+              default   { $Ring = "Canary" }
+          }
+
+          Write-Output "We are running for the $Ring Ring!"
+          echo "Ring=$Ring" >> $env:GITHUB_OUTPUT
+          Write-Output "::endgroup::"
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            module:
+              - 'system/**'
+              - 'src/**'
+              - 'tests/**'
+              - '.github/workflows/**'
+              - 'GitVersion.yml'
+
+      - name: "Build NKDAgility Outputs"
+        shell: pwsh
+        id: nkdagility
+        run: |
+          Write-Output "::group::Decisions"
+          $Ring = "${{ steps.RingDetection.outputs.Ring }}"
+
+          # PowerShell Gallery prerelease labels must be alphanumeric only.
+          $label  = "${{ steps.gitversion.outputs.GitVersion_PreReleaseLabel }}"
+          $number = "${{ steps.gitversion.outputs.GitVersion_PreReleaseNumber }}"
+          $prerelease = if ($label) { ($label + $number) -replace '[^A-Za-z0-9]', '' } else { '' }
+          $moduleVersion = "${{ steps.gitversion.outputs.GitVersion_MajorMinorPatch }}"
+          $full = $moduleVersion + $(if ($prerelease) { "-$prerelease" } else { '' })
+
+          # A pull request is always Canary and never ships.
+          switch ($Ring) {
+              "Production" { $RunRelease = ( ('${{ inputs.ForceRelease }}' -eq 'true') -or ('${{ steps.filter.outputs.module }}' -eq 'true') ) }
+              "Preview"    { $RunRelease = ( ('${{ inputs.ForceRelease }}' -eq 'true') -or ('${{ steps.filter.outputs.module }}' -eq 'true') ) }
+              default      { $RunRelease = $false }
+          }
+
+          Write-Output "Ring          : $Ring"
+          Write-Output "ModuleVersion : $moduleVersion"
+          Write-Output "Prerelease    : '$prerelease'"
+          Write-Output "FullVersion   : $full"
+          Write-Output "RunRelease    : $RunRelease"
+
+          echo "ModuleVersion=$moduleVersion"          >> $env:GITHUB_OUTPUT
+          echo "Prerelease=$prerelease"                >> $env:GITHUB_OUTPUT
+          echo "FullVersion=$full"                     >> $env:GITHUB_OUTPUT
+          echo "RunRelease=$($RunRelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Output "::endgroup::"
+
+  # 2. Build & Package
+  # windows because the module shells out to witadmin.exe and the tests assert on
+  # Windows path shapes; the REST commands are stubbed, so no collection is
+  # contacted and no secrets are needed.
+  BuildAndPackage:
+    name: "Build & Package"
+    needs: Prepare
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Pester and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: Run Pester
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'testResults.xml'
+          Invoke-Pester -Configuration $config
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          # Only errors fail the build. The module has long-standing warnings
+          # (Write-Host in the fix-step writers, no ShouldProcess on Remove-*)
+          # that are deliberate house style, so gating on warnings would mean
+          # a permanently red build.
+          $findings = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          if ($findings) {
+            $findings | Format-Table -AutoSize | Out-String | Write-Host
+            throw "PSScriptAnalyzer reported $($findings.Count) error(s)."
+          }
+          Write-Host 'No analyzer errors.'
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: testResults.xml
+
+      - name: Stamp the version and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $moduleName = 'NKDAgility.AzureDevOps.AutomationTools'
+          $moduleRoot = "./system/$moduleName"
+          $manifest   = "$moduleRoot/$moduleName.psd1"
+
+          $version    = '${{ needs.Prepare.outputs.nkdAgility_ModuleVersion }}'
+          $prerelease = '${{ needs.Prepare.outputs.nkdAgility_Prerelease }}'
+
+          # GitVersion owns the released version; the committed manifest carries
+          # only a base version for development-mode consumers.
+          Update-ModuleManifest -Path $manifest -ModuleVersion $version
+          if ($prerelease) { Update-ModuleManifest -Path $manifest -Prerelease $prerelease }
+
+          Test-ModuleManifest -Path $manifest | Format-List Name, Version, PrivateData
+
+          New-Item -ItemType Directory -Force -Path ./artifacts | Out-Null
+          Copy-Item -Path $moduleRoot -Destination "./artifacts/$moduleName" -Recurse
+          Compress-Archive -Path "./artifacts/$moduleName" -DestinationPath "./artifacts/$moduleName.${{ needs.Prepare.outputs.nkdAgility_FullVersion }}.zip"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-package
+          path: ./artifacts/
+          if-no-files-found: error
+
+  # 3. Release
+  Release:
+    name: "Release"
+    needs: [Prepare, BuildAndPackage]
+    if: ${{ success() && needs.Prepare.outputs.nkdAgility_RunRelease == 'true' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: module-package
+          path: ./artifacts
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ needs.Prepare.outputs.nkdAgility_FullVersion }}" \
+            --title "v${{ needs.Prepare.outputs.nkdAgility_FullVersion }}" \
+            --target "${{ github.sha }}" \
+            --generate-notes \
+            ${{ needs.Prepare.outputs.nkdAgility_Ring != 'Production' && '--prerelease' || '' }} \
+            ./artifacts/*.zip
+
+      - name: Publish to the PowerShell Gallery
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:PSGALLERY_API_KEY) {
+              throw "PSGALLERY_API_KEY is not set. Add it as an Actions secret; if it is an organisation secret, make sure this repository is in its access list."
+          }
+          Write-Output "Publishing ${{ needs.Prepare.outputs.nkdAgility_FullVersion }} to the ${{ needs.Prepare.outputs.nkdAgility_Ring }} ring"
+          Publish-Module -Path ./artifacts/NKDAgility.AzureDevOps.AutomationTools -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -Verbose
+
+  # 4. Finalise
+  Finalise:
+    name: "Finalise"
+    needs: [Prepare, BuildAndPackage, Release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write the run summary
+        shell: pwsh
+        run: |
+          $ring     = '${{ needs.Prepare.outputs.nkdAgility_Ring }}'
+          $version  = '${{ needs.Prepare.outputs.nkdAgility_FullVersion }}'
+          $released = '${{ needs.Release.result }}'
+          $built    = '${{ needs.BuildAndPackage.result }}'
+
+          $lines = @(
+            "# $version  ($ring ring)"
+            ""
+            "| Stage | Result |"
+            "| --- | --- |"
+            "| Build & Package | $built |"
+            "| Release | $released |"
+            ""
+          )
+
+          $lines += switch ($released) {
+            'success' { "Published to the PowerShell Gallery and released on GitHub." }
+            'skipped' { if ('${{ github.event_name }}' -eq 'pull_request') {
+                            "Pull request: built and tested in the Canary ring. Nothing was published."
+                        } else {
+                            "No module change and ForceRelease was not set, so nothing was published."
+                        } }
+            default   { "Release did not complete: **$released**." }
+          }
+
+          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Fail the run if an upstream stage failed
+        if: ${{ needs.BuildAndPackage.result == 'failure' || needs.Release.result == 'failure' }}
+        run: exit 1
