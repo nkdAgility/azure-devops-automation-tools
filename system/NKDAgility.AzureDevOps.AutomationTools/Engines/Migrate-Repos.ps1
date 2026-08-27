@@ -66,6 +66,23 @@
     Optional. Migrate only the named repository. Omit to migrate all repos in
     the source project.
 
+.PARAMETER TargetRepoName
+    Optional. The name the repository takes in the target - it is renamed in
+    transit, created and pushed under this name rather than its source one.
+    Omitted, the repository keeps its source name.
+
+    This is what reconciles a migration with a GOVERNED target, where the
+    destination names repositories by convention rather than by history (e.g.
+    governance-as-code prefixes every repo with its hierarchy code). Without it
+    the migrated repository and the governed one are two different repositories
+    in the same project, and the migrated one reads as an audit exception.
+
+    Renaming one repository requires naming it, so -TargetRepoName is only valid
+    together with -RepoName; supplying it for a whole-project run is an error
+    rather than a rename applied to an arbitrary repository. Migrate several
+    renamed repositories as several single-repo runs (the per-migration config's
+    'Runs' array is exactly this).
+
 .PARAMETER MaxPushSizeGB
     Size threshold (in GB) above which a repository is pushed in segments.
     Default: 5 (matches the Azure DevOps single-push limit).
@@ -128,6 +145,13 @@
         -TargetOrg https://dev.azure.com/contoso-target -TargetPat $tgtPat -TargetProject "Payments"
 
 .EXAMPLE
+    # Rename in transit so the repo lands under the target's governed name.
+    .\Migrate-Repos.ps1 `
+        -SourceOrg https://dev.azure.com/contoso-source -SourceProject "Petrel" `
+        -TargetOrg https://dev.azure.com/contoso-target -TargetProject "Subsurface" `
+        -RepoName "PetrelAllInOne" -TargetRepoName "PTL-PetrelAllInOne" -WhatIf
+
+.EXAMPLE
     # Preview a single large repo, forcing the segmented path with small batches.
     .\Migrate-Repos.ps1 `
         -SourceOrg https://dev.azure.com/contoso-source -SourcePat $srcPat -SourceProject "Payments" `
@@ -162,6 +186,8 @@ param(
 
     [string]$RepoName,
 
+    [string]$TargetRepoName,
+
     [ValidateRange(1, 100)]
     [int]$MaxPushSizeGB = 5,
 
@@ -185,6 +211,21 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 if (-not $TargetProject) { $TargetProject = $SourceProject }
+
+# A rename applies to ONE named repository. Without -RepoName the run covers the
+# whole project, and there is no defensible repository to apply the new name to -
+# so this is refused up front rather than renaming an arbitrary one.
+if ($TargetRepoName -and -not $RepoName) {
+    throw "-TargetRepoName renames a single repository, so it requires -RepoName. For several renames, use one single-repo run each."
+}
+
+function Resolve-TargetRepoName {
+    # The name a source repository takes in the target: the requested one, or its
+    # own when no rename was asked for.
+    param([string]$Name)
+    if ($TargetRepoName) { return $TargetRepoName }
+    $Name
+}
 
 #region Helpers ---------------------------------------------------------------
 
@@ -689,15 +730,19 @@ function New-RepoSummary {
         [int64]$SizeBytes,
         [double]$SizeGB,
         [string]$Strategy,
-        [string]$Status
+        [string]$Status,
+        [string]$TargetName
     )
     [pscustomobject]@{
-        SourceProject = $SourceProject
-        Repository    = $Name
-        SizeBytes     = $SizeBytes
-        SizeGB        = $SizeGB
-        Strategy      = $Strategy
-        Status        = $Status
+        SourceProject    = $SourceProject
+        Repository       = $Name
+        # Always populated, so the summary records where every repository landed,
+        # not only the renamed ones.
+        TargetRepository = if ($TargetName) { $TargetName } else { $Name }
+        SizeBytes        = $SizeBytes
+        SizeGB           = $SizeGB
+        Strategy         = $Strategy
+        Status           = $Status
     }
 }
 
@@ -705,7 +750,9 @@ function Migrate-Repo {
     param($Repo, [string]$WorkRoot, [int]$Index, [int]$Total)
 
     $progress = if ($Total) { "[$Index/$Total] " } else { '' }
-    Write-Step "${progress}$SourceProject == Repository: $($Repo.name)"
+    $targetName = Resolve-TargetRepoName -Name $Repo.name
+    $label = if ($targetName -cne $Repo.name) { "$($Repo.name) -> $targetName" } else { $Repo.name }
+    Write-Step "${progress}$SourceProject == Repository: $label"
 
     # Re-resolve both credentials so an Entra token nearing expiry is renewed
     # before this repository's REST calls and git transfers start.
@@ -720,18 +767,21 @@ function Migrate-Repo {
 
     Write-Host ("    Reported size: {0} GB. Strategy: {1}." -f $sizeGB, $strategy) -ForegroundColor DarkGray
 
-    $targetRepo = New-TargetRepo -Name $Repo.name
+    $targetRepo = New-TargetRepo -Name $targetName
     if (-not $targetRepo -and -not $WhatIfPreference) {
-        New-RepoSummary -Name $Repo.name -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Skipped (no target repo)'
+        New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Skipped (no target repo)'
         return
     }
 
-    $targetUrl = Get-TargetRepoUrl -Name $Repo.name
+    $targetUrl = Get-TargetRepoUrl -Name $targetName
+    # The clone is a mirror of the SOURCE, so it stays keyed on the source name: a
+    # rename must not orphan the cached mirror and force a re-clone.
     $cloneDir = Join-Path $WorkRoot ($Repo.name + '.git')
 
     $action = if ($useSegmented) { 'Mirror-clone and segmented push' } else { 'Mirror-clone and mirror push' }
+    if ($targetName -cne $Repo.name) { $action += " as '$targetName'" }
     if (-not $PSCmdlet.ShouldProcess($Repo.name, $action)) {
-        New-RepoSummary -Name $Repo.name -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'WhatIf (preview)'
+        New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'WhatIf (preview)'
         return
     }
 
@@ -754,8 +804,8 @@ function Migrate-Repo {
         Push-Mirror -CloneDir $cloneDir -TargetRemote 'target'
     }
 
-    Write-Host "    Done: $($Repo.name) ${progress}".TrimEnd() -ForegroundColor Green
-    New-RepoSummary -Name $Repo.name -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Migrated'
+    Write-Host "    Done: $label ${progress}".TrimEnd() -ForegroundColor Green
+    New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Migrated'
 }
 
 function Migrate-Wiki {
@@ -897,7 +947,7 @@ try {
         }
         catch {
             Write-Warning ("    Migration FAILED for '{0}': {1}" -f $repo.name, $_.Exception.Message)
-            New-RepoSummary -Name $repo.name `
+            New-RepoSummary -Name $repo.name -TargetName (Resolve-TargetRepoName -Name $repo.name) `
                 -SizeBytes $(if ($repo.PSObject.Properties.Name -contains 'size') { [int64]$repo.size } else { 0 }) `
                 -SizeGB $(if ($repo.PSObject.Properties.Name -contains 'size') { [math]::Round([int64]$repo.size / 1GB, 2) } else { 0 }) `
                 -Strategy 'n/a' `

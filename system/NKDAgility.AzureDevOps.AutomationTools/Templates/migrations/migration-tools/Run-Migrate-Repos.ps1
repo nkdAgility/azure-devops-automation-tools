@@ -169,6 +169,9 @@ else {
         Format-Table -AutoSize @(
             @{ Label = 'Source Project'; Expression = { $_.SourceProject } }
             @{ Label = 'Repository';     Expression = { $_.Repository } }
+            # Only worth a column when a rename actually happened; a blank cell
+            # reads as 'landed under its own name'.
+            @{ Label = 'Landed as';      Expression = { if ($_.TargetRepository -cne $_.Repository) { $_.TargetRepository } } }
             @{ Label = 'Size (GB)';      Expression = { '{0,8:N2}' -f $_.SizeGB }; Alignment = 'Right' }
             @{ Label = 'Strategy';       Expression = { $_.Strategy } }
             @{ Label = 'Status';         Expression = { $_.Status } }
@@ -187,9 +190,12 @@ else {
     $summaries |
         Sort-Object SizeBytes -Descending |
         Select-Object @(
-            @{ Name = 'project'; Expression = { $_.SourceProject } }
-            @{ Name = 'repo';    Expression = { $_.Repository } }
-            @{ Name = 'size_mb'; Expression = { [math]::Round($_.SizeBytes / 1MB, 2) } }
+            @{ Name = 'project';     Expression = { $_.SourceProject } }
+            @{ Name = 'repo';        Expression = { $_.Repository } }
+            # Where it actually landed - the evidence that a governed rename was
+            # applied, and the record a later audit is reconciled against.
+            @{ Name = 'target_repo'; Expression = { $_.TargetRepository } }
+            @{ Name = 'size_mb';     Expression = { [math]::Round($_.SizeBytes / 1MB, 2) } }
         ) |
         Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
     Write-Host ("Wrote summary CSV: {0}" -f $csvPath) -ForegroundColor Green

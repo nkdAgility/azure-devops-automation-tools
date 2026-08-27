@@ -19,6 +19,24 @@
    package migration.
 4. Commit the summary CSVs written to `output\` as engagement evidence.
 
+## Renaming repos in transit
+
+When the target names repositories by convention rather than by history - a governed
+project, say, where every repo carries its hierarchy code - give the run a
+`TargetRepoName` and the repository is created and pushed under that name:
+
+```json
+"Runs": [
+  { "RepoName": "SourceRepoA", "TargetRepoName": "ABC-SourceRepoA" },
+  { "RepoName": "SourceRepoB", "TargetRepoName": "ABC-DEF-SourceRepoB" }
+]
+```
+
+Omit `TargetRepoName` and the repository keeps its source name. A rename applies to one
+named repository, so it is only valid alongside `RepoName` - several renames are several
+single-repo runs, which is what the `Runs` array is for. The `target_repo` column in
+`output\repomigration.csv` records where each one landed.
+
 ## Run log
 
 | Date | What ran | Result |
