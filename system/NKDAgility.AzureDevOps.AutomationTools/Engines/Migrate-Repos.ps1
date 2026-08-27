@@ -147,9 +147,9 @@
 .EXAMPLE
     # Rename in transit so the repo lands under the target's governed name.
     .\Migrate-Repos.ps1 `
-        -SourceOrg https://dev.azure.com/contoso-source -SourceProject "Petrel" `
-        -TargetOrg https://dev.azure.com/contoso-target -TargetProject "Subsurface" `
-        -RepoName "PetrelAllInOne" -TargetRepoName "PTL-PetrelAllInOne" -WhatIf
+        -SourceOrg https://dev.azure.com/contoso-source -SourceProject "Payments" `
+        -TargetOrg https://dev.azure.com/contoso-target -TargetProject "Platform" `
+        -RepoName "PaymentsAllInOne" -TargetRepoName "PAY-PaymentsAllInOne" -WhatIf
 
 .EXAMPLE
     # Preview a single large repo, forcing the segmented path with small batches.
