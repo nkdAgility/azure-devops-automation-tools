@@ -43,6 +43,25 @@
         ever reads the working tree, so a fork is just a clone with a different
         remote. NOT reproducible: two machines can differ.
 
+    NOTHING IS TORN DOWN WITHOUT A REPLACEMENT
+    ------------------------------------------
+    If the requested ring has no matching version - typically the production ring
+    before the first stable release - init.ps1 does not fail the workspace. In
+    order:
+
+      1. .system\<Module> already exists  -> it is kept EXACTLY as it is, and its
+         .source.json is left alone, so the workspace keeps running the engine it
+         was already running and its provenance still names whatever produced it.
+      2. otherwise, a version is installed -> that is staged instead.
+      3. otherwise                         -> it fails, naming the module, the
+         ring, what is actually published, and both ways out.
+
+    Step 1 deliberately beats step 2. Moving a workspace onto an unrelated version
+    that happens to be in the module path, because a release has not happened yet,
+    would change what it runs without anyone asking - worse than being stale. Every
+    fallback is warned about, because it means the run is not on the ring it asked
+    for.
+
     Switching between them, at any time:
 
         . .\init.ps1                                     # whatever is configured
@@ -251,7 +270,13 @@ $resolveEngine = { param($capability)
 }
 
 # Install (or update) the published module and hand back where it landed.
-$materialiseFromGallery = { param($capability, $resolved)
+#
+# Nothing is torn down until a replacement is in hand. If the ring has no matching
+# version, an engine that is already materialised keeps working: falling back to what
+# is already here beats breaking a workspace over a release that has not happened yet.
+# The fallback is always announced, because it means this run is not on the ring it
+# was asked for.
+$materialiseFromGallery = { param($capability, $resolved, $modulePath)
     $module = $capability.module
     $allowPrerelease = ($resolved.Ring -eq 'preview')
 
@@ -261,23 +286,39 @@ $materialiseFromGallery = { param($capability, $resolved)
 
     $wanted = if ($NoSync) { $null } else { Find-Module @findArgs }
 
-    if (-not $wanted -and -not $NoSync) {
-        # Say what IS there rather than leaving a bare "no match found".
-        $available = @(Find-Module -Name $module -Repository PSGallery -AllVersions -AllowPrerelease -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty Version -First 10)
-        $detail = if ($available) { "Available versions: $($available -join ', ')." }
-                  else { "No versions of '$module' are published to the PowerShell Gallery yet." }
-        $hint = if ($resolved.Ring -eq 'production') {
-            "The '$($capability.name)' engine has no stable release on the production ring. Use a prerelease with '. .\init.ps1 -Source gallery -Ring preview -Engine $($capability.name)', or work from a clone with '. .\init.ps1 -Source clone -Engine $($capability.name)'."
-        }
-        else {
-            "Nothing matched on the '$($resolved.Ring)' ring$(if ($resolved.Version) { " for version '$($resolved.Version)'" })."
-        }
-        throw "$hint $detail"
-    }
-
     $installed = @(Get-Module -ListAvailable -Name $module)
     $have = $installed | Sort-Object Version -Descending | Select-Object -First 1
+
+    if (-not $wanted -and -not $NoSync) {
+        $ringSaid = if ($resolved.Ring -eq 'production') {
+            "'$($capability.name)' has no stable release on the production ring"
+        }
+        else {
+            "nothing matched for '$($capability.name)' on the '$($resolved.Ring)' ring$(if ($resolved.Version) { " at version '$($resolved.Version)'" })"
+        }
+
+        # 1. This workspace already has a materialised engine - that is what it has been
+        #    running, so leave it exactly as it is. This takes priority over anything in
+        #    the module path: swapping a workspace onto an unrelated installed version
+        #    because a release has not happened yet would change what it runs without
+        #    anyone asking, which is worse than being stale.
+        if (Test-Path -LiteralPath $modulePath) {
+            Write-Warning "$ringSaid; keeping .system\$module exactly as it is. Run '. .\init.ps1 -Source gallery -Ring preview -Engine $($capability.name)' to track prereleases instead."
+            return @{ KeepExisting = $true }
+        }
+        # 2. Nothing materialised, but a version is installed - stage from that.
+        elseif ($have) {
+            Write-Warning "$ringSaid; falling back to the installed $module $($have.Version). Run '. .\init.ps1 -Source gallery -Ring preview -Engine $($capability.name)' to track prereleases instead."
+        }
+        # 3. Nothing anywhere - now it is genuinely stuck.
+        else {
+            $available = @(Find-Module -Name $module -Repository PSGallery -AllVersions -AllowPrerelease -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty Version -First 10)
+            $detail = if ($available) { "Available versions: $($available -join ', ')." }
+                      else { "No versions of '$module' are published to the PowerShell Gallery yet." }
+            throw "$ringSaid, and nothing is installed or already materialised to fall back on. Use a prerelease with '. .\init.ps1 -Source gallery -Ring preview -Engine $($capability.name)', or work from a clone with '. .\init.ps1 -Source clone -Engine $($capability.name)'. $detail"
+        }
+    }
 
     if ($wanted -and (-not $have -or $have.Version -ne $wanted.Version)) {
         Write-Host "==> $($capability.name): installing $module $($wanted.Version) ($($resolved.Ring) ring)" -ForegroundColor Cyan
@@ -292,6 +333,11 @@ $materialiseFromGallery = { param($capability, $resolved)
     }
 
     if (-not $have) {
+        # -NoSync with nothing installed still works if the workspace already holds a copy.
+        if (Test-Path -LiteralPath $modulePath) {
+            Write-Warning "'$module' is not installed$(if ($NoSync) { ' and -NoSync skipped the gallery' }); keeping the copy already in .system\$module."
+            return @{ KeepExisting = $true }
+        }
         throw "Capability '$($capability.name)': '$module' is not installed and could not be fetched$(if ($NoSync) { ' (-NoSync)' }). Remove -NoSync, or switch to a clone with '. .\init.ps1 -Source clone -Engine $($capability.name)'."
     }
 
@@ -348,13 +394,22 @@ foreach ($capability in $capabilities) {
         $provenance['sha'] = $(if ($sha = git -C $enginePath rev-parse HEAD 2>$null) { $sha } else { 'unknown' })
         $provenance['dirty'] = [bool](git -C $enginePath status --porcelain 2>$null)
     }
-    else {
-        $gallery = & $materialiseFromGallery $capability $resolved
-        $moduleSource = $gallery.ModuleBase
-        $provenance['source'] = 'PSGallery'
-        $provenance['ring'] = $resolved.Ring
-        $provenance['version'] = $gallery.Version
-        $provenance['dirty'] = $false
+    $keepExisting = $false
+    if ($resolved.Source -eq 'gallery') {
+        $gallery = & $materialiseFromGallery $capability $resolved $modulePath
+        if ($gallery.KeepExisting) {
+            # Nothing to copy: .system\ already holds a usable engine and there is no
+            # newer one to be had. Leave it, and leave its .source.json alone so the
+            # provenance still names whatever actually produced it.
+            $keepExisting = $true
+        }
+        else {
+            $moduleSource = $gallery.ModuleBase
+            $provenance['source'] = 'PSGallery'
+            $provenance['ring'] = $resolved.Ring
+            $provenance['version'] = $gallery.Version
+            $provenance['dirty'] = $false
+        }
     }
 
     # 2. Materialise. Refuse to discard a hand-edit silently.
@@ -362,22 +417,29 @@ foreach ($capability in $capabilities) {
     if ((Test-Path -LiteralPath $modulePath) -and (Test-Path -LiteralPath $recordPath)) {
         $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
         if ($record.treeHash -and (& $treeHash $modulePath) -ne $record.treeHash) {
-            throw ".system\$($capability.module) has been modified since it was copied. It is generated and must not be edited - move your change into '$moduleSource' and re-run. To discard the local edit, delete '$modulePath' and re-run."
+            throw ".system\$($capability.module) has been modified since it was copied. It is generated and must not be edited - move your change into '$($moduleSource ?? $modulePath)' and re-run. To discard the local edit, delete '$modulePath' and re-run."
         }
     }
 
-    if (Test-Path -LiteralPath $modulePath) {
-        Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }
-        Remove-Item -LiteralPath $modulePath -Recurse -Force
+    if ($keepExisting) {
+        $kept = if (Test-Path -LiteralPath $recordPath) { (Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json) } else { $null }
+        $what = if ($kept) { "$($kept.mode) $($kept.version ?? $kept.sha)" } else { 'the existing copy' }
+        Write-Host "==> $($capability.name): kept .system\$($capability.module) as it is ($what)" -ForegroundColor DarkYellow
     }
-    New-Item -Path $systemRoot -ItemType Directory -Force | Out-Null
-    Copy-Item -LiteralPath $moduleSource -Destination $modulePath -Recurse
-    $from = if ($resolved.Source -eq 'clone') { "clone $($resolved.Path)" } else { "gallery $($provenance['version']) ($($resolved.Ring))" }
-    Write-Host "==> $($capability.name): copied $($capability.module) into .system\ from $from" -ForegroundColor Cyan
+    else {
+        if (Test-Path -LiteralPath $modulePath) {
+            Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }
+            Remove-Item -LiteralPath $modulePath -Recurse -Force
+        }
+        New-Item -Path $systemRoot -ItemType Directory -Force | Out-Null
+        Copy-Item -LiteralPath $moduleSource -Destination $modulePath -Recurse
+        $from = if ($resolved.Source -eq 'clone') { "clone $($resolved.Path)" } else { "gallery $($provenance['version']) ($($resolved.Ring))" }
+        Write-Host "==> $($capability.name): copied $($capability.module) into .system\ from $from" -ForegroundColor Cyan
 
-    $provenance['treeHash'] = (& $treeHash $modulePath)
-    $provenance['copiedAt'] = (Get-Date).ToString('o')
-    $provenance | ConvertTo-Json | Set-Content -LiteralPath $recordPath
+        $provenance['treeHash'] = (& $treeHash $modulePath)
+        $provenance['copiedAt'] = (Get-Date).ToString('o')
+        $provenance | ConvertTo-Json | Set-Content -LiteralPath $recordPath
+    }
 
     if ($provenance['dirty']) {
         Write-Warning "$($resolved.RepoName) has uncommitted changes; .system\ holds them. This run is NOT reproducible - commit them, or switch to the gallery with '. .\init.ps1 -Source gallery -Engine $($capability.name)', before treating its output as evidence."
