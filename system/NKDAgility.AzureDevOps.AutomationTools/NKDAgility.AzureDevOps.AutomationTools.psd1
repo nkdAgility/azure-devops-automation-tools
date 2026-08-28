@@ -40,6 +40,7 @@
         'Repair-ProcessConfiguration'
         # DataImportTool - fields
         'Rename-WitField'
+        'Add-WitReflectedWorkItemIdField'
         # DataImportTool - process configuration XML
         'Export-WitProcessConfigurationFixFile'
         'Import-WitProcessConfigurationFixFile'
