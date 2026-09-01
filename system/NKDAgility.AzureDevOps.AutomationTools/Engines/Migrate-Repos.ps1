@@ -552,6 +552,60 @@ function Sync-SourceLfs {
     finally { Pop-Location }
 }
 
+function Invoke-GitWithHeartbeat {
+    <# Runs git and prints an 'still working' line every few seconds while it does.
+
+       Some git steps are silent for MINUTES - 'lfs push --all --dry-run' walks every
+       object in every ref - and a console whose last line is a completed action reads
+       as a lock-up, not as work in progress. Nothing here changes what git does; it
+       guarantees the console never goes quiet, and says how long the step has taken.
+
+       stdout is captured to a file and returned line by line so callers can still parse
+       it; stderr goes to its own file and is surfaced only when git fails, so progress
+       chatter cannot corrupt the parse. #>
+    param(
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [Parameter(Mandatory)][string[]]$GitArgs,
+        [string]$Activity = 'git',
+        [int]$HeartbeatSeconds = 15
+    )
+
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $started = Get-Date
+
+    try {
+        $process = Start-Process -FilePath 'git' -ArgumentList $GitArgs `
+            -WorkingDirectory $WorkingDirectory -NoNewWindow -PassThru `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+
+        $lastBeat = $started
+        while (-not $process.HasExited) {
+            Start-Sleep -Milliseconds 500
+            $now = Get-Date
+            if (($now - $lastBeat).TotalSeconds -ge $HeartbeatSeconds) {
+                $lastBeat = $now
+                $elapsed = $now - $started
+                # CPU time is the evidence that it is working rather than blocked -
+                # worth showing, because 'it has used 743 seconds of CPU' answers the
+                # 'is this hung?' question outright.
+                $cpu = try { [math]::Round($process.TotalProcessorTime.TotalSeconds) } catch { $null }
+                $cpuText = if ($null -ne $cpu) { ", {0}s CPU" -f $cpu } else { '' }
+                Write-Host ("      still working: {0} - {1:mm\:ss} elapsed{2}" -f $Activity, $elapsed, $cpuText) -ForegroundColor DarkGray
+            }
+        }
+        $process.WaitForExit()
+
+        $script:LastHeartbeatExitCode = $process.ExitCode
+        $script:LastHeartbeatDuration = (Get-Date) - $started
+        $script:LastHeartbeatStdErr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        return @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue)
+    }
+    finally {
+        Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-PendingLfsCount {
     # Returns how many LFS objects the target is still missing, using a dry-run
     # push that negotiates with the target's LFS store but transfers nothing.
@@ -564,16 +618,24 @@ function Get-PendingLfsCount {
 
     $PSNativeCommandUseErrorActionPreference = $false
 
-    Push-Location $CloneDir
-    try {
-        $lines = & git -c "http.extraheader=$script:TargetHeader" lfs push --all --dry-run $RemoteName 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            # If the dry-run itself fails, fall back to attempting the transfer.
-            return -1
-        }
-        @($lines | Where-Object { $_ -match '^\s*push\s' }).Count
+    # Announced BEFORE it starts, and with the reason it is slow: this walks every
+    # object in every ref, which on a large mirror is minutes of silent CPU. A console
+    # left showing the previous, completed step reads as a lock-up.
+    Write-Host '    Checking which LFS objects the target is missing (walks every ref - minutes on a large repo)...' -ForegroundColor Green
+
+    $lines = Invoke-GitWithHeartbeat -WorkingDirectory $CloneDir -Activity 'LFS scan' -GitArgs @(
+        '-c', "http.extraheader=$script:TargetHeader", 'lfs', 'push', '--all', '--dry-run', $RemoteName
+    )
+
+    if ($script:LastHeartbeatExitCode -ne 0) {
+        # If the dry-run itself fails, fall back to attempting the transfer.
+        Write-Host '      LFS check could not complete; assuming objects need transferring.' -ForegroundColor DarkYellow
+        return -1
     }
-    finally { Pop-Location }
+
+    $count = @($lines | Where-Object { $_ -match '^\s*push\s' }).Count
+    Write-Host ("      LFS check finished in {0:mm\:ss}." -f $script:LastHeartbeatDuration) -ForegroundColor DarkGray
+    return $count
 }
 
 function Push-Lfs {
