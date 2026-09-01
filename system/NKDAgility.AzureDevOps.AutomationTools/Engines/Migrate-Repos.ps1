@@ -164,6 +164,24 @@
     segment fast-forwards the target ref and already-pushed Git objects are
     skipped, while 'git lfs push --all' only uploads LFS objects the target is
     missing, so re-running backfills LFS content for already-migrated repos.
+
+    COMMIT MENTION LINKING, AND AN UNDOCUMENTED DEPENDENCY.
+    Azure DevOps creates every repository with 'Commit mention linking' and
+    'Commit mention work item resolution' enabled, and a migration pushes the
+    entire history in one operation - so every historical '#1234' in every commit
+    message is processed as a new mention. One migration created links across
+    6,800 work items organisation-wide before this was handled. Both options are
+    therefore turned off before anything is pushed and restored afterwards, in a
+    finally, so an interrupted run does not leave them changed.
+
+    Microsoft documents those toggles as web-portal only; there is no supported
+    REST or az CLI equivalent. This script uses the INTERNAL endpoint the settings
+    page itself calls - legacy '_api/_versioncontrol/...' with '__v=5', not
+    versioned REST - which MAY CHANGE OR BE REMOVED WITHOUT NOTICE. Its body is
+    double-encoded, and a wrong shape returns HTTP 200 while doing nothing, so
+    every write is verified by re-reading the option. A mismatch is a hard failure
+    that refuses the push: if that endpoint changes, migrations stop rather than
+    silently repeating the incident.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -466,6 +484,149 @@ function New-TargetRepo {
     Write-Host "    Creating target repo '$Name'." -ForegroundColor Green
     Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders -Method Post -Body $body
 }
+
+#region Repository options (UNDOCUMENTED API) ---------------------------------
+# Azure DevOps creates every repository with 'Commit mention linking' and 'Commit
+# mention work item resolution' ON. Pushing a migration then makes the server read
+# EVERY commit message in the entire history as if it were a new mention: one
+# migration on this engagement created links across 6,800 work items, organisation
+# wide, because work item ids are unique per organisation rather than per project.
+# The settings must therefore be off for the push and restored afterwards.
+#
+# ==> THESE ENDPOINTS ARE NOT DOCUMENTED BY MICROSOFT. <==
+#
+# There is no supported REST or az CLI surface for these two toggles: the product
+# documents them as web-portal only. What is used below is the internal endpoint
+# the settings page itself calls, identified by watching that page:
+#
+#   GET  {org}/{projectId}/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId={id}
+#   POST {org}/{projectId}/_api/_versioncontrol/UpdateRepositoryOption?__v=5&repositoryId={id}
+#
+# It is legacy WebAccess ('_api', '__v=5', types named ...WebAccess.VersionControl),
+# not versioned REST ('_apis', 'api-version='), so Microsoft may change or remove it
+# without notice or deprecation. Two observed quirks make that dangerous:
+#
+#   * The body is DOUBLE-ENCODED - 'option' is a JSON *string*, not an object.
+#   * A wrong body shape returns HTTP 200 and changes nothing.
+#
+# So the status code is worthless as proof. Every write is verified by RE-READING
+# the option, and a mismatch is a hard failure that stops the push. If Microsoft
+# changes this endpoint the migration must stop, never quietly repeat the incident.
+
+function Get-RepositoryOption {
+    # All options for a repository, as an ordered hashtable of key -> value.
+    param([string]$RepoId)
+
+    $org = Get-OrgName -OrgUrl $TargetOrg
+    if (-not $script:TargetProjectId) {
+        $script:TargetProjectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
+    }
+    $url = "https://dev.azure.com/$org/$($script:TargetProjectId)/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId=$RepoId"
+    $response = Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders
+
+    $options = [ordered]@{}
+    foreach ($entry in @($response.__wrappedArray)) {
+        if ($entry.key) { $options[[string]$entry.key] = $entry.value }
+    }
+    return $options
+}
+
+function Set-RepositoryOption {
+    <# Sets one repository option and PROVES it took.
+
+       The endpoint answers 200 for a body it does not understand, so the response is
+       ignored entirely: the option is read back and compared. Anything else - a
+       changed contract, a permissions problem, a silent no-op - surfaces here as a
+       throw rather than as a migration that pushes with mentions still live. #>
+    param(
+        [Parameter(Mandatory)][string]$RepoId,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][bool]$Value
+    )
+
+    $org = Get-OrgName -OrgUrl $TargetOrg
+    if (-not $script:TargetProjectId) {
+        $script:TargetProjectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
+    }
+    $url = "https://dev.azure.com/$org/$($script:TargetProjectId)/_api/_versioncontrol/UpdateRepositoryOption?__v=5&repositoryId=$RepoId"
+
+    # Double-encoded on purpose: 'option' is a JSON STRING. An object here is
+    # accepted with a 200 and silently ignored.
+    #
+    # [ordered] matters: a plain hashtable serialises its keys in an arbitrary order
+    # that varies between runs, and a request body to an undocumented endpoint should
+    # be byte-for-byte reproducible when someone has to debug it against a capture.
+    $inner = ([ordered]@{ key = $Key; value = $Value } | ConvertTo-Json -Compress)
+    $body = ([ordered]@{ option = $inner } | ConvertTo-Json -Compress)
+
+    try {
+        Invoke-RestMethod -Uri $url -Headers $script:TargetHeaders -Method Post `
+            -Body $body -ContentType 'application/json' | Out-Null
+    }
+    catch {
+        throw "Could not set repository option '$Key' (this endpoint is undocumented and may have changed): $($_.Exception.Message)"
+    }
+
+    # Reads can lag a write briefly, so give it a couple of attempts before failing.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Start-Sleep -Milliseconds ($attempt * 400)
+        $current = Get-RepositoryOption -RepoId $RepoId
+        if ($current.Contains($Key) -and [bool]$current[$Key] -eq $Value) { return }
+    }
+
+    throw ("Repository option '{0}' did not change to {1} - it still reads {2}. The undocumented options endpoint may have changed; refusing to continue." -f
+        $Key, $Value, (Get-RepositoryOption -RepoId $RepoId)[$Key])
+}
+
+# Off for the duration of a migration; restored to whatever they were before.
+$script:CommitMentionKeys = @('WitMentionsEnabled', 'WitResolutionMentionsEnabled')
+
+function Disable-CommitMention {
+    <# Turns commit mention linking and resolution off, returning what they were so
+       they can be put back. A failure THROWS: pushing history with these enabled is
+       the incident this exists to prevent, so it must never be a warning. #>
+    param([Parameter(Mandatory)][string]$RepoId, [string]$RepoName)
+
+    $before = Get-RepositoryOption -RepoId $RepoId
+    $captured = [ordered]@{}
+    foreach ($key in $script:CommitMentionKeys) {
+        if ($before.Contains($key)) { $captured[$key] = [bool]$before[$key] }
+    }
+    if ($captured.Count -eq 0) {
+        throw "Could not read the commit mention options for '$RepoName'. The undocumented options endpoint may have changed; refusing to push."
+    }
+
+    foreach ($key in $captured.Keys) {
+        if (-not $captured[$key]) { continue }   # already off; leave it alone
+        Set-RepositoryOption -RepoId $RepoId -Key $key -Value $false
+    }
+    Write-Host ("    Commit mention linking/resolution disabled for the push (was: {0})." -f
+        (($captured.Keys | ForEach-Object { "$_=$($captured[$_])" }) -join ', ')) -ForegroundColor DarkGray
+
+    return $captured
+}
+
+function Restore-CommitMention {
+    # Puts the options back exactly as they were, including leaving off what was off.
+    # Never throws: the migration has finished by this point, and failing here must
+    # not turn a completed migration into a failed one - but it is warned about
+    # loudly, because a repository left with mentions disabled is a live change.
+    param([string]$RepoId, [System.Collections.IDictionary]$Captured, [string]$RepoName)
+
+    if (-not $Captured -or $Captured.Count -eq 0) { return }
+    foreach ($key in $Captured.Keys) {
+        if (-not $Captured[$key]) { continue }   # it was off before; leave it off
+        try {
+            Set-RepositoryOption -RepoId $RepoId -Key $key -Value $true
+        }
+        catch {
+            Write-Warning ("    Could not restore '{0}' on '{1}': {2}. Re-enable it by hand in Project Settings > Repositories." -f
+                $key, $RepoName, $_.Exception.Message)
+        }
+    }
+}
+
+#endregion Repository options -------------------------------------------------
 
 function Get-TargetRefCount {
     # How many refs the TARGET repository actually holds. Compared against the mirror
@@ -1081,6 +1242,19 @@ function Migrate-Repo {
         return
     }
 
+    # Commit mention linking is ON by default on every new repository, and a push of
+    # full history is read as thousands of new mentions. Disabled BEFORE anything is
+    # pushed, and restored in the finally below. A failure to disable throws, so the
+    # push cannot happen with them live.
+    $mentionsBefore = $null
+    $targetRepoId = if ($targetRepo) { $targetRepo.id } else { (Get-TargetRepo -Name $targetName).id }
+    if (-not $targetRepoId) {
+        throw "Could not resolve the target repository id for '$targetName'; refusing to push without disabling commit mention linking."
+    }
+    $mentionsBefore = Disable-CommitMention -RepoId $targetRepoId -RepoName $targetName
+
+    try {
+
     # Clone the source as a mirror, or update the existing cached mirror.
     Sync-SourceMirror -CloneDir $cloneDir -RemoteUrl $Repo.remoteUrl
 
@@ -1119,6 +1293,13 @@ function Migrate-Repo {
 
     Write-Host "    Done: $label ${progress}".TrimEnd() -ForegroundColor Green
     New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status $status
+
+    }
+    finally {
+        # Restored however the push ended - success, failure, or Ctrl+C - so a run
+        # never leaves the repository with its settings altered.
+        Restore-CommitMention -RepoId $targetRepoId -Captured $mentionsBefore -RepoName $targetName
+    }
 }
 
 function Migrate-Wiki {

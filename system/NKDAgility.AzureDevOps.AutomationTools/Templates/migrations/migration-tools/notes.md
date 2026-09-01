@@ -19,6 +19,25 @@
    package migration.
 4. Commit the summary CSVs written to `output\` as engagement evidence.
 
+## Commit mention linking (handled automatically, but know it is there)
+
+Azure DevOps creates every repository with **Commit mention linking** and **Commit mention
+work item resolution** on. A migration pushes the whole history at once, so the server reads
+every historical `#1234` in every commit message as a new mention and links it. On one
+engagement that created links across 6,800 work items across the whole organisation, because
+work item ids are unique per organisation rather than per project.
+
+`Run-Migrate-Repos.ps1` disables both before pushing and restores them afterwards, whatever
+happens to the run. Nothing to configure.
+
+**It depends on an endpoint Microsoft does not document.** These toggles are web-portal only
+in the product documentation, so the engine calls the internal endpoint the settings page
+uses (`_api/_versioncontrol/...`, not versioned REST). Microsoft may change or remove it
+without notice. Every write is verified by re-reading it, and a mismatch **stops the
+migration** rather than pushing with mentions live. If a run starts failing with a message
+about repository options, that endpoint has most likely changed: check it before working
+around it, and never disable the check to get a migration through.
+
 ## Renaming repos in transit
 
 When the target names repositories by convention rather than by history - a governed

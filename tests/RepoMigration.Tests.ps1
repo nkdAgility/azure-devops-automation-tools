@@ -197,6 +197,74 @@ Describe 'Migrate-Repos engine shape' {
     }
 }
 
+Describe 'Commit mention linking' {
+
+    BeforeAll {
+        $script:Text = Get-Content $script:EnginePath -Raw
+        . ([scriptblock]::Create((Get-EngineFunctionSource -Name 'Set-RepositoryOption')))
+    }
+
+    It 'disables mentions before anything is pushed' {
+        # The whole point: a push of full history with mentions live is the incident.
+        $disableAt = $script:Text.IndexOf('Disable-CommitMention -RepoId')
+        $syncAt = $script:Text.IndexOf('Sync-SourceMirror -CloneDir')
+        $disableAt | Should -BeGreaterThan 0
+        $disableAt | Should -BeLessThan $syncAt
+    }
+
+    It 'restores them in a finally, so an interrupted run does not leave them changed' {
+        $script:Text | Should -Match '(?s)finally\s*\{[^}]*Restore-CommitMention'
+    }
+
+    It 'treats a failure to disable as a HARD STOP, not a warning' {
+        $fn = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Disable-CommitMention'
+            }, $true)[0].Extent.Text
+        $fn | Should -Match 'throw'
+        $fn | Should -Not -Match 'Write-Warning[^\r\n]*refusing'
+    }
+
+    It 'verifies a write by re-reading rather than trusting the status code' {
+        # The endpoint answers 200 for a body it does not understand, so the response
+        # proves nothing. This is the single most important property of this code.
+        $fn = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-RepositoryOption'
+            }, $true)[0].Extent.Text
+        $fn | Should -Match 'Get-RepositoryOption -RepoId \$RepoId'
+        $fn | Should -Match 'throw'
+    }
+
+    It 'sends the double-encoded body the endpoint requires' {
+        # 'option' must be a JSON STRING. An object is accepted with a 200 and ignored,
+        # which is exactly the silent failure this guards against.
+        $fn = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-RepositoryOption'
+            }, $true)[0].Extent.Text
+        $fn | Should -Match '\$inner = \(\[ordered\]@\{ key = \$Key; value = \$Value \}'
+        $fn | Should -Match '\[ordered\]@\{ option = \$inner \}'
+
+        # And prove the shape it produces, rather than only that the code says so.
+        # [ordered] is required for this to be stable: a plain hashtable emits its
+        # keys in an arbitrary order, which made this assertion flaky.
+        $inner = ([ordered]@{ key = 'WitMentionsEnabled'; value = $false } | ConvertTo-Json -Compress)
+        $body = ([ordered]@{ option = $inner } | ConvertTo-Json -Compress)
+        $body | Should -BeExactly '{"option":"{\"key\":\"WitMentionsEnabled\",\"value\":false}"}'
+    }
+
+    It 'documents that the endpoint is undocumented and may change' {
+        # A future maintainer must not discover this the hard way.
+        $script:Text | Should -Match 'NOT DOCUMENTED BY MICROSOFT'
+        $script:Text | Should -Match 'without notice'
+    }
+
+    It 'leaves an option alone when it was already off' {
+        $fn = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Restore-CommitMention'
+            }, $true)[0].Extent.Text
+        $fn | Should -Match 'it was off before'
+    }
+}
+
 Describe 'Push watchdog and verification' {
 
     BeforeAll {

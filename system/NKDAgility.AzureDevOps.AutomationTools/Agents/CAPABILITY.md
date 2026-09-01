@@ -93,6 +93,24 @@ Known gap: an interactive sign-in needs a window handle, so a headless host fail
 Sign in first (`Connect-AzAccount -UseDeviceAuthentication -TenantId <id> -AccountId <upn>`)
 or supply a PAT for unattended runs.
 
+**Commit mention linking is disabled around every repo push, via an UNDOCUMENTED API.**
+Azure DevOps creates every repository with *Commit mention linking* and *Commit mention
+work item resolution* on, and a migration pushes the whole history at once, so the server
+reads every historical `#1234` in every commit as a new mention. One migration on the SLB
+engagement created links across 6,800 work items organisation-wide, because work item ids
+are unique per organisation, not per project. `Migrate-Repos` therefore disables both
+before pushing and restores them in a `finally`.
+
+Microsoft documents these toggles as web-portal only: there is no supported REST or `az`
+surface. The engine uses the internal endpoint the settings page itself calls
+(`{org}/{projectId}/_api/_versioncontrol/RepositoryOptions` and `UpdateRepositoryOption`,
+legacy `_api` / `__v=5`, not versioned REST), **so Microsoft may change or remove it
+without notice or deprecation**. Two quirks make that dangerous: the body is
+double-encoded (`option` is a JSON *string*), and a wrong shape returns HTTP 200 while
+changing nothing. Every write is therefore verified by re-reading the option, and a
+mismatch is a **hard stop** — the push is refused rather than run with mentions live. If a
+migration starts failing there, check that endpoint first.
+
 Rules:
 
 - **Anything that writes to the GitHub organisation is destructive** — same standing as a
