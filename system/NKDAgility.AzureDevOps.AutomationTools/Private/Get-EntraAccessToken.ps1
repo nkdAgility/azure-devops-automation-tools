@@ -91,6 +91,17 @@ function Get-EntraAccessToken {
     if (-not (& $isMatch $context)) {
         $as = if ($account) { " as $account" } else { '' }
         Write-FixStep "Signing in to Entra tenant $tenantId$as ..."
+
+        # Az defaults to the Windows broker (WAM), which needs a parent window handle.
+        # Without one it fails as 'A window handle must be configured', and where the
+        # token cache is also empty - after a password change, say - it surfaces instead
+        # as 'SharedTokenCacheCredential authentication unavailable. No accounts were
+        # found in the cache', which names neither the real cause nor the fix. Turning
+        # the broker off for THIS PROCESS ONLY (never the machine's saved config) makes
+        # Az use the system browser, which works from a plain shell.
+        try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue | Out-Null }
+        catch { Write-Verbose "Could not disable the WAM broker: $($_.Exception.Message)" }
+
         $connect = @{ TenantId = $tenantId; ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
         # Pins the sign-in to the intended identity instead of an account picker.
         if ($account) { $connect.AccountId = $account }

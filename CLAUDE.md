@@ -323,6 +323,7 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `Update-WikiWorkItemLinks.ps1` | Repoints wiki work item links through `Custom.ReflectedWorkItemId`. Preview by default, `-Commit` to write, never pushes |
 | `Update-CommentAttachmentLinks.ps1` | Migrates attachments referenced by **markdown** links in work item comments (the migration fixes HTML, not markdown) and rewrites the comments. Heals comments left html-flagged or escaped by the convert-to-markdown button. Preview by default; `[n/total]` progress with rate and ETA; a `-Commit` run checkpoints and resumes (`-Restart` starts over) |
 | `Set-WorkItemStartId.ps1` | Advances an organisation's work item ID counter by creating and permanently destroying throwaway items, so migrated ids line up with the source |
+| `Remove-CommitMentionLinks.ps1` | Undoes the work item links Azure DevOps' commit mention linking creates when a migration pushes a full history — organisation-wide, since work item ids are unique per organisation. Narrow by construction: only `ArtifactLink`s **added** by a qualifying revision, pointing at the named repository, inside `-SinceDays` (default 30) and optionally by `-ChangedBy`. `-WhatIf` prints a per-project report and still writes the evidence CSV; an incomplete scan refuses to remove anything and writes `*.INCOMPLETE.csv`. Checkpointed and resumable, verifies every removal by re-reading, and reports mention-caused state transitions without reverting them — restore those first |
 
 ## Memory
 
