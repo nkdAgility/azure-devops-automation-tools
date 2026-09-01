@@ -4,9 +4,16 @@ function Get-AutomationSecrets {
     Loads organisation secrets from a secrets.json file, normalised and cached.
 
     .DESCRIPTION
-    Returns one object per organisation entry with Org, Url, AccessToken and EnvVars properties.
-    Accepts both the canonical PascalCase shape (Organisations / Org / Url / AccessToken / EnvVars)
-    and camelCase or legacy variants (organisations / org / url / token / envVars / EnvVar).
+    Returns one object per organisation entry with Org, Url, AccessToken, EnvVars and
+    SignInAs properties.
+    Accepts both the canonical PascalCase shape (Organisations / Org / Url / AccessToken /
+    EnvVars / SignInAs) and camelCase or legacy variants (organisations / org / url / token /
+    envVars / EnvVar / signInAs).
+
+    SignInAs is the user principal name to authenticate as for that organisation - the
+    Entra identity, not a secret. It sits here because this is already the per-organisation
+    answer to 'how do I authenticate', and because it is per-user: one consultant's
+    account must not be committed into another's workspace.
     Empty or placeholder tokens ('<...>' or 'REPLACE_WITH_PAT') are normalised to $null.
     Returns an empty array when the file does not exist. Never log the returned values.
     #>
@@ -51,6 +58,7 @@ function Get-AutomationSecrets {
             Url         = & $prop $entry @('Url', 'url')
             AccessToken = $token
             EnvVars     = @($envVars | Where-Object { $_ })
+            SignInAs    = & $prop $entry @('SignInAs', 'signInAs', 'Account', 'account', 'Upn', 'upn')
         }
     }
 

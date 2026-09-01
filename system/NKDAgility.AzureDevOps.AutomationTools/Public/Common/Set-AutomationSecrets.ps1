@@ -60,10 +60,20 @@ function Set-AutomationSecrets {
     $setNames = [System.Collections.Generic.List[string]]::new()
     $keptNames = [System.Collections.Generic.List[string]]::new()
 
+    $entraOrgs = [System.Collections.Generic.List[string]]::new()
+
     foreach ($entry in $entries) {
         if (-not $entry.Org) { continue }
         if (-not $entry.AccessToken) {
-            Write-Warning "Skipping org '$($entry.Org)': token is empty or a placeholder."
+            # An entry naming a SignInAs identity authenticates with Entra, so having no
+            # PAT is the intended state, not a misconfiguration. Warning about it trains
+            # people to ignore warnings - and a real missing token then goes unnoticed.
+            if ($entry.SignInAs) {
+                $entraOrgs.Add(('{0} (as {1})' -f $entry.Org, $entry.SignInAs))
+            }
+            else {
+                Write-Warning "Skipping org '$($entry.Org)': no token, and no SignInAs identity to authenticate with Entra instead."
+            }
             continue
         }
 
@@ -87,6 +97,9 @@ function Set-AutomationSecrets {
         }
     }
 
+    if ($entraOrgs.Count) {
+        Write-FixStep "Entra sign-in (no PAT needed): $($entraOrgs -join ', ')"
+    }
     if ($keptNames.Count) {
         Write-FixStep "Left $($keptNames.Count) environment variable(s) already set (CI secrets and shell overrides win): $($keptNames -join ', ')"
     }

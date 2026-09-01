@@ -46,15 +46,55 @@ function Get-EntraAccessToken {
         if ($cached.ExpiresOn -gt (Get-Date).AddMinutes(5)) { return $cached.Token }
     }
 
-    Initialize-AzAccounts
-
     # 499b84ac-1321-427f-aa17-267ca6975798 is the well-known Azure DevOps application ID.
     $adoResource = '499b84ac-1321-427f-aa17-267ca6975798'
 
+    # Which identity this organisation wants, when the engagement has said so.
+    $account = Get-AzureDevOpsSignInAccount -Collection $Collection
+
+    # The Azure CLI is a first-class source, not an afterthought: every runbook and doc in
+    # a customer workspace says 'az login', and az keeps its own credential store that
+    # Az PowerShell cannot see. Reading it first means a signed-in operator is never
+    # prompted a second time for an identity they already have.
+    $fromCli = Get-EntraAccessTokenFromCli -TenantId $tenantId -Resource $adoResource -AccountId $account
+    if ($fromCli) {
+        $script:EntraTokenCache[$tenantId] = $fromCli
+        return $fromCli.Token
+    }
+
+    Initialize-AzAccounts
+
+    # A context only counts when it is BOTH the right tenant and, where the organisation
+    # named one, the right account - otherwise a token gets minted for whichever identity
+    # happened to be current, which fails as a 403 much later and looks like a permissions
+    # problem rather than a sign-in one.
+    $isMatch = {
+        param($Candidate)
+        $Candidate -and $Candidate.Tenant.Id -eq $tenantId -and
+        (-not $account -or $Candidate.Account.Id -ieq $account)
+    }
+
     $context = Get-AzContext -ErrorAction SilentlyContinue
-    if (-not $context -or $context.Tenant.Id -ne $tenantId) {
-        Write-FixStep "Signing in to Entra tenant $tenantId ..."
-        Connect-AzAccount -TenantId $tenantId -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+    if (-not (& $isMatch $context)) {
+        # Prefer a context already signed in for this tenant/account over prompting again.
+        $existing = @(Get-AzContext -ListAvailable -ErrorAction SilentlyContinue |
+                Where-Object { & $isMatch $_ }) | Select-Object -First 1
+        if ($existing) {
+            try {
+                Set-AzContext -Context $existing -ErrorAction Stop | Out-Null
+                $context = Get-AzContext -ErrorAction SilentlyContinue
+            }
+            catch { Write-Verbose "Could not select existing context: $($_.Exception.Message)" }
+        }
+    }
+
+    if (-not (& $isMatch $context)) {
+        $as = if ($account) { " as $account" } else { '' }
+        Write-FixStep "Signing in to Entra tenant $tenantId$as ..."
+        $connect = @{ TenantId = $tenantId; ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
+        # Pins the sign-in to the intended identity instead of an account picker.
+        if ($account) { $connect.AccountId = $account }
+        Connect-AzAccount @connect | Out-Null
     }
 
     $token = Get-AzAccessToken -ResourceUrl $adoResource -TenantId $tenantId -ErrorAction Stop

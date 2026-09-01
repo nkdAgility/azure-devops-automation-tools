@@ -70,6 +70,29 @@ command falls back to the secrets PAT for the collection automatically. The exce
 `devopsmigration.exe`, which cannot use Entra: its `configuration-*.json` `AccessToken`
 env-var bindings stay PAT-fed by `Set-AutomationSecrets`.
 
+**Which identity, per organisation.** A consultant holds one account per customer tenant,
+so the organisation names the one to use: `SignInAs` on its `secrets.json` entry (a UPN,
+not a secret), or `AZDO_SIGNIN_<ORG>` in CI. An entry with `SignInAs` and no `AccessToken`
+is an Entra organisation — reported as such at load, never warned about. Sign-in stops at
+the first source holding that account:
+
+1. the signed-in **Azure CLI** (`az login`) — the store every runbook and doc points at,
+   and one Az PowerShell cannot see;
+2. an existing **Az PowerShell** context for that tenant;
+3. an interactive sign-in, pinned to the tenant and to `SignInAs` so it neither lands on
+   an account picker nor mints a token for whichever identity happened to be current.
+
+The tenant is discovered from the collection, but Azure DevOps only returns
+`X-VSS-ResourceTenant` on a response that actually challenges for authentication —
+anonymous `connectionData` answers 203 without it. A collection is therefore only proved
+non-Entra once the authenticated probe comes back empty too; treating the anonymous probe
+as sufficient reports every organisation as non-Entra and silently downgrades to PATs.
+
+Known gap: an interactive sign-in needs a window handle, so a headless host fails with
+`A window handle must be configured` and there is no automatic device-code fallback yet.
+Sign in first (`Connect-AzAccount -UseDeviceAuthentication -TenantId <id> -AccountId <upn>`)
+or supply a PAT for unattended runs.
+
 Rules:
 
 - **Anything that writes to the GitHub organisation is destructive** — same standing as a
