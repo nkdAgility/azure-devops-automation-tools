@@ -105,7 +105,32 @@ function Get-EntraAccessToken {
         $connect = @{ TenantId = $tenantId; ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
         # Pins the sign-in to the intended identity instead of an account picker.
         if ($account) { $connect.AccountId = $account }
-        Connect-AzAccount @connect | Out-Null
+
+        try {
+            Connect-AzAccount @connect | Out-Null
+        }
+        catch {
+            # -AccountId asks Az to reuse a KNOWN account, so it tries the token cache
+            # silently and gives up when the cache is empty - which is exactly the state
+            # after a password change revokes the refresh token. The failure reads
+            # 'SharedTokenCacheCredential authentication unavailable. No accounts were
+            # found in the cache', which sounds fatal but only means 'nothing cached to
+            # reuse'. Dropping the hint makes the sign-in interactive, which is the
+            # correct behaviour when there is nothing to reuse.
+            if (-not $account) { throw }
+            Write-FixStep "No cached account to reuse; opening a browser to sign in as $account ..."
+            $connect.Remove('AccountId')
+            Connect-AzAccount @connect | Out-Null
+        }
+
+        # Without the -AccountId hint the browser offers an account picker, so confirm
+        # what was actually signed in: a token for the wrong identity fails later as a
+        # 403 and reads as a permissions problem rather than a sign-in one.
+        $signedIn = Get-AzContext -ErrorAction SilentlyContinue
+        if ($account -and $signedIn -and $signedIn.Account.Id -ine $account) {
+            throw ("Signed in as $($signedIn.Account.Id), but '$Collection' expects $account " +
+                "(SignInAs in secrets.json). Sign in again with that account.")
+        }
     }
 
     $token = Get-AzAccessToken -ResourceUrl $adoResource -TenantId $tenantId -ErrorAction Stop
