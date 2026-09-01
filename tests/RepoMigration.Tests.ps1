@@ -196,3 +196,79 @@ Describe 'Migrate-Repos engine shape' {
         $script:Text | Should -Not -Match "push',\s*'--mirror"
     }
 }
+
+Describe 'Push watchdog and verification' {
+
+    BeforeAll {
+        $script:Text = Get-Content $script:EnginePath -Raw
+        . ([scriptblock]::Create((Get-EngineFunctionSource -Name 'Get-LocalRefCount')))
+        $script:Made = [System.Collections.Generic.List[string]]::new()
+    }
+
+    AfterAll {
+        foreach ($d in $script:Made) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'pushes through the watchdog, not a bare invocation' {
+        # A bare 'git push' waits forever when the helper pipe breaks: the transfer
+        # completes server-side and the client never returns.
+        $script:Text | Should -Match "Invoke-GitWatched -WorkingDirectory \`$CloneDir -Activity 'push'"
+    }
+
+    It 'keeps push output live rather than capturing it' {
+        # Capturing would hide git's own 'Writing objects: 45%' progress, which is the
+        # most useful signal a push is healthy. Invoke-GitWatched must not redirect.
+        $watched = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-GitWatched'
+            }, $true)[0].Extent.Text
+        $watched | Should -Not -Match 'RedirectStandardOutput'
+        $watched | Should -Match '-NoNewWindow -PassThru'
+    }
+
+    It 'requires BOTH idleness and no connection before calling a push stalled' {
+        # Idle alone is normal: the client sits at zero CPU while the server analyses,
+        # validates and stores. Killing on idleness alone would abort healthy pushes.
+        $watched = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-GitWatched'
+            }, $true)[0].Extent.Text
+        $watched | Should -Match 'Test-TreeHasConnection'
+        $watched | Should -Match '\$busy = .*-or \(Test-TreeHasConnection'
+    }
+
+    It 'assumes a connection exists when it cannot tell' {
+        # Uncertainty must never kill a healthy push.
+        $fn = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-TreeHasConnection'
+            }, $true)[0].Extent.Text
+        $fn | Should -Match 'catch\s*\{[^}]*return \$true'
+    }
+
+    It 'verifies refs on the target before recording success' {
+        $verifyAt = $script:Text.IndexOf('Get-TargetRefCount -Name $targetName')
+        $summaryAt = $script:Text.IndexOf("-Status `$status")
+        $verifyAt | Should -BeGreaterThan 0
+        $verifyAt | Should -BeLessThan $summaryAt
+    }
+
+    It 'counts local refs correctly on a real repository' {
+        $repo = New-TestRepo {
+            Add-Commit -Path 'a.txt' -Content 'a' -Message 'one'
+            & git tag v1 2>$null
+            & git checkout --quiet -b second 2>$null
+            Add-Commit -Path 'b.txt' -Content 'b' -Message 'two'
+            & git tag v2 2>$null
+        }
+        $script:Made.Add($repo)
+        # 2 heads (main, second) + 2 tags
+        Get-LocalRefCount -CloneDir $repo | Should -Be 4
+    }
+
+    It 'builds a commit-graph after cloning, and never fails the migration over it' {
+        $script:Text | Should -Match 'Write-CommitGraph -CloneDir \$CloneDir'
+        $fn = $script:EngineAst.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-CommitGraph'
+            }, $true)[0].Extent.Text
+        $fn | Should -Match 'commit-graph.*write.*--reachable'
+        $fn | Should -Match 'continuing without it'
+    }
+}

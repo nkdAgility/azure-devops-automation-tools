@@ -467,6 +467,35 @@ function New-TargetRepo {
     Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders -Method Post -Body $body
 }
 
+function Get-TargetRefCount {
+    # How many refs the TARGET repository actually holds. Compared against the mirror
+    # after a push so the run states what landed rather than assuming the absence of an
+    # error means success - a push can complete server-side while the client hangs, and
+    # 'it finished' is worth proving, not inferring.
+    param([string]$Name)
+    try {
+        $org = Get-OrgName -OrgUrl $TargetOrg
+        $projectSeg = [uri]::EscapeDataString($TargetProject)
+        $nameSeg = [uri]::EscapeDataString($Name)
+        $url = "https://dev.azure.com/$org/$projectSeg/_apis/git/repositories/$nameSeg/refs?api-version=7.1&`$top=5000"
+        $refs = Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders
+        return [int]$refs.count
+    }
+    catch {
+        Write-Verbose "Could not read target refs for '$Name': $($_.Exception.Message)"
+        return -1
+    }
+}
+
+function Get-LocalRefCount {
+    param([string]$CloneDir)
+    try {
+        $refs = @(& git -C $CloneDir for-each-ref --format='%(refname)' refs/heads refs/tags 2>$null)
+        return $refs.Count
+    }
+    catch { return -1 }
+}
+
 function Get-TargetRepoUrl {
     param([string]$Name)
     $org = Get-OrgName -OrgUrl $TargetOrg
@@ -520,6 +549,30 @@ function Sync-SourceMirror {
         try { Invoke-Git -GitArgs @('remote', 'rename', 'origin', $RemoteName) }
         finally { Pop-Location }
     }
+
+    Write-CommitGraph -CloneDir $CloneDir
+}
+
+function Write-CommitGraph {
+    # Precomputes commit reachability once, so every later traversal reads it instead
+    # of walking commits again. Worth doing here because everything downstream traverses
+    # repeatedly: git-lfs runs a rev-list PER REF, and a mirror holds every branch and
+    # tag - 681 on one repository in this engagement, 2,892 on the next - so the same
+    # shared history is walked over and over.
+    #
+    # Best-effort: a failure here costs speed, never correctness, so it must never stop
+    # a migration.
+    param([string]$CloneDir)
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    Write-Host '    Building commit-graph (speeds up every later history walk)...' -ForegroundColor DarkGray
+    $started = Get-Date
+    & git -C $CloneDir commit-graph write --reachable 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '      commit-graph unavailable; continuing without it.' -ForegroundColor DarkGray
+        return
+    }
+    Write-Host ("      commit-graph written in {0:n1}s." -f ((Get-Date) - $started).TotalSeconds) -ForegroundColor DarkGray
 }
 
 function Sync-SourceLfs {
@@ -604,6 +657,121 @@ function Invoke-GitWithHeartbeat {
     finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Get-ProcessTreeId {
+    # A process and everything below it. Used to judge a push by the whole tree:
+    # 'git push' delegates to git-remote-https, which delegates to git send-pack,
+    # and it is the descendants that hold the network connections and burn the CPU.
+    param([int]$RootId)
+
+    $ids = [System.Collections.Generic.List[int]]::new()
+    $ids.Add($RootId)
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId)
+        $frontier = @($RootId)
+        while ($frontier.Count -gt 0) {
+            $children = @($all | Where-Object { $_.ParentProcessId -in $frontier } | Select-Object -ExpandProperty ProcessId)
+            $children = @($children | Where-Object { -not $ids.Contains([int]$_) })
+            foreach ($c in $children) { $ids.Add([int]$c) }
+            $frontier = $children
+        }
+    }
+    catch { Write-Verbose "Could not enumerate the process tree: $($_.Exception.Message)" }
+    return $ids
+}
+
+function Test-TreeHasConnection {
+    # Does any process in the tree still hold a network connection? This is what
+    # separates 'the server is thinking' from 'nothing is going to happen'. A push
+    # waiting on Azure DevOps keeps an ESTABLISHED connection; a push deadlocked on
+    # a broken helper pipe holds none at all.
+    param([int[]]$ProcessIds)
+    try {
+        $conns = @(Get-NetTCPConnection -ErrorAction Stop |
+                Where-Object { $_.OwningProcess -in $ProcessIds -and $_.State -eq 'Established' })
+        return ($conns.Count -gt 0)
+    }
+    catch {
+        # No way to tell (not Windows, or the cmdlet is unavailable) - assume there IS
+        # a connection, so uncertainty never kills a healthy push.
+        return $true
+    }
+}
+
+function Invoke-GitWatched {
+    <# Runs git with its output going straight to the console - progress bars and all -
+       while watching for the process to wedge.
+
+       Deliberately NOT Invoke-GitWithHeartbeat: this is for pushes, where git's own
+       'Writing objects: 45%' progress is the thing worth seeing, and capturing it to
+       parse would take that away.
+
+       A push can legitimately sit at zero CPU for minutes while the server analyses,
+       validates and stores - so idleness alone means nothing. What distinguishes a
+       genuine stall is idleness AND the whole process tree holding no network
+       connection: nothing is being waited for. That is the state a broken
+       push -> remote-https -> send-pack pipe leaves behind, where every process waits
+       on a pipe that will never deliver and the run hangs indefinitely.
+
+       On a stall the tree is killed and a non-zero exit reported, so the repository is
+       recorded as failed and the run carries on to the next one instead of stopping
+       for the night. #>
+    param(
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [Parameter(Mandatory)][string[]]$GitArgs,
+        [string]$Activity = 'git',
+        [int]$HeartbeatSeconds = 30,
+        [int]$StallSeconds = 180
+    )
+
+    $started = Get-Date
+    $process = Start-Process -FilePath 'git' -ArgumentList $GitArgs `
+        -WorkingDirectory $WorkingDirectory -NoNewWindow -PassThru
+
+    $lastBeat = $started
+    $lastBusy = $started
+    $lastCpu = 0.0
+    $stalled = $false
+
+    while (-not $process.HasExited) {
+        Start-Sleep -Seconds 2
+        if ($process.HasExited) { break }
+
+        $tree = Get-ProcessTreeId -RootId $process.Id
+        $cpu = 0.0
+        foreach ($id in $tree) {
+            $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($p) { $cpu += $p.CPU }
+        }
+
+        $now = Get-Date
+        $busy = ($cpu - $lastCpu) -gt 0.5 -or (Test-TreeHasConnection -ProcessIds $tree)
+        if ($busy) { $lastBusy = $now }
+        $lastCpu = $cpu
+
+        if (($now - $lastBusy).TotalSeconds -ge $StallSeconds) {
+            $stalled = $true
+            Write-Warning ("    {0} appears STALLED: {1:mm\:ss} elapsed, no CPU and no network connection for {2}s. Killing it - the repository will be reported as failed and the run continues." -f
+                $Activity, ($now - $started), $StallSeconds)
+            foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+            break
+        }
+
+        if (($now - $lastBeat).TotalSeconds -ge $HeartbeatSeconds) {
+            $lastBeat = $now
+            $idleFor = [math]::Round(($now - $lastBusy).TotalSeconds)
+            $idleNote = if ($idleFor -ge $HeartbeatSeconds) { ", idle {0}s of {1}s before it is called stalled" -f $idleFor, $StallSeconds } else { '' }
+            Write-Host ("      still working: {0} - {1:mm\:ss} elapsed, {2}s CPU{3}" -f
+                $Activity, ($now - $started), [math]::Round($cpu), $idleNote) -ForegroundColor DarkGray
+        }
+    }
+
+    if (-not $stalled) { $process.WaitForExit() }
+    $script:LastWatchedStalled = $stalled
+    $script:LastWatchedDuration = (Get-Date) - $started
+    $script:LastWatchedExitCode = if ($stalled) { 1 } else { $process.ExitCode }
+    return $script:LastWatchedExitCode
 }
 
 function Test-RepoUsesLfs {
@@ -786,15 +954,17 @@ function Push-Mirror {
     param([string]$CloneDir, [string]$TargetRemote, [switch]$Force)
 
     Write-Host "    Pushing all branches and tags..." -ForegroundColor Green
-    Push-Location $CloneDir
-    try {
-        $pushArgs = @('push', '--prune', $TargetRemote,
-            'refs/heads/*:refs/heads/*',
-            'refs/tags/*:refs/tags/*')
-        if ($Force) { $pushArgs = @('push', '--force') + $pushArgs[1..($pushArgs.Count - 1)] }
-        Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $pushArgs
+    $pushArgs = @('push', '--prune', $TargetRemote,
+        'refs/heads/*:refs/heads/*',
+        'refs/tags/*:refs/tags/*')
+    if ($Force) { $pushArgs = @('push', '--force') + $pushArgs[1..($pushArgs.Count - 1)] }
+
+    $exit = Invoke-GitWatched -WorkingDirectory $CloneDir -Activity 'push' -GitArgs (
+        @('-c', "http.extraheader=$script:TargetHeader") + $pushArgs)
+    if ($exit -ne 0) {
+        if ($script:LastWatchedStalled) { throw "push stalled and was killed after $([math]::Round($script:LastWatchedDuration.TotalMinutes,1)) minute(s)" }
+        throw "git push failed with exit code $exit"
     }
-    finally { Pop-Location }
 }
 
 function Push-BranchSegmented {
@@ -930,8 +1100,25 @@ function Migrate-Repo {
         Push-Mirror -CloneDir $cloneDir -TargetRemote 'target'
     }
 
+    # Verify rather than assume. Comparing the mirror's refs against the target's costs
+    # one API call and turns 'no error was raised' into 'n of n refs are on the target'.
+    $localRefs = Get-LocalRefCount -CloneDir $cloneDir
+    $targetRefs = Get-TargetRefCount -Name $targetName
+    $status = 'Migrated'
+    if ($targetRefs -lt 0) {
+        Write-Host "    Pushed; could not read the target's refs to verify." -ForegroundColor DarkYellow
+    }
+    elseif ($localRefs -ge 0 -and $targetRefs -lt $localRefs) {
+        # Not fatal - the push reported success - but it must be visible, not buried.
+        Write-Warning ("    Verified {0} of {1} ref(s) on the target. Re-run to reconcile." -f $targetRefs, $localRefs)
+        $status = "Migrated (verified $targetRefs/$localRefs refs)"
+    }
+    else {
+        Write-Host ("    Verified: {0} ref(s) on the target." -f $targetRefs) -ForegroundColor DarkGray
+    }
+
     Write-Host "    Done: $label ${progress}".TrimEnd() -ForegroundColor Green
-    New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Migrated'
+    New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status $status
 }
 
 function Migrate-Wiki {
