@@ -606,6 +606,59 @@ function Invoke-GitWithHeartbeat {
     }
 }
 
+function Test-RepoUsesLfs {
+    <# Does this repository use Git LFS anywhere in its history?
+
+       Worth answering BEFORE any LFS work, because 'git lfs push --all' is not
+       "push the LFS objects" - it walks every ref's history looking for pointers,
+       spawning a rev-list/cat-file pair per ref. On a MIRROR that means every branch
+       and tag: 681 refs x 122k objects on one 294 MB repository, and 2,892 refs on
+       the next. A repository with no LFS pays that in full to find nothing, twice
+       (once for the dry-run pre-check, once for the push).
+
+       This costs one object walk instead of one per ref - about a second and a half
+       on that same repository. 'rev-list --objects --all' lists every reachable
+       object WITH its path, so .gitattributes at any depth in any commit is found,
+       not just the one at the root of the default branch. Only those blobs are read.
+
+       Fails SAFE: any error returns $true, so an unreadable repository does the full
+       LFS transfer rather than silently shipping pointers with no content behind them.
+       A migration missing its LFS files is not a copy. #>
+    [CmdletBinding()]
+    param([string]$CloneDir)
+
+    $PSNativeCommandUseErrorActionPreference = $false
+
+    try {
+        # An existing LFS object store settles it without any walking.
+        if (Test-Path (Join-Path $CloneDir 'lfs\objects')) {
+            $stored = @(Get-ChildItem (Join-Path $CloneDir 'lfs\objects') -Recurse -File -ErrorAction SilentlyContinue)
+            if ($stored.Count -gt 0) { return $true }
+        }
+
+        $objects = & git -C $CloneDir rev-list --objects --all 2>$null
+        if ($LASTEXITCODE -ne 0) { return $true }
+
+        # '<oid> <path>' - keep the .gitattributes blobs at any depth, deduplicated.
+        $oids = @($objects |
+                Where-Object { $_ -match '\s(.*/)?\.gitattributes$' } |
+                ForEach-Object { ($_ -split '\s+')[0] } |
+                Sort-Object -Unique)
+        if ($oids.Count -eq 0) { return $false }
+
+        foreach ($oid in $oids) {
+            $content = & git -C $CloneDir cat-file -p $oid 2>$null
+            if ($LASTEXITCODE -ne 0) { return $true }
+            if ($content -match 'filter\s*=\s*lfs') { return $true }
+        }
+        return $false
+    }
+    catch {
+        Write-Warning "    Could not determine whether '$CloneDir' uses LFS ($($_.Exception.Message)); assuming it does."
+        return $true
+    }
+}
+
 function Get-PendingLfsCount {
     # Returns how many LFS objects the target is still missing, using a dry-run
     # push that negotiates with the target's LFS store but transfers nothing.
@@ -657,6 +710,17 @@ function Push-Lfs {
     # See Sync-SourceLfs: keep native exit codes inspectable instead of letting
     # PowerShell 7.4+ turn them into terminating errors that abort the run.
     $PSNativeCommandUseErrorActionPreference = $false
+
+    # One object walk decides whether any of the per-ref walking below is worth
+    # doing at all. Everything past this point is proportional to REF COUNT, and a
+    # mirror has every branch and tag.
+    $lfsCheckStarted = Get-Date
+    if (-not (Test-RepoUsesLfs -CloneDir $CloneDir)) {
+        Write-Host ("    No LFS in this repository (checked every ref in {0:n1}s); skipping LFS transfer." -f `
+            ((Get-Date) - $lfsCheckStarted).TotalSeconds) -ForegroundColor DarkGray
+        return
+    }
+    Write-Host '    Repository uses LFS; its objects will be transferred.' -ForegroundColor Green
 
     $pending = Get-PendingLfsCount -CloneDir $CloneDir -RemoteName $TargetRemote
     if ($pending -eq 0) {
