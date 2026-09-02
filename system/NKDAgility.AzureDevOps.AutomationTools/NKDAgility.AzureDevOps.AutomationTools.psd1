@@ -68,6 +68,7 @@
         'Remove-WitWorkItemLinkType'
         # WorkItemTracking - REST
         'Get-WorkItemType'
+        'Add-ReflectedWorkItemIdField'
         'Get-WorkItemLinkType'
         'Get-WorkItemLink'
         'Export-WorkItemLinkInventory'
