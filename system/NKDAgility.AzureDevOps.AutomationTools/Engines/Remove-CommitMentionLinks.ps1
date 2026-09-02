@@ -385,7 +385,15 @@ function Remove-WorkItemLink {
     $org = Get-OrgName -Url $Collection
     $item = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitems/$WorkItemId`?`$expand=relations&api-version=7.1"
 
-    $relations = @($item.relations)
+    # A work item with NO relations comes back without a 'relations' property at all, and
+    # under Set-StrictMode reading a missing property throws - so an item whose links have
+    # already gone failed as 'The property relations cannot be found on this object'
+    # instead of being the no-op it is. That happens routinely on a re-run, and on any
+    # item somebody has tidied up by hand in the meantime.
+    $relations = @()
+    if ($item -and ($item.PSObject.Properties.Name -contains 'relations') -and $item.relations) {
+        $relations = @($item.relations)
+    }
     $indexes = [System.Collections.Generic.List[int]]::new()
     for ($i = 0; $i -lt $relations.Count; $i++) {
         if ($relations[$i].rel -eq 'ArtifactLink' -and $Urls -contains $relations[$i].url) { $indexes.Add($i) }
@@ -401,7 +409,13 @@ function Remove-WorkItemLink {
 
     # Verified by re-reading: the removal is the whole point, so it is proven, not assumed.
     $after = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitems/$WorkItemId`?`$expand=relations&api-version=7.1"
-    $remaining = @(@($after.relations) | Where-Object { $_.rel -eq 'ArtifactLink' -and $Urls -contains $_.url })
+    # Same guard: removing the last relation leaves the property absent entirely, which is
+    # the SUCCESS case here and must not throw.
+    $afterRelations = @()
+    if ($after -and ($after.PSObject.Properties.Name -contains 'relations') -and $after.relations) {
+        $afterRelations = @($after.relations)
+    }
+    $remaining = @($afterRelations | Where-Object { $_.rel -eq 'ArtifactLink' -and $Urls -contains $_.url })
     if ($remaining.Count -gt 0) {
         throw "work item $WorkItemId still has $($remaining.Count) of the targeted link(s) after the patch"
     }

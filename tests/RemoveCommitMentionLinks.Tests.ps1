@@ -148,6 +148,20 @@ Describe 'Removal correctness' {
         $fn = Get-EngineFunctionText -Name 'Remove-WorkItemLink'
         $fn | Should -Match 'already gone - a re-run, not a failure'
     }
+
+    It 'survives a work item that has no relations at all' {
+        # Under Set-StrictMode, reading a missing property throws. A work item with no
+        # relations comes back WITHOUT the property, so the no-op case failed as
+        # 'The property relations cannot be found on this object' - both when reading
+        # before the patch and when verifying after removing the last one.
+        $fn = Get-EngineFunctionText -Name 'Remove-WorkItemLink'
+        ([regex]::Matches($fn, "PSObject\.Properties\.Name -contains 'relations'")).Count |
+            Should -Be 2 -Because 'both the read and the verification re-read need the guard'
+        # Both collections start empty and are only filled inside the guard, so neither
+        # read touches the property without checking it exists first.
+        $fn | Should -Match '\$relations = @\(\)'
+        $fn | Should -Match '\$afterRelations = @\(\)'
+    }
 }
 
 Describe 'Preview and evidence' {
