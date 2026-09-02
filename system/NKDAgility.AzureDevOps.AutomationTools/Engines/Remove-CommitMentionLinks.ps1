@@ -276,6 +276,40 @@ function Get-WorkItemSummary {
     return $summary
 }
 
+function Get-CurrentArtifactLink {
+    <# The ArtifactLink urls each work item CURRENTLY has, id -> set of urls.
+
+       Discovery reads revision history, and a revision that added a link stays in that
+       history forever - removing the link does not erase the event that added it. So
+       history alone reports every link this migration ever created, including the ones
+       already cleaned up: after a completed run it still claimed 12,018 links to remove
+       when the true answer was none.
+
+       Reconciling against current relations is what makes the counts, the preview and
+       the prompting describe reality, and what lets a finished job say so. Batched 200
+       at a time, so it costs a handful of calls rather than one per work item. #>
+    param([int[]]$Ids)
+
+    $org = Get-OrgName -Url $Collection
+    $current = @{}
+    for ($offset = 0; $offset -lt $Ids.Count; $offset += 200) {
+        $batch = @($Ids[$offset..([math]::Min($offset + 199, $Ids.Count - 1))])
+        $body = @{ ids = $batch; '$expand' = 'relations' } | ConvertTo-Json -Depth 4
+        $result = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitemsbatch?api-version=7.1" -Method Post -Body $body
+        foreach ($item in @($result.value)) {
+            $urls = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            # Absent entirely when the work item has no relations - see Remove-WorkItemLink.
+            if (($item.PSObject.Properties.Name -contains 'relations') -and $item.relations) {
+                foreach ($rel in @($item.relations)) {
+                    if ($rel.rel -eq 'ArtifactLink' -and $rel.url) { [void]$urls.Add([string]$rel.url) }
+                }
+            }
+            $current[[int]$item.id] = $urls
+        }
+    }
+    return $current
+}
+
 function Write-WhatIfReport {
     <# The preview. Deliberately a REPORT rather than one ShouldProcess line per item:
        6,796 near-identical lines cannot be reviewed, and this change is spread across
@@ -564,9 +598,29 @@ for ($offset = 0; $offset -lt $candidates.Count; $offset += $chunkSize) {
 }
 
 $all = @($discovered | Where-Object { $_ })
-$links = @($all | Where-Object { $_.Kind -eq 'link' })
+$historic = @($all | Where-Object { $_.Kind -eq 'link' })
 $stateChanges = @($all | Where-Object { $_.Kind -eq 'state' })
 $readErrors = @($all | Where-Object { $_.Kind -eq 'error' })
+
+# History says which links this migration CREATED; it cannot say which still exist,
+# because the revision that added a link remains in the history after the link is gone.
+# Everything downstream - the counts, the preview, the prompts - has to describe what is
+# actually there now, or a finished job reports its whole workload as still outstanding.
+$links = $historic
+if ($historic.Count -gt 0) {
+    Write-Host '==> Checking which of those links are still present...' -ForegroundColor Cyan
+    $currentLinks = Get-CurrentArtifactLink -Ids @($historic | ForEach-Object { [int]$_.WorkItemId } | Sort-Object -Unique)
+    $links = @($historic | Where-Object {
+            $set = $currentLinks[[int]$_.WorkItemId]
+            $set -and $set.Contains([string]$_.Url)
+        })
+    $goneAlready = $historic.Count - $links.Count
+    if ($goneAlready -gt 0) {
+        Write-Host ("    {0:N0} of {1:N0} already removed; {2:N0} still present." -f
+            $goneAlready, $historic.Count, $links.Count) -ForegroundColor DarkGray
+    }
+}
+
 $items = @($links | Group-Object WorkItemId)
 Write-Host "    $($links.Count) link(s) on $($items.Count) work item(s); $($stateChanges.Count) state change(s); $($readErrors.Count) unreadable." -ForegroundColor DarkGray
 
@@ -620,7 +674,18 @@ if ($stateChanges.Count) {
     Write-Host "==> State changes recorded separately: $statePath" -ForegroundColor Yellow
 }
 
-if ($links.Count -eq 0) { Write-Host 'No qualifying links found.' -ForegroundColor Green; return }
+if ($links.Count -eq 0) {
+    if ($historic.Count -gt 0) {
+        # The difference worth stating: the job is done, rather than there having been
+        # nothing to do. Both end here, and confusing them is how someone re-runs a
+        # completed cleanup looking for work that no longer exists.
+        Write-Host ("All {0:N0} link(s) this migration created have already been removed. Nothing left to do." -f $historic.Count) -ForegroundColor Green
+    }
+    else {
+        Write-Host 'No qualifying links found.' -ForegroundColor Green
+    }
+    return
+}
 
 # The preview is a report, not thousands of ShouldProcess lines. Everything above this
 # point is read-only, so -WhatIf reaches here having changed nothing.

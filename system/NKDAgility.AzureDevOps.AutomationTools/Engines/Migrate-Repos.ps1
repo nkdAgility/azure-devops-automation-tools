@@ -1129,12 +1129,38 @@ function Push-Mirror {
 }
 
 function Push-BranchSegmented {
-    # Pushes one branch's history to the target in commit-count segments so no
-    # single push exceeds the Azure DevOps limit.
+    <# Pushes one branch's history to the target in commit-count segments so no single
+       push exceeds the Azure DevOps limit.
+
+       Only the commits the target does NOT already have. Segmenting from a branch's
+       first commit means pushing an intermediate commit over a branch that is already
+       further ahead, which git rejects as a non-fast-forward - so a repository that was
+       partly migrated could never be finished, and the first rejected branch aborted the
+       whole repository. #>
     param([string]$Branch, [string]$TargetRemote, [int]$BatchSize)
 
-    # All commits on the branch, oldest first.
-    $commits = @(& git rev-list --reverse --first-parent $Branch)
+    # What the target already has for this branch, from the refs fetched by Push-Segmented.
+    $targetRef = "refs/remotes/$TargetRemote/$Branch"
+    $targetSha = (& git rev-parse --verify --quiet $targetRef) 2>$null
+    $localSha = (& git rev-parse --verify --quiet $Branch) 2>$null
+
+    if ($targetSha) {
+        if ($targetSha -eq $localSha) {
+            Write-Host "      [$Branch] already up to date" -ForegroundColor DarkGray
+            return
+        }
+        # Behind the target, or diverged: pushing would rewind or clobber. Neither is
+        # this script's call to make, so it is reported and left alone.
+        & git merge-base --is-ancestor $targetSha $Branch 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "      [$Branch] target has commits this mirror does not; left alone."
+            return
+        }
+    }
+
+    # Oldest first, and only what the target is missing.
+    $range = if ($targetSha) { "$targetSha..$Branch" } else { $Branch }
+    $commits = @(& git rev-list --reverse --first-parent $range)
     if ($LASTEXITCODE -ne 0) { throw "git rev-list failed for branch '$Branch'" }
     $total = $commits.Count
     if ($total -eq 0) { return }
@@ -1163,10 +1189,34 @@ function Push-Segmented {
         $branches = @(& git for-each-ref --format='%(refname:short)' refs/heads)
         if ($LASTEXITCODE -ne 0) { throw 'git for-each-ref failed' }
 
+        # One fetch tells us what the target already holds, so each branch pushes only
+        # the commits it is missing. Without this a re-run - or a repository partly
+        # migrated by an earlier attempt - tries to rewind branches and is rejected.
+        Write-Host '    Reading what the target already has...' -ForegroundColor Green
+        $PSNativeCommandUseErrorActionPreference = $false
+        & git -c "http.extraheader=$script:TargetHeader" fetch --quiet $TargetRemote "+refs/heads/*:refs/remotes/$TargetRemote/*" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            # An empty target has no refs to fetch; that is normal on a first migration.
+            Write-Host '      (nothing to read - treating the target as empty)' -ForegroundColor DarkGray
+        }
+
         Write-Host ("    Segmented push of {0} branch(es), batch size {1} commits." -f $branches.Count, $BatchSize) -ForegroundColor Green
+
+        # A branch that cannot be pushed must not cost the other 2,907. Each is tried on
+        # its own, failures are collected, and the repository is failed at the END - so
+        # the run reports everything wrong at once instead of one branch per attempt.
+        $branchFailures = [System.Collections.Generic.List[string]]::new()
         foreach ($branch in $branches) {
             if (-not $branch) { continue }
-            Push-BranchSegmented -Branch $branch -TargetRemote $TargetRemote -BatchSize $BatchSize
+            try { Push-BranchSegmented -Branch $branch -TargetRemote $TargetRemote -BatchSize $BatchSize }
+            catch {
+                $branchFailures.Add("$branch : $($_.Exception.Message)")
+                Write-Warning "      [$branch] $($_.Exception.Message)"
+            }
+        }
+        if ($branchFailures.Count -gt 0) {
+            throw ("{0} of {1} branch(es) failed to push; first: {2}" -f
+                $branchFailures.Count, $branches.Count, $branchFailures[0])
         }
 
         # Push all tags (typically small) once history is in place.
