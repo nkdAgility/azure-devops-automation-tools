@@ -61,6 +61,17 @@
 .PARAMETER Pat
     Personal access token (Work Items Read & Write). Omit to use Entra - the default.
 
+.PARAMETER Force
+    Remove without confirming each work item. By default every work item is shown - id,
+    project, type, state, title and the individual commit links - and confirmed one at a
+    time, so the first few can be checked against the real thing before committing to
+    thousands. 'Yes to All' switches to continuous from that point. Use -Force for
+    unattended runs, where there is nobody to answer the prompt.
+
+    Each work item takes exactly ONE edit, however many links it carries: all of its
+    removals go in a single JSON Patch, so a work item with 15 links gains one revision
+    in its history rather than 15.
+
 .EXAMPLE
     # ALWAYS do this first: discovers and writes the evidence CSV, removes nothing.
     .\Remove-CommitMentionLinks.ps1 -Collection https://dev.azure.com/contoso `
@@ -96,7 +107,9 @@ param(
 
     [string]$CheckpointPath,
 
-    [string]$Pat
+    [string]$Pat,
+
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -589,6 +602,17 @@ $removed = 0
 $failed = [System.Collections.Generic.List[string]]::new()
 $index = 0
 
+# Stepped through one work item at a time by default, so the first few can be checked
+# against the real thing before committing to thousands. 'Yes to All' switches to
+# continuous once they look right; -Force skips prompting entirely for unattended runs.
+$yesToAll = [bool]$Force
+$noToAll = $false
+if (-not $yesToAll) {
+    Write-Host ''
+    Write-Host 'Each work item is confirmed individually. [Y] this one  [A] yes to all  [N] skip  [L] no to all' -ForegroundColor Yellow
+    Write-Host 'Each work item takes ONE edit, however many links it has.' -ForegroundColor DarkGray
+}
+
 foreach ($group in $items) {
     $index++
     $workItemId = [int]$group.Name
@@ -598,6 +622,30 @@ foreach ($group in $items) {
     $what = "work item $workItemId ($($urls.Count) link(s))"
 
     if (-not $PSCmdlet.ShouldProcess($what, 'Remove commit mention link(s)')) { continue }
+
+    if (-not $yesToAll) {
+        if ($noToAll) { Write-Host '==> Stopped at your request.' -ForegroundColor Yellow; break }
+
+        $info = if ($summary.ContainsKey($workItemId)) { $summary[$workItemId] } else { $null }
+        $title = if ($info) { $info.Title } else { '' }
+        if ($title.Length -gt 70) { $title = $title.Substring(0, 67) + '...' }
+
+        $detail = @($group.Group | Sort-Object AddedOn | ForEach-Object {
+                "      {0}  added {1:yyyy-MM-dd HH:mm} by {2}" -f $_.Commit.Substring(0, [math]::Min(8, $_.Commit.Length)), $_.AddedOn, $_.AddedBy
+            }) -join [Environment]::NewLine
+
+        $query = @"
+  [$index of $($items.Count)]  #$workItemId  $(if ($info) { "$($info.Project) / $($info.Type) / $($info.State)" } else { '' })
+  $title
+    removing $($urls.Count) commit link(s) in ONE edit:
+$detail
+"@
+        if (-not $PSCmdlet.ShouldContinue($query, "Remove commit mention link(s) from #$workItemId", [ref]$yesToAll, [ref]$noToAll)) {
+            if ($noToAll) { Write-Host '==> Stopped at your request.' -ForegroundColor Yellow; break }
+            Write-Host "    skipped #$workItemId" -ForegroundColor DarkGray
+            continue
+        }
+    }
 
     try {
         $count = Remove-WorkItemLink -WorkItemId $workItemId -Urls $urls

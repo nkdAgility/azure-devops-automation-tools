@@ -194,6 +194,47 @@ Describe 'Preview and evidence' {
     }
 }
 
+Describe 'Per-work-item confirmation' {
+
+    It 'confirms each work item individually unless -Force' {
+        $script:Text | Should -Match '\$PSCmdlet\.ShouldContinue\('
+        $script:Text | Should -Match '\$yesToAll = \[bool\]\$Force'
+    }
+
+    It 'offers yes-to-all and no-to-all' {
+        # So the first few can be checked, then the rest run continuously.
+        $script:Text | Should -Match '\[ref\]\$yesToAll, \[ref\]\$noToAll'
+    }
+
+    It 'stops entirely on no-to-all rather than continuing' {
+        $script:Text | Should -Match 'Stopped at your request'
+    }
+
+    It 'shows what each edit does before asking' {
+        # A prompt showing only an id is not a decision anyone can make.
+        $script:Text | Should -Match 'removing \$\(\$urls\.Count\) commit link\(s\) in ONE edit'
+        $script:Text | Should -Match '\$_\.Commit\.Substring'
+    }
+
+    It 'makes exactly one edit per work item, whatever its link count' {
+        # All of a work item's removals go in a single JSON Patch, so its history gains
+        # one revision rather than one per link.
+        $fn = Get-EngineFunctionText -Name 'Remove-WorkItemLink'
+        # One PATCH in the whole function - the call is written across a line
+        # continuation, so match the verb alone rather than the whole invocation.
+        ([regex]::Matches($fn, '-Method Patch')).Count | Should -Be 1
+        # ...carrying ALL of the removals, built from every index found.
+        $fn | Should -Match 'ConvertTo-Json @\(\$patch\)'
+        $fn | Should -Match '\$patch = @\(\$indexes \| Sort-Object -Descending'
+    }
+
+    It 'has -Force for unattended runs' {
+        $p = $script:EngineAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Force' }
+        $p | Should -Not -BeNullOrEmpty
+        $p.StaticType.Name | Should -BeExactly 'SwitchParameter'
+    }
+}
+
 Describe 'Resilience' {
 
     It 'retries throttling rather than failing the run' {
