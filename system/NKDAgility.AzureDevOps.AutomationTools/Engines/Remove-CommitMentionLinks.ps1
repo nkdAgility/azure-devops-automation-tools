@@ -91,7 +91,12 @@
     removal. This writes to work items across the whole organisation, most of them owned
     by teams with no connection to the migration.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+# ConfirmImpact is deliberately NOT High. High makes ShouldProcess raise its own
+# confirmation, and this script already confirms every work item through ShouldContinue -
+# which shows the commit ids, the repository and when each link was added. Both together
+# asked twice per work item, and answering the first one looked like it had done nothing,
+# because the second prompt was still waiting. One prompt, with the detail on it.
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^https://')]

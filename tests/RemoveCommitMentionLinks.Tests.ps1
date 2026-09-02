@@ -21,13 +21,21 @@ BeforeAll {
 
 Describe 'Remove-CommitMentionLinks shape' {
 
-    It 'supports -WhatIf and defaults to high-impact confirmation' {
+    It 'supports -WhatIf' {
         $cmdletBinding = $script:EngineAst.ParamBlock.Attributes |
             Where-Object { $_.TypeName.FullName -match 'CmdletBinding' }
         ($cmdletBinding.NamedArguments | Where-Object { $_.ArgumentName -eq 'SupportsShouldProcess' }) |
             Should -Not -BeNullOrEmpty
-        ($cmdletBinding.NamedArguments | Where-Object { $_.ArgumentName -eq 'ConfirmImpact' }).Argument.Extent.Text |
-            Should -Match 'High'
+    }
+
+    It 'asks once per work item, not twice' {
+        # ConfirmImpact High makes ShouldProcess raise its OWN confirmation on top of the
+        # ShouldContinue prompt, so every work item was asked about twice - and answering
+        # the first looked like it had done nothing, because the second was still waiting.
+        $cmdletBinding = $script:EngineAst.ParamBlock.Attributes |
+            Where-Object { $_.TypeName.FullName -match 'CmdletBinding' }
+        ($cmdletBinding.NamedArguments | Where-Object { $_.ArgumentName -eq 'ConfirmImpact' }) |
+            Should -BeNullOrEmpty -Because 'ShouldContinue is the one prompt, and it carries the detail'
     }
 
     It 'accepts several repositories in one pass' {
