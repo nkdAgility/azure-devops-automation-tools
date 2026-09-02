@@ -40,8 +40,13 @@
     Project containing the repository whose links are being removed.
 
 .PARAMETER RepoName
-    Repository whose commit links are to be removed. Only links pointing at commits in
-    this repository are touched.
+    Repositories whose commit links are to be removed. Only links pointing at commits in
+    these repositories are touched.
+
+    Pass every repository from the same migration together. A work item mentioned by
+    commits in two of them would otherwise be edited twice, once per run, gaining two
+    revisions in its history for what is one correction - and the expensive part, reading
+    the revision history of every candidate work item, would be repeated per run.
 
 .PARAMETER SinceDays
     How far back to look, in days. Default 30. Links added before this are left alone.
@@ -96,7 +101,7 @@ param(
     [string]$Project,
 
     [Parameter(Mandatory = $true)]
-    [string]$RepoName,
+    [string[]]$RepoName,
 
     [ValidateRange(1, 3650)]
     [int]$SinceDays = 30,
@@ -201,13 +206,20 @@ function Get-OrgName { param([string]$Url) ($Url.TrimEnd('/') -split '/')[-1] }
 #region Discovery --------------------------------------------------------------
 
 function Get-TargetRepositoryId {
-    param([string]$Name)
+    # id -> name, for every named repository. Resolved up front so a typo fails now
+    # rather than after several minutes of scanning.
+    param([string[]]$Name)
+
     $org = Get-OrgName -Url $Collection
     $projectSeg = [uri]::EscapeDataString($Project)
-    $nameSeg = [uri]::EscapeDataString($Name)
-    $repo = Invoke-Ado -Uri "https://dev.azure.com/$org/$projectSeg/_apis/git/repositories/$nameSeg`?api-version=7.1"
-    if (-not $repo.id) { throw "Repository '$Name' was not found in project '$Project'." }
-    return $repo.id
+    $map = [ordered]@{}
+    foreach ($one in $Name) {
+        $nameSeg = [uri]::EscapeDataString($one)
+        $repo = Invoke-Ado -Uri "https://dev.azure.com/$org/$projectSeg/_apis/git/repositories/$nameSeg`?api-version=7.1"
+        if (-not $repo.id) { throw "Repository '$one' was not found in project '$Project'." }
+        $map[[string]$repo.id] = $repo.name
+    }
+    return $map
 }
 
 function Get-CandidateWorkItemId {
@@ -283,7 +295,11 @@ function Write-WhatIfReport {
     Write-Host ("  work items      : {0:N0}" -f $byItem.Count)
     Write-Host ("  links           : {0:N0}" -f @($Links).Count)
     Write-Host ("  projects        : {0:N0}" -f $projects.Count)
-    Write-Host ("  repository      : {0}" -f $RepoName)
+    Write-Host ("  repositories    : {0}" -f ($RepoName -join ', '))
+    $perRepo = @($Links | Group-Object Repo | Sort-Object Count -Descending)
+    if ($perRepo.Count -gt 1) {
+        foreach ($r in $perRepo) { Write-Host ("      {0,-42} {1,6:N0} link(s)" -f $r.Name, $r.Count) }
+    }
     if ($dates.Count) {
         Write-Host ("  links added     : {0:yyyy-MM-dd HH:mm} .. {1:yyyy-MM-dd HH:mm}" -f $dates[0], $dates[-1])
     }
@@ -394,8 +410,9 @@ function Remove-WorkItemLink {
 Initialize-Auth
 
 $since = (Get-Date).Date.AddDays(-$SinceDays)
-$repoId = Get-TargetRepositoryId -Name $RepoName
-Write-Host "==> Repository '$RepoName' = $repoId" -ForegroundColor DarkGray
+$repoMap = Get-TargetRepositoryId -Name $RepoName
+$repoIds = @($repoMap.Keys)
+foreach ($id in $repoIds) { Write-Host "==> Repository '$($repoMap[$id])' = $id" -ForegroundColor DarkGray }
 
 if (-not $EvidencePath) {
     # The workspace output folder when there is one - machine-local and gitignored -
@@ -405,7 +422,9 @@ if (-not $EvidencePath) {
         try { $root = (Get-AutomationWorkspace).OutputFolder } catch { $root = $null }
     }
     if (-not $root) { $root = (Get-Location).Path }
-    $EvidencePath = Join-Path $root ("commit-mention-links-{0}.csv" -f ($RepoName -replace '[^\w\.-]', '-'))
+    $tag = ($RepoName -join '-') -replace '[^\w\.-]', '-'
+    if ($tag.Length -gt 60) { $tag = "{0}-and-{1}-more" -f (@($RepoName)[0] -replace '[^\w\.-]', '-'), (@($RepoName).Count - 1) }
+    $EvidencePath = Join-Path $root ("commit-mention-links-{0}.csv" -f $tag)
 }
 $evidenceDir = Split-Path -Parent $EvidencePath
 if ($evidenceDir -and -not (Test-Path -LiteralPath $evidenceDir)) {
@@ -424,7 +443,7 @@ $scanBlock = {
     $id = $_
     $h = $using:headersForParallel
     $who = $using:ChangedBy
-    $rid = $using:repoId
+    $rids = $using:repoMap
     $since = $using:since
     $org = $using:org
 
@@ -486,10 +505,18 @@ $scanBlock = {
             if (-not $rev.relations) { continue }
             foreach ($rel in @($rev.relations.added)) {
                 if ($rel.rel -ne 'ArtifactLink') { continue }
-                if ($rel.url -notlike "*$rid*") { continue }
+                # Which of the named repositories this link points at, if any. Recorded
+                # so the evidence says where each link came from when several
+                # repositories are cleaned in one pass.
+                $matched = $null
+                foreach ($candidate in $rids.Keys) {
+                    if ($rel.url -like "*$candidate*") { $matched = $rids[$candidate]; break }
+                }
+                if (-not $matched) { continue }
                 [pscustomobject]@{
                     Kind       = 'link'
                     WorkItemId = $id
+                    Repo       = $matched
                     Rev        = $rev.rev
                     AddedOn    = $when
                     AddedBy    = $by
@@ -557,12 +584,12 @@ if ($readErrors.Count -gt 0) {
 }
 
 $evidenceRows = @($links | Sort-Object WorkItemId, Commit |
-        Select-Object WorkItemId, Rev, AddedOn, AddedBy, Commit, Url)
+        Select-Object WorkItemId, Repo, Rev, AddedOn, AddedBy, Commit, Url)
 if ($evidenceRows.Count) {
     $evidenceRows | Export-Csv -LiteralPath $EvidencePath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 }
 else {
-    Set-Content -LiteralPath $EvidencePath -Value '"WorkItemId","Rev","AddedOn","AddedBy","Commit","Url"' -Encoding UTF8 -WhatIf:$false
+    Set-Content -LiteralPath $EvidencePath -Value '"WorkItemId","Repo","Rev","AddedOn","AddedBy","Commit","Url"' -Encoding UTF8 -WhatIf:$false
 }
 Write-Host "==> Evidence written: $EvidencePath ($($evidenceRows.Count) row(s))" -ForegroundColor Green
 
@@ -619,7 +646,19 @@ foreach ($group in $items) {
     if ($done.ContainsKey($workItemId)) { continue }
 
     $urls = @($group.Group | ForEach-Object { $_.Url })
-    $what = "work item $workItemId ($($urls.Count) link(s))"
+
+    # The ShouldProcess target names the links themselves, not just how many. 'work item
+    # 84191 (3 link(s))' is not something anyone can check; the commit ids, their
+    # repository and when they were added are.
+    $describe = if ($summary.ContainsKey($workItemId)) {
+        $i = $summary[$workItemId]
+        "work item $workItemId [$($i.Project) / $($i.Type) / $($i.State)] $($i.Title)"
+    }
+    else { "work item $workItemId" }
+    $what = $describe + [Environment]::NewLine + (@($group.Group | Sort-Object AddedOn | ForEach-Object {
+                "    {0}  {1}  added {2:yyyy-MM-dd HH:mm} by {3}" -f
+                $_.Commit.Substring(0, [math]::Min(8, $_.Commit.Length)), $_.Repo, $_.AddedOn, $_.AddedBy
+            }) -join [Environment]::NewLine)
 
     if (-not $PSCmdlet.ShouldProcess($what, 'Remove commit mention link(s)')) { continue }
 
@@ -631,7 +670,7 @@ foreach ($group in $items) {
         if ($title.Length -gt 70) { $title = $title.Substring(0, 67) + '...' }
 
         $detail = @($group.Group | Sort-Object AddedOn | ForEach-Object {
-                "      {0}  added {1:yyyy-MM-dd HH:mm} by {2}" -f $_.Commit.Substring(0, [math]::Min(8, $_.Commit.Length)), $_.AddedOn, $_.AddedBy
+                "      {0}  {1}  added {2:yyyy-MM-dd HH:mm} by {3}" -f $_.Commit.Substring(0, [math]::Min(8, $_.Commit.Length)), $_.Repo, $_.AddedOn, $_.AddedBy
             }) -join [Environment]::NewLine
 
         $query = @"

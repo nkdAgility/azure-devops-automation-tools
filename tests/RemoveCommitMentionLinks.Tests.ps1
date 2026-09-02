@@ -30,6 +30,29 @@ Describe 'Remove-CommitMentionLinks shape' {
             Should -Match 'High'
     }
 
+    It 'accepts several repositories in one pass' {
+        # A work item mentioned by commits in two migrated repositories would otherwise be
+        # edited once per run - two revisions in its history for one correction - and the
+        # expensive revision-history scan would be repeated per run.
+        $p = $script:EngineAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'RepoName' }
+        $p.StaticType.Name | Should -BeExactly 'String[]'
+    }
+
+    It 'records which repository each link came from' {
+        $script:Text | Should -Match 'Repo       = \$matched'
+        $script:Text | Should -Match 'Select-Object WorkItemId, Repo, Rev'
+        # The empty-file header has to match the columns, or a zero-row evidence file
+        # disagrees with a populated one.
+        $script:Text | Should -Match '"WorkItemId","Repo","Rev"'
+    }
+
+    It 'resolves every named repository up front' {
+        # A typo should fail immediately, not after several minutes of scanning.
+        $fn = Get-EngineFunctionText -Name 'Get-TargetRepositoryId'
+        $fn | Should -Match 'foreach \(\$one in \$Name\)'
+        $fn | Should -Match 'was not found in project'
+    }
+
     It 'requires the repository to be named' {
         # Without a repository filter this would strip every commit link in the window,
         # including other people's legitimate ones.
@@ -61,8 +84,11 @@ Describe 'Narrowness - what it will and will not touch' {
         $fn | Should -Match "rel -eq 'ArtifactLink'"
     }
 
-    It 'filters links to the named repository' {
-        $script:Discovery | Should -Match '\$rel\.url -notlike "\*\$rid\*"'
+    It 'filters links to the named repositories' {
+        # A link is kept only when it points at one of the repositories asked for, and
+        # skipped outright otherwise.
+        $script:Discovery | Should -Match 'foreach \(\$candidate in \$rids\.Keys\)'
+        $script:Discovery | Should -Match 'if \(-not \$matched\) \{ continue \}'
     }
 
     It 'honours the identity filter when one is given' {
@@ -214,6 +240,18 @@ Describe 'Per-work-item confirmation' {
         # A prompt showing only an id is not a decision anyone can make.
         $script:Text | Should -Match 'removing \$\(\$urls\.Count\) commit link\(s\) in ONE edit'
         $script:Text | Should -Match '\$_\.Commit\.Substring'
+    }
+
+    It 'names the links in the ShouldProcess target too, not just a count' {
+        # 'work item 84191 (3 link(s))' cannot be checked against anything; the commit
+        # ids, their repository and when they were added can.
+        $script:Text | Should -Match '\$what = \$describe'
+        foreach ($field in '\$i\.Project', '\$i\.Type', '\$i\.State', '\$i\.Title') {
+            $script:Text | Should -Match $field -Because 'the target names what the work item is, not just its id'
+        }
+        # And the commit detail is appended to it, not only to the ShouldContinue prompt.
+        $script:Text | Should -Match '\$what = \$describe \+ \[Environment\]::NewLine'
+        $script:Text | Should -Not -Match '\$what = "work item \$workItemId \(\$\(\$urls\.Count\) link\(s\)\)"'
     }
 
     It 'makes exactly one edit per work item, whatever its link count' {
