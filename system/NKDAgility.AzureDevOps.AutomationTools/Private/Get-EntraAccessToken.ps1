@@ -102,9 +102,7 @@ function Get-EntraAccessToken {
         try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue | Out-Null }
         catch { Write-Verbose "Could not disable the WAM broker: $($_.Exception.Message)" }
 
-        $connect = @{ TenantId = $tenantId; ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
-        # Pins the sign-in to the intended identity instead of an account picker.
-        if ($account) { $connect.AccountId = $account }
+        $connect = New-AzureDevOpsConnectArgs -TenantId $tenantId -Resource $adoResource -AccountId $account
 
         try {
             Connect-AzAccount @connect | Out-Null
@@ -133,7 +131,24 @@ function Get-EntraAccessToken {
         }
     }
 
-    $token = Get-AzAccessToken -ResourceUrl $adoResource -TenantId $tenantId -ErrorAction Stop
+    # A context can exist and still be unable to mint a token for Azure DevOps: tenants
+    # with conditional access can require MFA for THAT RESOURCE specifically, and Az says
+    # so - 'User interaction is required... rerun Connect-AzAccount with -AuthScope'. The
+    # sign-in block above is skipped in that case, because a context matched, so the
+    # recovery has to happen here: sign in again scoped to the resource, then retry once.
+    $token = $null
+    try {
+        $token = Get-AzAccessToken -ResourceUrl $adoResource -TenantId $tenantId -ErrorAction Stop
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'interaction is required|AuthScope|interactive') { throw }
+        Write-FixStep "Azure DevOps needs its own sign-in (conditional access); re-authenticating scoped to it ..."
+        try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue | Out-Null }
+        catch { Write-Verbose "Could not disable the WAM broker: $($_.Exception.Message)" }
+        $reconnect = New-AzureDevOpsConnectArgs -TenantId $tenantId -Resource $adoResource -AccountId $account
+        Connect-AzAccount @reconnect | Out-Null
+        $token = Get-AzAccessToken -ResourceUrl $adoResource -TenantId $tenantId -ErrorAction Stop
+    }
     # AsSecureString became the default in newer Az.Accounts versions.
     $value = if ($token.Token -is [System.Security.SecureString]) {
         [System.Net.NetworkCredential]::new('', $token.Token).Password
