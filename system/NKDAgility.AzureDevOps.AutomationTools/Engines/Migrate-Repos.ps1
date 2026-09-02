@@ -1380,6 +1380,13 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 # fallbacks, renewed per repository and wiki (see Initialize-SourceAuth).
 $script:SourceAuthMode = $null
 $script:TargetAuthMode = $null
+
+# Declared before anything reads it. Get-RepositoryOption caches the target project id
+# here on first use and tests it with 'if (-not $script:TargetProjectId)' - and under
+# Set-StrictMode reading a variable that has never been assigned is an error, not $null,
+# so every repository failed with 'the variable cannot be retrieved because it has not
+# been set' before a single option could be read.
+$script:TargetProjectId = $null
 Initialize-SourceAuth
 Initialize-TargetAuth
 
