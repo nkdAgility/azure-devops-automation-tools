@@ -394,7 +394,21 @@ Describe 'Push watchdog and verification' {
                 param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-GitWatched'
             }, $true)[0].Extent.Text
         $watched | Should -Not -Match 'RedirectStandardOutput'
-        $watched | Should -Match '-NoNewWindow -PassThru'
+        # Inherited streams: no redirection means git writes straight to the console.
+        $watched | Should -Match '\$psi\.UseShellExecute = \$false'
+        $watched | Should -Not -Match 'RedirectStandardError'
+    }
+
+    It 'passes each git argument separately, so the auth header survives its spaces' {
+        # Start-Process -ArgumentList JOINS an array with spaces and quotes nothing, which
+        # split 'http.extraheader=AUTHORIZATION: Bearer <token>' and made git read 'Bearer'
+        # as a command. Every push through the watcher failed that way, falling back to a
+        # per-branch path that only worked because it uses a different invoker.
+        $script:Text | Should -Not -Match 'Start-Process -FilePath ''git'' -ArgumentList'
+        foreach ($name in 'Invoke-GitWatched', 'Invoke-GitWithHeartbeat') {
+            $fn = Get-EngineFunctionSource -Name $name
+            $fn | Should -Match '\$psi\.ArgumentList\.Add' -Because "$name must add arguments individually"
+        }
     }
 
     It 'requires BOTH idleness and no connection before calling a push stalled' {

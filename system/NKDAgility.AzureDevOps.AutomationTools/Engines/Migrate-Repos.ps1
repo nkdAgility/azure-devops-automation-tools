@@ -809,9 +809,25 @@ function Invoke-GitWithHeartbeat {
     $started = Get-Date
 
     try {
-        $process = Start-Process -FilePath 'git' -ArgumentList $GitArgs `
-            -WorkingDirectory $WorkingDirectory -NoNewWindow -PassThru `
-            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        # ArgumentList on ProcessStartInfo, never Start-Process -ArgumentList: that joins
+        # the array with spaces and quotes nothing, which splits
+        # 'http.extraheader=AUTHORIZATION: Bearer <token>' and makes git read 'Bearer' as
+        # a command. Latent here only because the LFS path is skipped when a repository
+        # has no LFS.
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = 'git'
+        $psi.WorkingDirectory = $WorkingDirectory
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        foreach ($a in $GitArgs) { [void]$psi.ArgumentList.Add([string]$a) }
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+        [void]$process.Start()
+        # Read both streams asynchronously to files: a full pipe buffer would deadlock a
+        # process that is still being waited on.
+        $outTask = $process.StandardOutput.ReadToEndAsync()
+        $errTask = $process.StandardError.ReadToEndAsync()
 
         $lastBeat = $started
         while (-not $process.HasExited) {
@@ -832,11 +848,14 @@ function Invoke-GitWithHeartbeat {
 
         $script:LastHeartbeatExitCode = $process.ExitCode
         $script:LastHeartbeatDuration = (Get-Date) - $started
-        $script:LastHeartbeatStdErr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
-        return @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue)
+        $script:LastHeartbeatStdErr = $errTask.GetAwaiter().GetResult()
+        $stdout = $outTask.GetAwaiter().GetResult()
+        if (-not $stdout) { return @() }
+        return @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
     }
     finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+        if ($process) { $process.Dispose() }
     }
 }
 
@@ -907,8 +926,21 @@ function Invoke-GitWatched {
     )
 
     $started = Get-Date
-    $process = Start-Process -FilePath 'git' -ArgumentList $GitArgs `
-        -WorkingDirectory $WorkingDirectory -NoNewWindow -PassThru
+
+    # ProcessStartInfo.ArgumentList, NOT Start-Process -ArgumentList. The latter JOINS the
+    # array with spaces and quotes nothing, so the auth argument
+    # 'http.extraheader=AUTHORIZATION: Bearer <token>' was split at its spaces and git read
+    # 'Bearer' as a command: "git: 'Bearer' is not a git command". Every push through here
+    # failed, silently falling back to per-branch pushes that happened to work because they
+    # go through a different invoker. ArgumentList escapes each argument individually.
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    foreach ($a in $GitArgs) { [void]$psi.ArgumentList.Add([string]$a) }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    [void]$process.Start()
 
     $lastBeat = $started
     $lastBusy = $started
