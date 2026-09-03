@@ -320,6 +320,31 @@ function Invoke-AdoApi {
     Invoke-RestMethod @params
 }
 
+function Invoke-AdoWebRequest {
+    <# Invoke-WebRequest with the same Windows-integrated rule as Invoke-AdoApi:
+       empty AUTH headers mean send nothing and let the stack negotiate. For the
+       calls Invoke-AdoApi cannot make - reading raw response headers (paging
+       tokens, Content-Range), -OutFile downloads, bodies already serialized.
+       ExtraHeaders (e.g. a Range probe) ride along without counting as a
+       credential; ExtraArgs pass straight through to Invoke-WebRequest. #>
+    param(
+        [string]$Uri,
+        [hashtable]$Headers,
+        [hashtable]$ExtraHeaders,
+        [hashtable]$ExtraArgs
+    )
+    $h = @{}
+    if ($Headers) { foreach ($k in $Headers.Keys) { $h[$k] = $Headers[$k] } }
+    $authPresent = $h.Count -gt 0
+    if ($ExtraHeaders) { foreach ($k in $ExtraHeaders.Keys) { $h[$k] = $ExtraHeaders[$k] } }
+
+    $request = @{ Uri = $Uri; ErrorAction = 'Stop' }
+    if ($h.Count) { $request.Headers = $h }
+    if (-not $authPresent) { $request.UseDefaultCredentials = $true }
+    if ($ExtraArgs) { foreach ($k in $ExtraArgs.Keys) { $request[$k] = $ExtraArgs[$k] } }
+    Invoke-WebRequest @request
+}
+
 function Write-Step {
     param([string]$Message)
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -341,11 +366,9 @@ function Get-HttpContentLength {
     # 'Content-Range: bytes 0-0/<total>' header, giving the full size while
     # transferring a single byte. Falls back to Content-Length, then 0.
     param([string]$Uri, [hashtable]$Headers)
-    $h = @{}
-    foreach ($k in $Headers.Keys) { $h[$k] = $Headers[$k] }
-    $h['Range'] = 'bytes=0-0'
     try {
-        $resp = Invoke-WebRequest -Uri $Uri -Headers $h -Method Get -ErrorAction Stop
+        $resp = Invoke-AdoWebRequest -Uri $Uri -Headers $Headers `
+            -ExtraHeaders @{ Range = 'bytes=0-0' } -ExtraArgs @{ Method = 'Get' }
         $range = $resp.Headers['Content-Range']
         if ($range) {
             $total = ("$range" -split '/')[-1]
@@ -683,7 +706,7 @@ function Get-TargetGraphGroups {
     try {
         do {
             $uri = if ($token) { "$base&continuationToken=$([uri]::EscapeDataString($token))" } else { $base }
-            $resp = Invoke-WebRequest -Uri $uri -Headers $script:TargetHeaders -Method Get -ErrorAction Stop
+            $resp = Invoke-AdoWebRequest -Uri $uri -Headers $script:TargetHeaders -ExtraArgs @{ Method = 'Get' }
             $token = $resp.Headers['X-MS-ContinuationToken']
             if ($token -is [array]) { $token = $token | Select-Object -First 1 }
             $data = $resp.Content | ConvertFrom-Json
@@ -765,8 +788,8 @@ function Set-FeedPermission {
         "/feeds/$FeedId/permissions?api-version=7.1-preview.1"
     $item = @{ identityDescriptor = $IdentityDescriptor; role = $Role }
     $json = '[' + ($item | ConvertTo-Json -Depth 5 -Compress) + ']'
-    Invoke-RestMethod -Uri $url -Headers $script:TargetHeaders -Method Patch `
-        -Body $json -ContentType 'application/json'
+    Invoke-AdoWebRequest -Uri $url -Headers $script:TargetHeaders `
+        -ExtraArgs @{ Method = 'Patch'; Body = $json; ContentType = 'application/json' } | Out-Null
 }
 
 function Remove-FeedPermission {
@@ -1168,7 +1191,7 @@ function Save-VersionToCache {
             $file = Join-Path $dir "$name.$ver.nupkg"
             if (-not (Test-Path -LiteralPath $file)) {
                 $url = "$base/feeds/$($Feed.id)/nuget/packages/$name/versions/$ver/content?api-version=7.1-preview.1"
-                Invoke-WebRequest -Uri $url -Headers $script:SourceHeaders -OutFile $file
+                Invoke-AdoWebRequest -Uri $url -Headers $script:SourceHeaders -ExtraArgs @{ OutFile = $file } | Out-Null
             }
             $paths.Add($file)
         }
@@ -1177,7 +1200,7 @@ function Save-VersionToCache {
             $file = Join-Path $dir "$safe-$ver.tgz"
             if (-not (Test-Path -LiteralPath $file)) {
                 $url = "$base/feeds/$($Feed.id)/npm/packages/$name/versions/$ver/content?api-version=7.1-preview.1"
-                Invoke-WebRequest -Uri $url -Headers $script:SourceHeaders -OutFile $file
+                Invoke-AdoWebRequest -Uri $url -Headers $script:SourceHeaders -ExtraArgs @{ OutFile = $file } | Out-Null
             }
             $paths.Add($file)
         }
@@ -1186,7 +1209,7 @@ function Save-VersionToCache {
                 $fileName = ($dl -split '/')[-1]
                 $file = Join-Path $dir $fileName
                 if (-not (Test-Path -LiteralPath $file)) {
-                    Invoke-WebRequest -Uri $dl -Headers $script:SourceHeaders -OutFile $file
+                    Invoke-AdoWebRequest -Uri $dl -Headers $script:SourceHeaders -ExtraArgs @{ OutFile = $file } | Out-Null
                 }
                 $paths.Add($file)
             }
@@ -1218,7 +1241,7 @@ function Save-VersionToCache {
                     $file = Join-Path $dir "$artifactId-$ver.$ext"
                     if (-not (Test-Path -LiteralPath $file)) {
                         $url = "$base/feeds/$($Feed.id)/maven/$groupPath/$artifactId/$ver/$artifactId-$ver.$ext?api-version=7.1-preview.1"
-                        try { Invoke-WebRequest -Uri $url -Headers $script:SourceHeaders -OutFile $file }
+                        try { Invoke-AdoWebRequest -Uri $url -Headers $script:SourceHeaders -ExtraArgs @{ OutFile = $file } | Out-Null }
                         catch { if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }; continue }
                     }
                     if (Test-Path -LiteralPath $file) { $paths.Add($file) }
@@ -1247,7 +1270,7 @@ function Get-PyPiFileUrls {
 
     $indexUrl = "$(Get-PackagingWebBase -OrgUrl $SourceOrg -Project $SourceProject)_packaging/$($Feed.name)/pypi/simple/$nameNorm/"
     try {
-        $html = (Invoke-WebRequest -Uri $indexUrl -Headers $script:SourceHeaders -ErrorAction Stop).Content
+        $html = (Invoke-AdoWebRequest -Uri $indexUrl -Headers $script:SourceHeaders).Content
     }
     catch { return @() }
 

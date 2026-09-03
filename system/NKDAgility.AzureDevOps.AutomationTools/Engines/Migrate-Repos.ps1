@@ -541,12 +541,16 @@ function Set-RepositoryOption {
     # [ordered] matters: a plain hashtable serialises its keys in an arbitrary order
     # that varies between runs, and a request body to an undocumented endpoint should
     # be byte-for-byte reproducible when someone has to debug it against a capture.
+    #
+    # Sent through Invoke-AdoApi (which serialises the outer object) so the write
+    # authenticates the same way every other request does - a raw Invoke-RestMethod
+    # here went out anonymous under Windows integrated auth, and the read half
+    # working while the write half 401'd looked exactly like a TFS incompatibility.
     $inner = ([ordered]@{ key = $Key; value = $Value } | ConvertTo-Json -Compress)
-    $body = ([ordered]@{ option = $inner } | ConvertTo-Json -Compress)
 
     try {
-        Invoke-RestMethod -Uri $url -Headers $script:TargetHeaders -Method Post `
-            -Body $body -ContentType 'application/json' | Out-Null
+        Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders -Method Post `
+            -Body ([ordered]@{ option = $inner }) | Out-Null
     }
     catch {
         throw "Could not set repository option '$Key' (this endpoint is undocumented and may have changed): $($_.Exception.Message)"

@@ -249,3 +249,26 @@ Describe 'Git auth args helper (Get-AzureDevOpsGitAuthArgs)' {
         $offenders -join ', ' | Should -BeNullOrEmpty -Because 'a site that interpolates the header itself will emit a BLANK header under Windows auth instead of omitting it'
     }
 }
+
+Describe 'Raw REST calls never carry inline auth headers' {
+    # Under Windows integrated auth the resolved header set is EMPTY, and only the
+    # engine invokers (Invoke-AdoApi and friends) translate that emptiness into
+    # -UseDefaultCredentials. A raw Invoke-RestMethod/Invoke-WebRequest with an
+    # inline -Headers argument bypasses that rule and goes out anonymous - the
+    # read half of the repository-options code worked while the write half 401'd,
+    # which looked exactly like a TFS incompatibility. Splatted calls are the
+    # invokers themselves; inline -Headers is the tripwire.
+    It 'passes headers only through the rule-carrying invokers' {
+        $enginesDir = Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Engines'
+        $offenders = foreach ($file in Get-ChildItem -Path $enginesDir -Filter '*.ps1') {
+            $lineNumber = 0
+            foreach ($line in Get-Content -LiteralPath $file.FullName) {
+                $lineNumber++
+                if ($line -match 'Invoke-(RestMethod|WebRequest)\b[^\r\n]*-Headers\s') {
+                    "$($file.Name):$lineNumber"
+                }
+            }
+        }
+        $offenders -join ', ' | Should -BeNullOrEmpty -Because 'an inline -Headers on a raw call sends an empty header set anonymously under Windows auth instead of negotiating'
+    }
+}
