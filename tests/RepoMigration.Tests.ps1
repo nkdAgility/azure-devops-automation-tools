@@ -218,11 +218,77 @@ Describe 'Migrate-Repos engine shape' {
         $forcedAt | Should -BeLessThan $pushAt -Because 'the record is written before the overwrite'
     }
 
-    It 'forces every segment of a diverged branch, not only the tip' {
-        # The FIRST segment already conflicts with the target's discarded tip, so forcing
-        # only the final push would fail before reaching it.
-        ([regex]::Matches($script:Text, "if \(\`$forcePush\) \{ @\('--force'\) \}")).Count |
-            Should -Be 2 -Because 'both the segment pushes and the tip push need it'
+    It 'forces every push path of a diverged branch, not only the tip' {
+        # The FIRST push already conflicts with the target's discarded tip, so forcing
+        # only the final one would fail before reaching it. Asserted as 'every push
+        # construction carries the flag' rather than a count, so adding a path (the
+        # single-push route did exactly that) cannot quietly leave one unforced.
+        $fn = Get-EngineFunctionSource -Name 'Push-BranchSegmented'
+        $pushBuilds = [regex]::Matches($fn, "@\('push'\)[^\r\n]*")
+        $pushBuilds.Count | Should -BeGreaterThan 1
+        foreach ($build in $pushBuilds) {
+            $build.Value | Should -Match "if \(\`$forcePush\) \{ @\('--force'\) \}" -Because "every push path must honour it: $($build.Value)"
+        }
+    }
+
+    It 'measures the WHOLE outstanding payload and pushes once when it fits' {
+        # Segmenting is for one case only: more than a single push can carry. That is a
+        # property of everything outstanding, not of any one branch. Measured on this
+        # engagement mid-migration: 413 MB left across every ref - one push, where
+        # per-branch segmenting was queuing tens of thousands of pushes of nothing.
+        $fn = Get-EngineFunctionSource -Name 'Push-Segmented'
+        $fn | Should -Match "Measure-PushPayload -Branch '--all'"
+        $fn | Should -Match 'Fits in one push'
+        $fn | Should -Match 'Push-Mirror -CloneDir \$CloneDir -TargetRemote \$TargetRemote'
+        # And the whole-repo decision must come BEFORE the per-branch loop.
+        $wholeAt = $fn.IndexOf("Measure-PushPayload -Branch '--all'")
+        $perBranchAt = $fn.IndexOf('Push-BranchSegmented -Branch $branch')
+        $wholeAt | Should -BeGreaterThan 0
+        $wholeAt | Should -BeLessThan $perBranchAt
+    }
+
+    It 'falls back to per-branch when the batch push is rejected' {
+        # A diverged branch rejects the batch; per-branch can force those.
+        $fn = Get-EngineFunctionSource -Name 'Push-Segmented'
+        $fn | Should -Match 'single push rejected'
+        $fn | Should -Match 'falling back to per-branch'
+    }
+
+    It 'measures the payload rather than segmenting by commit count' {
+        # Commit count is a poor proxy: one 22,173-commit branch carried 4.97 GB while
+        # branches of similar length sharing its history carried nothing at all, and
+        # segmenting those produced pushes reporting 'Total 0 (delta 0)' - thousands of
+        # ref updates transferring nothing.
+        $fn = Get-EngineFunctionSource -Name 'Measure-PushPayload'
+        $fn | Should -Match '--not "--remotes=\$TargetRemote"' -Because 'the payload is only what the target lacks'
+        $fn | Should -Match 'objectsize:disk'
+        $script:Text | Should -Match '\$payload = Measure-PushPayload'
+    }
+
+    It 'sends a branch in one push when it fits, however many commits it spans' {
+        $fn = Get-EngineFunctionSource -Name 'Push-BranchSegmented'
+        $fn | Should -Match 'if \(\$payload -le \$limitBytes\)'
+        $fn | Should -Match 'one push'
+    }
+
+    It 'derives the segment size from the measured payload' {
+        $fn = Get-EngineFunctionSource -Name 'Push-BranchSegmented'
+        $fn | Should -Match '\$needed = \[math\]::Ceiling\(\$payload / \$limitBytes\)'
+        $fn | Should -Match '\$effectiveBatch = \[math\]::Max\(1, \[math\]::Ceiling\(\$total / \$needed\)\)'
+        # And the loop must use it, not the parameter it replaces.
+        $fn | Should -Match 'for \(\$i = \$effectiveBatch - 1; \$i -lt \$total; \$i \+= \$effectiveBatch\)'
+    }
+
+    It 'falls back to commit-count segments when the payload cannot be measured' {
+        $fn = Get-EngineFunctionSource -Name 'Push-BranchSegmented'
+        $fn | Should -Match 'payload could not be measured'
+        $fn | Should -Match '\$effectiveBatch = \$BatchSize'
+    }
+
+    It 'leaves headroom under the push limit for packing overhead' {
+        # The measurement is of on-disk sizes; a push packs, and packing is not free.
+        $fn = Get-EngineFunctionSource -Name 'Push-BranchSegmented'
+        $fn | Should -Match '\$MaxPushSizeGB \* 1GB \* 0\.8'
     }
 
     It 'does not shadow the automatic $args variable' {
@@ -378,3 +444,4 @@ Describe 'Push watchdog and verification' {
         $fn | Should -Match 'continuing without it'
     }
 }
+

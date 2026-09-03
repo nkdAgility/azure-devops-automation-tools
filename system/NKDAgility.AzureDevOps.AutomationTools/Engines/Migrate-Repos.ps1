@@ -1148,6 +1148,35 @@ function Push-Mirror {
     }
 }
 
+function Measure-PushPayload {
+    <# Bytes a push of this branch would actually send, or -1 if it cannot be measured.
+
+       The ~5 GB limit is about BYTES, and the bytes sent are only the objects the target
+       does not already have - which is what '--not --remotes/<target>' excludes. That
+       makes this both correct and cheap: the first branch of a shared history measures
+       the bulk of the repository, every branch after it measures almost nothing.
+
+       Commit count, which this replaces as the basis for segmenting, was a poor proxy.
+       On this engagement one branch of 22,173 commits carried 4.97 GB - at the limit -
+       while branches of similar length that shared its history carried almost nothing.
+       The default of 2,000 commits split the first into twelve pushes and every other
+       branch into ten or more, re-offering objects the target already had. #>
+    param([string]$Branch, [string]$TargetRemote)
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        $bytes = 0L
+        $oids = & git rev-list --objects $Branch --not "--remotes=$TargetRemote" 2>$null
+        if ($LASTEXITCODE -ne 0) { return -1 }
+        if (-not $oids) { return 0 }
+        $sizes = $oids | ForEach-Object { ($_ -split ' ')[0] } | & git cat-file --batch-check='%(objectsize:disk)' 2>$null
+        if ($LASTEXITCODE -ne 0) { return -1 }
+        foreach ($s in $sizes) { if ($s -match '^\d+$') { $bytes += [int64]$s } }
+        return $bytes
+    }
+    catch { return -1 }
+}
+
 function Push-BranchSegmented {
     <# Pushes one branch's history to the target in commit-count segments so no single
        push exceeds the Azure DevOps limit.
@@ -1209,8 +1238,42 @@ function Push-BranchSegmented {
     $total = $commits.Count
     if ($total -eq 0) { return }
 
+    # How many segments this branch ACTUALLY needs, measured rather than assumed.
+    #
+    # The ~5 GB limit is about bytes, and the bytes a push sends are only the objects the
+    # target lacks. Once the first branch of a shared history is in, later branches send
+    # nothing at all - their pushes report 'Total 0 (delta 0), reused 0' and are pure ref
+    # updates. Segmenting those by commit count turned 2,908 branches into tens of
+    # thousands of pushes of nothing, seconds apiece.
+    #
+    # 0.8 of the limit leaves room for the packing overhead a push adds over the on-disk
+    # sizes measured here.
+    $limitBytes = [int64]($MaxPushSizeGB * 1GB * 0.8)
+    $payload = Measure-PushPayload -Branch $Branch -TargetRemote $TargetRemote
+    $effectiveBatch = $BatchSize
+
+    if ($payload -ge 0) {
+        $mb = [math]::Round($payload / 1MB, 1)
+        if ($payload -le $limitBytes) {
+            $tipOnly = "$Branch`:refs/heads/$Branch"
+            $oneShot = @('push') + $(if ($forcePush) { @('--force') } else { @() }) + @($TargetRemote, $tipOnly)
+            Write-Host ("      [{0}] {1} MB to send; one push ({2} commit(s))" -f $Branch, $mb, $total) -ForegroundColor DarkGray
+            Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $oneShot
+            return
+        }
+        # Enough segments to keep each push under the limit, and no more.
+        $needed = [math]::Ceiling($payload / $limitBytes)
+        $effectiveBatch = [math]::Max(1, [math]::Ceiling($total / $needed))
+        Write-Host ("      [{0}] {1} MB to send; {2} segment(s) of ~{3:N0} commits" -f
+            $Branch, $mb, $needed, $effectiveBatch) -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host ("      [{0}] payload could not be measured; falling back to {1}-commit segments" -f
+            $Branch, $BatchSize) -ForegroundColor DarkYellow
+    }
+
     $segment = 0
-    for ($i = $BatchSize - 1; $i -lt $total; $i += $BatchSize) {
+    for ($i = $effectiveBatch - 1; $i -lt $total; $i += $effectiveBatch) {
         $sha = $commits[$i]
         $segment++
         $refspec = "$sha`:refs/heads/$Branch"
@@ -1249,7 +1312,35 @@ function Push-Segmented {
             Write-Host '      (nothing to read - treating the target as empty)' -ForegroundColor DarkGray
         }
 
-        Write-Host ("    Segmented push of {0} branch(es), batch size {1} commits." -f $branches.Count, $BatchSize) -ForegroundColor Green
+        # Segmenting is for ONE case: more than a single push can carry. That is a
+        # property of the whole outstanding payload, not of any branch - so it is
+        # measured once, for everything, and if it fits the entire repository goes in a
+        # single push of every ref.
+        #
+        # Branch-by-branch was the wrong unit. Most of these branches share their history,
+        # so once the bulk is on the target each one has nothing left to send: its pushes
+        # report 'Total 0 (delta 0), reused 0' and cost a second apiece for a ref update.
+        # Across 2,908 branches at a dozen segments each that is tens of thousands of
+        # pushes of nothing.
+        $limitBytes = [int64]($MaxPushSizeGB * 1GB * 0.8)
+        $outstanding = Measure-PushPayload -Branch '--all' -TargetRemote $TargetRemote
+
+        if ($outstanding -ge 0) {
+            Write-Host ("    {0:N0} MB outstanding across every ref." -f ($outstanding / 1MB)) -ForegroundColor Green
+            if ($outstanding -le $limitBytes) {
+                Write-Host '    Fits in one push; sending every branch and tag together.' -ForegroundColor Green
+                try {
+                    Push-Mirror -CloneDir $CloneDir -TargetRemote $TargetRemote
+                    return
+                }
+                catch {
+                    # A diverged branch rejects the batch. Per-branch can force those.
+                    Write-Host "      single push rejected ($($_.Exception.Message)); falling back to per-branch" -ForegroundColor DarkYellow
+                }
+            }
+        }
+
+        Write-Host ("    Per-branch push of {0} branch(es)." -f $branches.Count) -ForegroundColor Green
 
         # A branch that cannot be pushed must not cost the other 2,907. Each is tried on
         # its own, failures are collected, and the repository is failed at the END - so
