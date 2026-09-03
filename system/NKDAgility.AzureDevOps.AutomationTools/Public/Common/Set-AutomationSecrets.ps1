@@ -14,7 +14,9 @@ function Set-AutomationSecrets {
         JSON configs leave AccessToken empty and bind names such as
         MigrationTools__Endpoints__Source__Authentication__AccessToken from the environment.
 
-    Entries with an empty or placeholder token are skipped with a warning. Only variable NAMES are
+    An entry whose AccessToken is still a placeholder is skipped WITH a warning; one with no
+    AccessToken at all is skipped quietly, because ambient identity is the intended state
+    rather than a misconfiguration. Only variable NAMES are
     printed and returned - values are never written to the console or logs.
 
     .PARAMETER SecretsPath
@@ -61,18 +63,27 @@ function Set-AutomationSecrets {
     $keptNames = [System.Collections.Generic.List[string]]::new()
 
     $entraOrgs = [System.Collections.Generic.List[string]]::new()
+    $ambientOrgs = [System.Collections.Generic.List[string]]::new()
 
     foreach ($entry in $entries) {
         if (-not $entry.Org) { continue }
         if (-not $entry.AccessToken) {
-            # An entry naming a SignInAs identity authenticates with Entra, so having no
-            # PAT is the intended state, not a misconfiguration. Warning about it trains
-            # people to ignore warnings - and a real missing token then goes unnoticed.
-            if ($entry.SignInAs) {
+            # No token is usually the INTENDED state, not a misconfiguration - ambient
+            # identity is the doctrine and a PAT only the fallback. Warning about it
+            # trains people to ignore warnings, and a real missing token then goes
+            # unnoticed. Only a leftover placeholder is worth interrupting for.
+            if ($entry.IsPlaceholder) {
+                Write-Warning "Skipping org '$($entry.Org)': its AccessToken is still the '<...>' placeholder. Fill it in, or remove the AccessToken line entirely if this organisation authenticates with Entra or your Windows identity."
+            }
+            elseif ($entry.SignInAs) {
                 $entraOrgs.Add(('{0} (as {1})' -f $entry.Org, $entry.SignInAs))
             }
             else {
-                Write-Warning "Skipping org '$($entry.Org)': no token, and no SignInAs identity to authenticate with Entra instead."
+                # No token, no placeholder, no named identity: whatever the process is
+                # already signed in as. Entra where the collection is Entra-backed, the
+                # current Windows identity on an on-premises Azure DevOps Server - which
+                # is exactly how a domain-joined engineer reaches their own server.
+                $ambientOrgs.Add([string]$entry.Org)
             }
             continue
         }
@@ -99,6 +110,9 @@ function Set-AutomationSecrets {
 
     if ($entraOrgs.Count) {
         Write-FixStep "Entra sign-in (no PAT needed): $($entraOrgs -join ', ')"
+    }
+    if ($ambientOrgs.Count) {
+        Write-FixStep "Ambient identity (no PAT needed): $($ambientOrgs -join ', ')"
     }
     if ($keptNames.Count) {
         Write-FixStep "Left $($keptNames.Count) environment variable(s) already set (CI secrets and shell overrides win): $($keptNames -join ', ')"
