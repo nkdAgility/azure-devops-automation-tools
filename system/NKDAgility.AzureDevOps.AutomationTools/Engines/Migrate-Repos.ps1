@@ -800,6 +800,16 @@ function Sync-SourceLfs {
     finally { Pop-Location }
 }
 
+function Format-Elapsed {
+    <# 'mm:ss' on a TimeSpan is minutes-WITHIN-the-hour, so a push that ran for an hour
+       and three minutes reported '03:23 elapsed' and looked like it had restarted. On a
+       repository whose server-side ref update legitimately runs past the hour that is
+       exactly the wrong thing to tell someone deciding whether to kill the run. #>
+    param([Parameter(Mandatory)][timespan]$Span)
+    if ($Span.TotalHours -ge 1) { return ('{0}:{1:mm\:ss}' -f [math]::Floor($Span.TotalHours), $Span) }
+    return ('{0:mm\:ss}' -f $Span)
+}
+
 function Invoke-GitWithHeartbeat {
     <# Runs git and prints an 'still working' line every few seconds while it does.
 
@@ -855,7 +865,7 @@ function Invoke-GitWithHeartbeat {
                 # 'is this hung?' question outright.
                 $cpu = try { [math]::Round($process.TotalProcessorTime.TotalSeconds) } catch { $null }
                 $cpuText = if ($null -ne $cpu) { ", {0}s CPU" -f $cpu } else { '' }
-                Write-Host ("      still working: {0} - {1:mm\:ss} elapsed{2}" -f $Activity, $elapsed, $cpuText) -ForegroundColor DarkGray
+                Write-Host ("      still working: {0} - {1} elapsed{2}" -f $Activity, (Format-Elapsed -Span $elapsed), $cpuText) -ForegroundColor DarkGray
             }
         }
         $process.WaitForExit()
@@ -979,8 +989,8 @@ function Invoke-GitWatched {
 
         if (($now - $lastBusy).TotalSeconds -ge $StallSeconds) {
             $stalled = $true
-            Write-Warning ("    {0} appears STALLED: {1:mm\:ss} elapsed, no CPU and no network connection for {2}s. Killing it - the repository will be reported as failed and the run continues." -f
-                $Activity, ($now - $started), $StallSeconds)
+            Write-Warning ("    {0} appears STALLED: {1} elapsed, no CPU and no network connection for {2}s. Killing it - the repository will be reported as failed and the run continues." -f
+                $Activity, (Format-Elapsed -Span ($now - $started)), $StallSeconds)
             foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
             break
         }
@@ -989,8 +999,8 @@ function Invoke-GitWatched {
             $lastBeat = $now
             $idleFor = [math]::Round(($now - $lastBusy).TotalSeconds)
             $idleNote = if ($idleFor -ge $HeartbeatSeconds) { ", idle {0}s of {1}s before it is called stalled" -f $idleFor, $StallSeconds } else { '' }
-            Write-Host ("      still working: {0} - {1:mm\:ss} elapsed, {2}s CPU{3}" -f
-                $Activity, ($now - $started), [math]::Round($cpu), $idleNote) -ForegroundColor DarkGray
+            Write-Host ("      still working: {0} - {1} elapsed, {2}s CPU{3}" -f
+                $Activity, (Format-Elapsed -Span ($now - $started)), [math]::Round($cpu), $idleNote) -ForegroundColor DarkGray
         }
     }
 

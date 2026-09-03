@@ -411,6 +411,24 @@ Describe 'Push watchdog and verification' {
         }
     }
 
+    It 'reports elapsed time past an hour without wrapping back to zero' {
+        # 'mm:ss' on a TimeSpan is minutes-WITHIN-the-hour, so an hour-long push reported
+        # '03:23 elapsed' and read as though it had restarted - the worst possible signal
+        # to someone deciding whether to kill a run that is legitimately still going.
+        $script:Text | Should -Not -Match '\{1:mm\\:ss\} elapsed'
+
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($script:Text, [ref]$null, [ref]$null)
+        $fn = $ast.Find({ param($n)
+                $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Format-Elapsed' }, $true)
+        $fn | Should -Not -BeNullOrEmpty
+        Invoke-Expression $fn.Extent.Text
+
+        Format-Elapsed -Span ([timespan]::FromSeconds(203))  | Should -Be '03:23'
+        Format-Elapsed -Span ([timespan]::FromMinutes(59.5)) | Should -Be '59:30'
+        Format-Elapsed -Span ([timespan]::FromMinutes(63.4)) | Should -Be '1:03:24'
+        Format-Elapsed -Span ([timespan]::FromHours(2.75))   | Should -Be '2:45:00'
+    }
+
     It 'requires BOTH idleness and no connection before calling a push stalled' {
         # Idle alone is normal: the client sits at zero CPU while the server analyses,
         # validates and stores. Killing on idleness alone would abort healthy pushes.
