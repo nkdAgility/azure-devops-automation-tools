@@ -191,6 +191,44 @@ Describe 'Migrate-Repos engine shape' {
         $script:Text | Should -Match 'Join-Path \$WorkRoot \(\$Repo\.name \+ ''\.git''\)'
     }
 
+    It 'pushes only the commits the target lacks' {
+        # Segmenting from a branch's first commit rewinds a branch the target already has
+        # further along, which git rejects - so a partly migrated repository could never
+        # be finished.
+        $script:Text | Should -Match 'refs/remotes/\$TargetRemote/\*'
+        $script:Text | Should -Match '\$range = if \(\$from\)'
+        $script:Text | Should -Match 'already up to date'
+    }
+
+    It 'leaves a diverged branch alone unless explicitly told to force it' {
+        $p = $script:EngineAst.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'ForceDivergedBranches' }
+        $p | Should -Not -BeNullOrEmpty
+        $p.StaticType.Name | Should -BeExactly 'SwitchParameter'
+        $script:Text | Should -Match 'use -ForceDivergedBranches to overwrite'
+    }
+
+    It 'records what a forced branch discarded, before discarding it' {
+        # 'some branches were forced' is not a record; the commits that existed only on
+        # the target are.
+        $script:Text | Should -Match '\$script:ForcedBranches\.Add'
+        $script:Text | Should -Match 'OrphanCommits'
+        $forcedAt = $script:Text.IndexOf('$script:ForcedBranches.Add')
+        $pushAt = $script:Text.IndexOf('$segmentArgs = @(''push'')')
+        $forcedAt | Should -BeLessThan $pushAt -Because 'the record is written before the overwrite'
+    }
+
+    It 'forces every segment of a diverged branch, not only the tip' {
+        # The FIRST segment already conflicts with the target's discarded tip, so forcing
+        # only the final push would fail before reaching it.
+        ([regex]::Matches($script:Text, "if \(\`$forcePush\) \{ @\('--force'\) \}")).Count |
+            Should -Be 2 -Because 'both the segment pushes and the tip push need it'
+    }
+
+    It 'does not shadow the automatic $args variable' {
+        $script:Text | Should -Not -Match '(?m)^\s*\$args\s*='
+    }
+
     It 'never pushes with --mirror' {
         # A mirror push carries server-managed refs (refs/pull/*), which the target rejects.
         $script:Text | Should -Not -Match "push',\s*'--mirror"

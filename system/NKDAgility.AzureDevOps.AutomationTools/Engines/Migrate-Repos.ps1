@@ -115,6 +115,24 @@
     provisioning creates. Code wikis (published from an existing code repo) are
     migrated as ordinary repos and are not affected by this switch.
 
+.PARAMETER ForceDivergedBranches
+    Overwrite target branches that have diverged from the source, so they match the
+    source again. Off by default.
+
+    Divergence here does not mean somebody edited the target. It means the branch was
+    REWRITTEN at the source - rebased, amended or force-pushed - after an earlier
+    migration run copied it. The target then holds commits the source has discarded,
+    while missing the ones that replaced them. Seen on this engagement: a target branch
+    one orphaned commit ahead and 59 real commits behind.
+
+    Without this, such a branch is reported and skipped, and never migrates - which is
+    the right default for a repository people work in, and the wrong one for a migration
+    target where the source is the truth and the target is a copy. With it, the branch is
+    force-updated to the source, and every commit that only existed on the target is
+    listed first so there is a record of exactly what was overwritten.
+
+    Do not use it against a target anyone actually commits to.
+
 .PARAMETER SkipWikiLinkRewrite
     Skip rewriting Azure DevOps work item URLs inside the wiki. By default, when
     a project wiki is migrated its markdown is scanned for work item links of
@@ -222,7 +240,9 @@ param(
 
     [switch]$SkipWiki,
 
-    [switch]$SkipWikiLinkRewrite
+    [switch]$SkipWikiLinkRewrite,
+
+    [switch]$ForceDivergedBranches
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1144,22 +1164,46 @@ function Push-BranchSegmented {
     $targetSha = (& git rev-parse --verify --quiet $targetRef) 2>$null
     $localSha = (& git rev-parse --verify --quiet $Branch) 2>$null
 
+    $forcePush = $false
+    $from = $targetSha
+
     if ($targetSha) {
         if ($targetSha -eq $localSha) {
             Write-Host "      [$Branch] already up to date" -ForegroundColor DarkGray
             return
         }
-        # Behind the target, or diverged: pushing would rewind or clobber. Neither is
-        # this script's call to make, so it is reported and left alone.
+
         & git merge-base --is-ancestor $targetSha $Branch 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "      [$Branch] target has commits this mirror does not; left alone."
-            return
+            # Diverged. Not because anyone edited the target - because the branch was
+            # REWRITTEN at the source after an earlier run copied it, leaving the target
+            # holding commits the source has since discarded.
+            if (-not $ForceDivergedBranches) {
+                Write-Warning "      [$Branch] target has commits this mirror does not; left alone (use -ForceDivergedBranches to overwrite)."
+                return
+            }
+
+            # Everything about to be discarded is recorded BEFORE it goes, so the run
+            # can say exactly what was overwritten rather than 'some branches were forced'.
+            $mergeBase = (& git merge-base $targetSha $Branch 2>$null)
+            $orphans = @(& git rev-list "$mergeBase..$targetSha" 2>$null)
+            $script:ForcedBranches.Add([pscustomobject]@{
+                    Branch        = $Branch
+                    TargetWas     = $targetSha
+                    NowMatches    = $localSha
+                    OrphanCommits = $orphans.Count
+                    OrphanSample  = (@($orphans | Select-Object -First 5) -join ' ')
+                })
+            Write-Warning ("      [{0}] diverged - overwriting; {1} commit(s) exist only on the target and will be discarded." -f $Branch, $orphans.Count)
+
+            # From the common ancestor, because the target's tip is not in this history.
+            $from = $mergeBase
+            $forcePush = $true
         }
     }
 
     # Oldest first, and only what the target is missing.
-    $range = if ($targetSha) { "$targetSha..$Branch" } else { $Branch }
+    $range = if ($from) { "$from..$Branch" } else { $Branch }
     $commits = @(& git rev-list --reverse --first-parent $range)
     if ($LASTEXITCODE -ne 0) { throw "git rev-list failed for branch '$Branch'" }
     $total = $commits.Count
@@ -1171,13 +1215,18 @@ function Push-BranchSegmented {
         $segment++
         $refspec = "$sha`:refs/heads/$Branch"
         Write-Host ("      [{0}] segment {1}: pushing through commit {2} ({3}/{4})" -f $Branch, $segment, $sha.Substring(0, 8), ($i + 1), $total) -ForegroundColor DarkCyan
-        Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs @('push', $TargetRemote, $refspec)
+        # A diverged branch needs --force on every segment, not only the last: the first
+        # one already fails as a non-fast-forward against the target's discarded tip.
+        # Not $args - that is an automatic variable holding a function's unbound arguments.
+        $segmentArgs = @('push') + $(if ($forcePush) { @('--force') } else { @() }) + @($TargetRemote, $refspec)
+        Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $segmentArgs
     }
 
     # Final push to advance the branch to its actual tip.
     $tipRefspec = "$Branch`:refs/heads/$Branch"
     Write-Host "      [$Branch] final: pushing branch tip" -ForegroundColor DarkCyan
-    Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs @('push', $TargetRemote, $tipRefspec)
+    $tipArgs = @('push') + $(if ($forcePush) { @('--force') } else { @() }) + @($TargetRemote, $tipRefspec)
+    Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $tipArgs
 }
 
 function Push-Segmented {
@@ -1214,6 +1263,15 @@ function Push-Segmented {
                 Write-Warning "      [$branch] $($_.Exception.Message)"
             }
         }
+        if ($script:ForcedBranches.Count -gt 0) {
+            Write-Host ''
+            Write-Host ("    {0} branch(es) were force-updated to match the source:" -f $script:ForcedBranches.Count) -ForegroundColor Yellow
+            foreach ($forced in $script:ForcedBranches) {
+                Write-Host ("      {0}  ({1} commit(s) discarded, was {2})" -f
+                    $forced.Branch, $forced.OrphanCommits, $forced.TargetWas.Substring(0, 8)) -ForegroundColor Yellow
+            }
+        }
+
         if ($branchFailures.Count -gt 0) {
             throw ("{0} of {1} branch(es) failed to push; first: {2}" -f
                 $branchFailures.Count, $branches.Count, $branchFailures[0])
@@ -1437,6 +1495,10 @@ $script:TargetAuthMode = $null
 # so every repository failed with 'the variable cannot be retrieved because it has not
 # been set' before a single option could be read.
 $script:TargetProjectId = $null
+
+# Branches force-updated because they had diverged, recorded so the run can say exactly
+# what was discarded rather than only that something was overwritten.
+$script:ForcedBranches = [System.Collections.Generic.List[object]]::new()
 Initialize-SourceAuth
 Initialize-TargetAuth
 
