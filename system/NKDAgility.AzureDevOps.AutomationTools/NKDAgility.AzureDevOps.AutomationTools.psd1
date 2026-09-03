@@ -22,6 +22,9 @@
         # Common - organisations and secrets
         'Get-Organisation'
         'Get-AzureDevOpsAuthHeader'
+        'Resolve-AzureDevOpsAuth'
+        'Get-AzureDevOpsGitAuthArgs'
+        'Test-AzureDevOpsHosted'
         'Get-AzureDevOpsAccessToken'
         'Set-AutomationSecrets'
         # Common - workspace

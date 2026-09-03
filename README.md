@@ -130,6 +130,7 @@ When lifting a TFS / Azure DevOps Server collection into Azure DevOps Services w
   ```
 
   `Set-MigrationContext` sets session defaults (collection, project, tool paths) so individual fix lines stay short. Task-level commands collapse whole runbook sections into one call per project: `Install-FeedbackWorkItemTypes` (work item types + categories prerequisites) followed by `Repair-ProcessConfiguration` (export → repair → import of `ProjectProcessConfiguration`, with state mappings as parameters). `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` wrap `Migrator.exe`. The primitives remain available for one-off fixes:
+  - `Resolve-AzureDevOpsAuth` / `Get-AzureDevOpsGitAuthArgs` / `Test-AzureDevOpsHosted` — shared credential resolution for every engine: supplied PAT first, Windows integrated for on-premises hosts, Entra for the hosted service.
   - `Rename-WitField` — resolve collection-level field name conflicts with Azure DevOps Services.
   - `Add-WitReflectedWorkItemIdField` (XML process, witadmin) / `Add-ReflectedWorkItemIdField` (inherited process, REST) — add the `Custom.ReflectedWorkItemId` field the Azure DevOps Migration Tools require on the target before they will move a single work item.
   - `Import-WitWorkItemTypeFile`, `Add-WitWorkItemCategory`, `Add-WitWorkItemCategoryType`, `Remove-WitWorkItemCategoryType`, `Copy-WitWorkItemType` — get work item types and categories into the shape ProcessConfiguration requires.

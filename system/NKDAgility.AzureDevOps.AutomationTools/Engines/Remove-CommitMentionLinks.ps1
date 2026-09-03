@@ -125,30 +125,31 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# The collection URL IS the API base - hosted and on-premises alike. It is never
+# rebuilt against a hardcoded dev.azure.com, which would aim an on-premises run at
+# a same-named PUBLIC organisation.
+$collectionBase = $Collection.TrimEnd('/')
+
 #region Auth and helpers -------------------------------------------------------
 
 function Initialize-Auth {
-    # Ambient identity first, stored token as the fallback - the module convention.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $Collection }
-        catch { $entraError = $_.Exception.Message }
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth (no header at all - see Invoke-Ado), the hosted
+    # service uses Entra. Re-resolved per batch so a long run can renew a near-expiry
+    # token; announced once.
+    $auth = Resolve-AzureDevOpsAuth -Collection $Collection -Pat $Pat
+    if ($script:AuthMode -ne $auth.Mode) {
+        Write-Host "==> Auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:AuthMode = $auth.Mode
     }
-    else { $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded' }
-
-    if ($token) {
-        $script:Headers = @{ Authorization = 'Bearer ' + $token; Accept = 'application/json' }
-        Write-Host '==> Auth: Entra.' -ForegroundColor DarkGray
-        return
+    if ($auth.Headers.Count) {
+        $script:Headers = @{ Accept = 'application/json' } + $auth.Headers
     }
-    if ($Pat) {
-        $b64 = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$Pat"))
-        $script:Headers = @{ Authorization = "Basic $b64"; Accept = 'application/json' }
-        Write-Warning "Entra sign-in unavailable ($entraError); using the supplied PAT."
-        return
+    else {
+        # Windows integrated: EMPTY headers are the signal to use default credentials.
+        $script:Headers = @{}
     }
-    throw "No credential available: Entra sign-in failed ($entraError) and no -Pat was supplied."
 }
 
 function Invoke-Ado {
@@ -157,7 +158,11 @@ function Invoke-Ado {
     param([string]$Uri, [string]$Method = 'Get', [object]$Body, [string]$ContentType = 'application/json')
 
     for ($attempt = 1; $attempt -le 5; $attempt++) {
-        $params = @{ Uri = $Uri; Headers = $script:Headers; Method = $Method; SkipHttpErrorCheck = $true }
+        $params = @{ Uri = $Uri; Method = $Method; SkipHttpErrorCheck = $true }
+        # Empty headers mean Windows integrated auth: send nothing and let the stack
+        # negotiate, rather than a blank Authorization header that suppresses it.
+        if ($script:Headers.Count) { $params.Headers = $script:Headers }
+        else { $params.UseDefaultCredentials = $true }
         if ($PSBoundParameters.ContainsKey('Body')) { $params.Body = $Body; $params.ContentType = $ContentType }
 
         # A dropped socket is an exception, not a status code, so it has to be caught
@@ -204,8 +209,6 @@ function Invoke-Ado {
     throw "Gave up after repeated failures: $Uri"
 }
 
-function Get-OrgName { param([string]$Url) ($Url.TrimEnd('/') -split '/')[-1] }
-
 #endregion Auth and helpers ----------------------------------------------------
 
 #region Discovery --------------------------------------------------------------
@@ -215,12 +218,11 @@ function Get-TargetRepositoryId {
     # rather than after several minutes of scanning.
     param([string[]]$Name)
 
-    $org = Get-OrgName -Url $Collection
     $projectSeg = [uri]::EscapeDataString($Project)
     $map = [ordered]@{}
     foreach ($one in $Name) {
         $nameSeg = [uri]::EscapeDataString($one)
-        $repo = Invoke-Ado -Uri "https://dev.azure.com/$org/$projectSeg/_apis/git/repositories/$nameSeg`?api-version=7.1"
+        $repo = Invoke-Ado -Uri "$collectionBase/$projectSeg/_apis/git/repositories/$nameSeg`?api-version=7.1"
         if (-not $repo.id) { throw "Repository '$one' was not found in project '$Project'." }
         $map[[string]$repo.id] = $repo.name
     }
@@ -234,13 +236,12 @@ function Get-CandidateWorkItemId {
        artifact uris for every commit in the history (119,694 on the engagement that
        prompted this), where one identity-and-window query returns the same set directly
        and is scoped to what the migration actually did. #>
-    $org = Get-OrgName -Url $Collection
     $where = @("[System.ChangedDate] >= @today-$SinceDays")
     if ($ChangedBy) { $where += "[System.ChangedBy] = '$ChangedBy'" }
     $wiql = "SELECT [System.Id] FROM WorkItems WHERE " + ($where -join ' AND ')
 
     Write-Host "==> Finding work items changed in the last $SinceDays day(s)$(if ($ChangedBy) { " by $ChangedBy" })..." -ForegroundColor Cyan
-    $result = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/wiql?api-version=7.1" -Method Post `
+    $result = Invoke-Ado -Uri "$collectionBase/_apis/wit/wiql?api-version=7.1" -Method Post `
         -Body (@{ query = $wiql } | ConvertTo-Json)
     $ids = @($result.workItems | ForEach-Object { $_.id })
     Write-Host "    $($ids.Count) candidate work item(s)." -ForegroundColor DarkGray
@@ -255,15 +256,16 @@ function Get-WorkItemSummary {
        about to touch. #>
     param([int[]]$Ids)
 
-    $org = Get-OrgName -Url $Collection
     $summary = @{}
     for ($offset = 0; $offset -lt $Ids.Count; $offset += 200) {
+        # Renew a near-expiry Entra token before each batch (cache hit otherwise).
+        Initialize-Auth
         $batch = @($Ids[$offset..([math]::Min($offset + 199, $Ids.Count - 1))])
         $body = @{
             ids    = $batch
             fields = @('System.TeamProject', 'System.WorkItemType', 'System.Title', 'System.State')
         } | ConvertTo-Json -Depth 4
-        $result = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitemsbatch?api-version=7.1" -Method Post -Body $body
+        $result = Invoke-Ado -Uri "$collectionBase/_apis/wit/workitemsbatch?api-version=7.1" -Method Post -Body $body
         foreach ($item in @($result.value)) {
             $summary[[int]$item.id] = [pscustomobject]@{
                 Project = $item.fields.'System.TeamProject'
@@ -290,12 +292,13 @@ function Get-CurrentArtifactLink {
        at a time, so it costs a handful of calls rather than one per work item. #>
     param([int[]]$Ids)
 
-    $org = Get-OrgName -Url $Collection
     $current = @{}
     for ($offset = 0; $offset -lt $Ids.Count; $offset += 200) {
+        # Renew a near-expiry Entra token before each batch (cache hit otherwise).
+        Initialize-Auth
         $batch = @($Ids[$offset..([math]::Min($offset + 199, $Ids.Count - 1))])
         $body = @{ ids = $batch; '$expand' = 'relations' } | ConvertTo-Json -Depth 4
-        $result = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitemsbatch?api-version=7.1" -Method Post -Body $body
+        $result = Invoke-Ado -Uri "$collectionBase/_apis/wit/workitemsbatch?api-version=7.1" -Method Post -Body $body
         foreach ($item in @($result.value)) {
             $urls = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             # Absent entirely when the work item has no relations - see Remove-WorkItemLink.
@@ -416,8 +419,10 @@ function Remove-WorkItemLink {
        wrong ones. #>
     param([int]$WorkItemId, [string[]]$Urls)
 
-    $org = Get-OrgName -Url $Collection
-    $item = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitems/$WorkItemId`?`$expand=relations&api-version=7.1"
+    # Renew a near-expiry Entra token per work item (cache hit otherwise) - the removal
+    # loop can run for hours over thousands of items.
+    Initialize-Auth
+    $item = Invoke-Ado -Uri "$collectionBase/_apis/wit/workitems/$WorkItemId`?`$expand=relations&api-version=7.1"
 
     # A work item with NO relations comes back without a 'relations' property at all, and
     # under Set-StrictMode reading a missing property throws - so an item whose links have
@@ -438,11 +443,11 @@ function Remove-WorkItemLink {
             @{ op = 'remove'; path = "/relations/$_" }
         })
 
-    Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitems/$WorkItemId`?api-version=7.1" `
+    Invoke-Ado -Uri "$collectionBase/_apis/wit/workitems/$WorkItemId`?api-version=7.1" `
         -Method Patch -Body (ConvertTo-Json @($patch) -Depth 5) -ContentType 'application/json-patch+json' | Out-Null
 
     # Verified by re-reading: the removal is the whole point, so it is proven, not assumed.
-    $after = Invoke-Ado -Uri "https://dev.azure.com/$org/_apis/wit/workitems/$WorkItemId`?`$expand=relations&api-version=7.1"
+    $after = Invoke-Ado -Uri "$collectionBase/_apis/wit/workitems/$WorkItemId`?`$expand=relations&api-version=7.1"
     # Same guard: removing the last relation leaves the property absent entirely, which is
     # the SUCCESS case here and must not throw.
     $afterRelations = @()
@@ -460,6 +465,7 @@ function Remove-WorkItemLink {
 
 #region Main -------------------------------------------------------------------
 
+$script:AuthMode = $null
 Initialize-Auth
 
 $since = (Get-Date).Date.AddDays(-$SinceDays)
@@ -489,8 +495,10 @@ $candidates = Get-CandidateWorkItemId
 if ($candidates.Count -eq 0) { Write-Host 'Nothing to do.' -ForegroundColor Green; return }
 
 Write-Host "==> Reading revision history (read-only)..." -ForegroundColor Cyan
+# Renew before capturing: the parallel runspaces cannot re-resolve, so they get the
+# freshest token available at capture time.
+Initialize-Auth
 $headersForParallel = $script:Headers
-$org = Get-OrgName -Url $Collection
 
 $scanBlock = {
     $id = $_
@@ -498,7 +506,7 @@ $scanBlock = {
     $who = $using:ChangedBy
     $rids = $using:repoMap
     $since = $using:since
-    $org = $using:org
+    $base = $using:collectionBase
 
     # Six attempts, because a long scan WILL hit both throttling and dropped sockets.
     # A transport failure ('connection forcibly closed') is an EXCEPTION, not a status
@@ -507,7 +515,10 @@ $scanBlock = {
     $u = $null
     for ($try = 1; $try -le 6; $try++) {
         try {
-            $r = Invoke-WebRequest -Uri "https://dev.azure.com/$org/_apis/wit/workitems/$id/updates?api-version=7.1" -Headers $h -SkipHttpErrorCheck -ErrorAction Stop
+            # Empty headers mean Windows integrated auth - default credentials, no header.
+            $reqArgs = @{ Uri = "$base/_apis/wit/workitems/$id/updates?api-version=7.1"; SkipHttpErrorCheck = $true; ErrorAction = 'Stop' }
+            if ($h -and $h.Count) { $reqArgs.Headers = $h } else { $reqArgs.UseDefaultCredentials = $true }
+            $r = Invoke-WebRequest @reqArgs
             if ($r.StatusCode -eq 429 -or $r.StatusCode -ge 500) { Start-Sleep -Seconds ([math]::Min(30, 2 * $try)); continue }
             if ($r.StatusCode -ne 200) {
                 return [pscustomobject]@{ Kind = 'error'; WorkItemId = $id; Reason = "HTTP $($r.StatusCode)" }

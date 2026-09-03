@@ -183,47 +183,32 @@ function Get-AuthHeader {
 }
 
 function Initialize-AdoAuth {
-    # Ambient identity first: an Entra access token works anywhere a PAT does, so
-    # Entra is the default and the explicit PAT (then the derived AZDO_PAT_<ORG>
-    # variable that Set-AutomationSecrets exports) only the fallback. Called
-    # before every work item, not just once: the module caches the token and
-    # renews it shortly before expiry, so re-resolving keeps a long run
-    # authenticated. Announces the mode once per side - never the credential.
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth, the hosted service uses Entra.
+    #
+    # The derived AZDO_PAT_<ORG> variable that Set-AutomationSecrets exports counts as a
+    # supplied PAT, so it is resolved BEFORE the call - an operator who ran
+    # Set-AutomationSecrets has named a credential just as deliberately as one who passed
+    # -SourcePat, and should not then be asked to sign in as somebody else.
+    #
+    # Called before every work item, not just once: the module caches the Entra token and
+    # renews it near expiry. Announces the mode once per side - never the credential.
     # Returns the resolved header hashtable.
     param([string]$OrgUrl, [string]$ExplicitPat, [string]$Side)
 
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $OrgUrl }
-        catch { $entraError = $_.Exception.Message }
-    }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        if ($script:AuthMode[$Side] -ne 'Entra') {
-            Write-Host "==> $Side auth: Entra." -ForegroundColor DarkGray
-            $script:AuthMode[$Side] = 'Entra'
-        }
-        return @{ Authorization = 'Bearer ' + $token }
-    }
-
-    $envName = Get-DerivedPatName -Org (Get-OrgName -Url $OrgUrl)
     $pat = $ExplicitPat
     if ([string]::IsNullOrWhiteSpace($pat)) {
+        $envName = Get-DerivedPatName -Org (Get-OrgName -Url $OrgUrl)
         $pat = [Environment]::GetEnvironmentVariable($envName)
     }
-    if (-not [string]::IsNullOrWhiteSpace($pat)) {
-        if ($script:AuthMode[$Side] -ne 'PAT') {
-            Write-Warning "Entra sign-in unavailable ($entraError); falling back to the $Side PAT."
-            $script:AuthMode[$Side] = 'PAT'
-        }
-        return Get-AuthHeader -Token $pat
-    }
 
-    throw "No $Side credential available: Entra sign-in failed ($entraError), no -${Side}Pat was supplied and `$ENV:$envName is not set. Sign in to Entra, or run Set-AutomationSecrets."
+    $auth = Resolve-AzureDevOpsAuth -Collection $OrgUrl -Pat $pat -Label $Side.ToLowerInvariant()
+    if ($script:AuthMode[$Side] -ne $auth.Mode) {
+        Write-Host "==> $Side auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:AuthMode[$Side] = $auth.Mode
+    }
+    return $auth.Headers
 }
 
 function Initialize-SourceAuth {
@@ -249,6 +234,13 @@ function Invoke-AdoRest {
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
             $arguments = @{ Uri = $Uri; Headers = $Headers; Method = $Method; ErrorAction = 'Stop' }
+            # An empty header set is how Windows integrated auth is expressed: there is
+            # no credential to attach, so ask the stack to negotiate one. Without this
+            # the request goes out anonymous and an on-premises collection answers 401.
+            if (-not $Headers -or $Headers.Count -eq 0) {
+                $arguments.Remove('Headers')
+                $arguments.UseDefaultCredentials = $true
+            }
             if ($null -ne $Body) { $arguments.Body = $Body; $arguments.ContentType = $ContentType }
             if ($OutFile) { $arguments.OutFile = $OutFile }
             return Invoke-RestMethod @arguments

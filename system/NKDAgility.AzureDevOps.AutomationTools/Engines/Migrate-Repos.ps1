@@ -267,18 +267,6 @@ function Resolve-TargetRepoName {
 
 #region Helpers ---------------------------------------------------------------
 
-function Get-AuthHeader {
-    param([string]$Pat)
-    $bytes = [System.Text.Encoding]::ASCII.GetBytes(":$Pat")
-    @{ Authorization = 'Basic ' + [Convert]::ToBase64String($bytes) }
-}
-
-function Get-GitExtraHeader {
-    param([string]$Pat)
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$Pat"))
-    "AUTHORIZATION: Basic $b64"
-}
-
 function Get-CollectionBase {
     # The organisation URL IS the base - nothing needs rebuilding.
     #
@@ -299,78 +287,34 @@ function Get-CollectionBase {
 }
 
 function Initialize-SourceAuth {
-    # Ambient identity first: an Entra access token works anywhere a PAT does (Bearer
-    # for REST, http.extraheader for git), so Entra is the default and -SourcePat only
-    # the fallback. Called before every repository and wiki, not just once: the module
-    # caches the token and renews it shortly before expiry, so re-resolving per repo
-    # keeps a long run authenticated. Announces the mode once - never the credential.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $SourceOrg }
-        catch { $entraError = $_.Exception.Message }
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so all six
+    # engines answer "which credential here" identically and cannot drift: a supplied
+    # PAT wins, an on-premises host uses Windows integrated auth, the hosted service
+    # uses Entra. What stays here is what is genuinely per-engine - announcing the mode
+    # ONCE, and holding the resolved credential in the two shapes this engine consumes
+    # (a header set for REST, a header string for git).
+    #
+    # Called before every repository and wiki rather than once: the module caches the
+    # Entra token and renews it near expiry, so re-resolving per repo keeps a long run
+    # authenticated. Never announces the credential itself.
+    $auth = Resolve-AzureDevOpsAuth -Collection $SourceOrg -Pat $SourcePat -Label 'source'
+    if ($script:SourceAuthMode -ne $auth.Mode) {
+        Write-Host "==> Source auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:SourceAuthMode = $auth.Mode
     }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:SourceHeaders = @{ Authorization = 'Bearer ' + $token }
-        $script:SourceHeader = "AUTHORIZATION: Bearer $token"
-        if ($script:SourceAuthMode -ne 'Entra') {
-            Write-Host '==> Source auth: Entra.' -ForegroundColor DarkGray
-            $script:SourceAuthMode = 'Entra'
-        }
-        return
-    }
-
-    if ($SourcePat) {
-        $script:SourceHeaders = Get-AuthHeader -Pat $SourcePat
-        $script:SourceHeader = Get-GitExtraHeader -Pat $SourcePat
-        if ($script:SourceAuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the source PAT." -f $entraError)
-            $script:SourceAuthMode = 'PAT'
-        }
-        return
-    }
-
-    throw ("No source credential available: Entra sign-in failed ({0}) and no -SourcePat was supplied. Sign in to Entra, or add the source PAT to secrets\secrets.json." -f $entraError)
+    $script:SourceHeaders = $auth.Headers
+    $script:SourceHeader = $auth.GitHeader
 }
 
 function Initialize-TargetAuth {
-    # Same ambient-first resolution as Initialize-SourceAuth, for the target
-    # organization. -TargetPat is the fallback.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $TargetOrg }
-        catch { $entraError = $_.Exception.Message }
+    # Same resolution as Initialize-SourceAuth, for the target organization.
+    $auth = Resolve-AzureDevOpsAuth -Collection $TargetOrg -Pat $TargetPat -Label 'target'
+    if ($script:TargetAuthMode -ne $auth.Mode) {
+        Write-Host "==> Target auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:TargetAuthMode = $auth.Mode
     }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:TargetHeaders = @{ Authorization = 'Bearer ' + $token }
-        $script:TargetHeader = "AUTHORIZATION: Bearer $token"
-        if ($script:TargetAuthMode -ne 'Entra') {
-            Write-Host '==> Target auth: Entra.' -ForegroundColor DarkGray
-            $script:TargetAuthMode = 'Entra'
-        }
-        return
-    }
-
-    if ($TargetPat) {
-        $script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
-        $script:TargetHeader = Get-GitExtraHeader -Pat $TargetPat
-        if ($script:TargetAuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the target PAT." -f $entraError)
-            $script:TargetAuthMode = 'PAT'
-        }
-        return
-    }
-
-    throw ("No target credential available: Entra sign-in failed ({0}) and no -TargetPat was supplied. Sign in to Entra, or add the target PAT to secrets\secrets.json." -f $entraError)
+    $script:TargetHeaders = $auth.Headers
+    $script:TargetHeader = $auth.GitHeader
 }
 
 function Invoke-AdoApi {
@@ -382,6 +326,13 @@ function Invoke-AdoApi {
         [string]$ContentType = 'application/json'
     )
     $params = @{ Uri = $Uri; Headers = $Headers; Method = $Method }
+    # An empty header set is how Windows integrated auth is expressed: there is no
+    # credential to attach, so ask the stack to negotiate one. Without this the request
+    # goes out anonymous and an on-premises collection answers 401.
+    if (-not $Headers -or $Headers.Count -eq 0) {
+        $params.Remove('Headers')
+        $params.UseDefaultCredentials = $true
+    }
     if ($PSBoundParameters.ContainsKey('Body')) {
         $params.Body = ($Body | ConvertTo-Json -Depth 10)
         $params.ContentType = $ContentType
@@ -397,7 +348,7 @@ function Invoke-Git {
         [string[]]$GitArgs
     )
     $allArgs = @()
-    if ($ExtraHeader) { $allArgs += @('-c', "http.extraheader=$ExtraHeader") }
+    $allArgs += Get-AzureDevOpsGitAuthArgs -GitHeader $ExtraHeader
     $allArgs += $GitArgs
     & git @allArgs
     if ($LASTEXITCODE -ne 0) {
@@ -792,7 +743,8 @@ function Sync-SourceLfs {
     Write-Host '    Fetching all LFS objects from source...' -ForegroundColor Green
     Push-Location $CloneDir
     try {
-        & git -c "http.extraheader=$script:SourceHeader" lfs fetch --all $RemoteName
+        $authArgs = Get-AzureDevOpsGitAuthArgs -GitHeader $script:SourceHeader
+        & git @authArgs lfs fetch --all $RemoteName
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "    'git lfs fetch --all' reported errors; some LFS objects may be missing on the source."
         }
@@ -1082,7 +1034,7 @@ function Get-PendingLfsCount {
     Write-Host '    Checking which LFS objects the target is missing (walks every ref - minutes on a large repo)...' -ForegroundColor Green
 
     $lines = Invoke-GitWithHeartbeat -WorkingDirectory $CloneDir -Activity 'LFS scan' -GitArgs @(
-        '-c', "http.extraheader=$script:TargetHeader", 'lfs', 'push', '--all', '--dry-run', $RemoteName
+        (Get-AzureDevOpsGitAuthArgs -GitHeader $script:TargetHeader) + @('lfs', 'push', '--all', '--dry-run', $RemoteName)
     )
 
     if ($script:LastHeartbeatExitCode -ne 0) {
@@ -1142,7 +1094,8 @@ function Push-Lfs {
     Write-Host '    Pushing missing LFS objects to target...' -ForegroundColor Green
     Push-Location $CloneDir
     try {
-        & git -c "http.extraheader=$script:TargetHeader" lfs push --all $TargetRemote
+        $authArgs = Get-AzureDevOpsGitAuthArgs -GitHeader $script:TargetHeader
+        & git @authArgs lfs push --all $TargetRemote
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "    'git lfs push --all' reported errors; some LFS objects may not have been uploaded."
         }
@@ -1197,7 +1150,7 @@ function Push-Mirror {
     if ($Force) { $pushArgs = @('push', '--force') + $pushArgs[1..($pushArgs.Count - 1)] }
 
     $exit = Invoke-GitWatched -WorkingDirectory $CloneDir -Activity 'push' -GitArgs (
-        @('-c', "http.extraheader=$script:TargetHeader") + $pushArgs)
+        (Get-AzureDevOpsGitAuthArgs -GitHeader $script:TargetHeader) + $pushArgs)
     if ($exit -ne 0) {
         if ($script:LastWatchedStalled) { throw "push stalled and was killed after $([math]::Round($script:LastWatchedDuration.TotalMinutes,1)) minute(s)" }
         throw "git push failed with exit code $exit"
@@ -1362,7 +1315,8 @@ function Push-Segmented {
         # migrated by an earlier attempt - tries to rewind branches and is rejected.
         Write-Host '    Reading what the target already has...' -ForegroundColor Green
         $PSNativeCommandUseErrorActionPreference = $false
-        & git -c "http.extraheader=$script:TargetHeader" fetch --quiet $TargetRemote "+refs/heads/*:refs/remotes/$TargetRemote/*" 2>$null
+        $authArgs = Get-AzureDevOpsGitAuthArgs -GitHeader $script:TargetHeader
+        & git @authArgs fetch --quiet $TargetRemote "+refs/heads/*:refs/remotes/$TargetRemote/*" 2>$null
         if ($LASTEXITCODE -ne 0) {
             # An empty target has no refs to fetch; that is normal on a first migration.
             Write-Host '      (nothing to read - treating the target as empty)' -ForegroundColor DarkGray

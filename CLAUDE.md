@@ -282,6 +282,9 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `Import-WitWorkItemTypeFile` | Imports a work item type definition XML |
 | `Add-WitWorkItemCategory` | Adds a category with its default work item type |
 | `Add-WitWorkItemCategoryType` / `Remove-WitWorkItemCategoryType` | Adds/removes a type within a category |
+| `Resolve-AzureDevOpsAuth` | The one answer to "which credential here", shared by every engine: a supplied PAT wins, an on-premises host (not dev.azure.com / *.visualstudio.com) means Windows integrated — send nothing, negotiate — and the hosted service means Entra |
+| `Test-AzureDevOpsHosted` | The host rule, written down once: `dev.azure.com` / `*.visualstudio.com` is the hosted service, anything else is an on-premises server — deciding both the ambient auth mechanism and which URL shapes exist |
+| `Get-AzureDevOpsGitAuthArgs` | The git `-c http.extraheader=…` pair, or nothing at all under Windows auth — a blank header suppresses the negotiation, so absent and empty are not the same |
 | `Rename-WitField` | Renames a field by reference name — the TF400526 conflict fix |
 | `Add-WitReflectedWorkItemIdField` / `Add-ReflectedWorkItemIdField` | Adds the reflected work item ID field the Migration Tools demand on the target. Choose by the collection's PROCESS MODEL, not by the migration: the `Wit` one drives witadmin for an XML process, the other REST for an inherited process. Both idempotent, both re-read the target to confirm the field landed |
 | `Remove-WitFieldRule` | Removes an unsupported rule from a work item type |

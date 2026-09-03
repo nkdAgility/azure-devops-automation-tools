@@ -210,112 +210,87 @@ function Get-OrgName {
 }
 
 function Initialize-SourceAuth {
-    # Ambient identity first: an Entra access token works anywhere a PAT does
-    # (Bearer for REST, basic-auth password for the packaging tools), so Entra is
-    # the default and -SourcePat only the fallback. Called before every feed and
-    # package, not just once: the module caches the token and renews it shortly
-    # before expiry, so re-resolving keeps a long run authenticated. Announces
-    # the mode once - never the credential.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $SourceOrg }
-        catch { $entraError = $_.Exception.Message }
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth, the hosted service uses Entra. Kept here is only
+    # what is per-engine - announcing the mode once, and the raw token the packaging
+    # tools need as a basic-auth password. Re-resolved per feed so a long run can renew.
+    $auth = Resolve-AzureDevOpsAuth -Collection $SourceOrg -Pat $SourcePat -Label 'source'
+    if ($script:SourceAuthMode -ne $auth.Mode) {
+        Write-Host "==> Source auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:SourceAuthMode = $auth.Mode
     }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:SourceHeaders = @{ Authorization = 'Bearer ' + $token }
-        $script:SourceToken = $token
-        if ($script:SourceAuthMode -ne 'Entra') {
-            Write-Host '==> Source auth: Entra.' -ForegroundColor DarkGray
-            $script:SourceAuthMode = 'Entra'
-        }
-        return
-    }
-
-    if ($SourcePat) {
-        $script:SourceHeaders = Get-AuthHeader -Pat $SourcePat
-        $script:SourceToken = $SourcePat
-        if ($script:SourceAuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the source PAT." -f $entraError)
-            $script:SourceAuthMode = 'PAT'
-        }
-        return
-    }
-
-    throw ("No source credential available: Entra sign-in failed ({0}) and no -SourcePat was supplied. Sign in to Entra, or add the source PAT to secrets\secrets.json." -f $entraError)
+    $script:SourceHeaders = $auth.Headers
+    $script:SourceToken = $auth.Token
 }
 
 function Initialize-TargetAuth {
-    # Same ambient-first resolution as Initialize-SourceAuth, for the target
-    # organization. -TargetPat is the fallback. $script:TargetToken is what the
-    # packaging tools (nuget.config, .npmrc, twine) receive as their basic-auth
-    # password - Azure Artifacts accepts an Entra token there just like a PAT.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $TargetOrg }
-        catch { $entraError = $_.Exception.Message }
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth, the hosted service uses Entra. Kept here is only
+    # what is per-engine - announcing the mode once, and the raw token the packaging
+    # tools need as a basic-auth password. Re-resolved per feed so a long run can renew.
+    $auth = Resolve-AzureDevOpsAuth -Collection $TargetOrg -Pat $TargetPat -Label 'target'
+    if ($script:TargetAuthMode -ne $auth.Mode) {
+        Write-Host "==> Target auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:TargetAuthMode = $auth.Mode
     }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:TargetHeaders = @{ Authorization = 'Bearer ' + $token }
-        $script:TargetToken = $token
-        if ($script:TargetAuthMode -ne 'Entra') {
-            Write-Host '==> Target auth: Entra.' -ForegroundColor DarkGray
-            $script:TargetAuthMode = 'Entra'
-        }
-        return
-    }
-
-    if ($TargetPat) {
-        $script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
-        $script:TargetToken = $TargetPat
-        if ($script:TargetAuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the target PAT." -f $entraError)
-            $script:TargetAuthMode = 'PAT'
-        }
-        return
-    }
-
-    throw ("No target credential available: Entra sign-in failed ({0}) and no -TargetPat was supplied. Sign in to Entra, or add the target PAT to secrets\secrets.json." -f $entraError)
+    $script:TargetHeaders = $auth.Headers
+    $script:TargetToken = $auth.Token
 }
 
+# The hosted service splits packaging and identity across subdomains (feeds., pkgs.,
+# vssps.) that DO NOT EXIST on an Azure DevOps Server - there, everything is served
+# from the collection base. Every URL builder below branches on
+# Test-AzureDevOpsHosted, because a subdomain URL built for an on-premises collection
+# does not fail; it resolves to the cloud and lands on the wrong machine entirely.
+
 function Get-VssPsBaseUrl {
-    # Identity/graph APIs live on the vssps.dev.azure.com host.
+    # Identity/graph APIs: the vssps.dev.azure.com host in the cloud, the collection
+    # itself on-premises.
     param([string]$OrgUrl)
-    $org = Get-OrgName -OrgUrl $OrgUrl
-    "https://vssps.dev.azure.com/$org/_apis"
+    if (Test-AzureDevOpsHosted -Collection $OrgUrl) {
+        $org = Get-OrgName -OrgUrl $OrgUrl
+        return "https://vssps.dev.azure.com/$org/_apis"
+    }
+    "$($OrgUrl.TrimEnd('/'))/_apis"
 }
 
 function Get-PackagingBaseUrl {
-    # Feeds live on the pkgs.dev.azure.com host, not dev.azure.com.
+    # Package REST APIs: the pkgs.dev.azure.com host in the cloud, the collection
+    # itself on-premises.
     param([string]$OrgUrl, [string]$Project)
-    $org = Get-OrgName -OrgUrl $OrgUrl
-    if ($Project) {
-        "https://pkgs.dev.azure.com/$org/$Project/_apis/packaging"
+    $projSeg = if ($Project) { "/$Project" } else { '' }
+    if (Test-AzureDevOpsHosted -Collection $OrgUrl) {
+        $org = Get-OrgName -OrgUrl $OrgUrl
+        return "https://pkgs.dev.azure.com/$org$projSeg/_apis/packaging"
     }
-    else {
-        "https://pkgs.dev.azure.com/$org/_apis/packaging"
-    }
+    "$($OrgUrl.TrimEnd('/'))$projSeg/_apis/packaging"
 }
 
 function Get-FeedsBaseUrl {
-    # Feed management uses the feeds.dev.azure.com host.
+    # Feed management: the feeds.dev.azure.com host in the cloud, the collection
+    # itself on-premises (where feeds and packages share the collection host).
     param([string]$OrgUrl, [string]$Project)
-    $org = Get-OrgName -OrgUrl $OrgUrl
-    if ($Project) {
-        "https://feeds.dev.azure.com/$org/$Project/_apis/packaging"
+    $projSeg = if ($Project) { "/$Project" } else { '' }
+    if (Test-AzureDevOpsHosted -Collection $OrgUrl) {
+        $org = Get-OrgName -OrgUrl $OrgUrl
+        return "https://feeds.dev.azure.com/$org$projSeg/_apis/packaging"
     }
-    else {
-        "https://feeds.dev.azure.com/$org/_apis/packaging"
+    "$($OrgUrl.TrimEnd('/'))$projSeg/_apis/packaging"
+}
+
+function Get-PackagingWebBase {
+    # The web '_packaging' endpoints the package clients speak to (nuget v3 index,
+    # npm registry, pypi simple/upload). Returns a prefix ending in '/' so call
+    # sites append '_packaging/...'.
+    param([string]$OrgUrl, [string]$Project)
+    $proj = if ($Project) { "$Project/" } else { '' }
+    if (Test-AzureDevOpsHosted -Collection $OrgUrl) {
+        $org = Get-OrgName -OrgUrl $OrgUrl
+        return "https://pkgs.dev.azure.com/$org/$proj"
     }
+    "$($OrgUrl.TrimEnd('/'))/$proj"
 }
 
 function Invoke-AdoApi {
@@ -334,6 +309,13 @@ function Invoke-AdoApi {
     if ($PSBoundParameters.ContainsKey('Body')) {
         $params.Body = ($Body | ConvertTo-Json -Depth 10)
         $params.ContentType = $ContentType
+    }
+    # An empty header set is how Windows integrated auth is expressed: there is no
+    # credential to attach, so ask the stack to negotiate one. Without this the request
+    # goes out anonymous and an on-premises collection answers 401.
+    if (-not $Headers -or $Headers.Count -eq 0) {
+        $params.Remove('Headers')
+        $params.UseDefaultCredentials = $true
     }
     Invoke-RestMethod @params
 }
@@ -695,8 +677,7 @@ function Get-TargetGraphGroups {
     # response header.
     if ($null -ne $script:TargetGraphGroups) { return $script:TargetGraphGroups }
 
-    $org = Get-OrgName -OrgUrl $TargetOrg
-    $base = "https://vssps.dev.azure.com/$org/_apis/graph/groups?api-version=7.1-preview.1"
+    $base = "$(Get-VssPsBaseUrl -OrgUrl $TargetOrg)/graph/groups?api-version=7.1-preview.1"
     $all = New-Object System.Collections.Generic.List[object]
     $token = $null
     try {
@@ -1264,9 +1245,7 @@ function Get-PyPiFileUrls {
     $nameNorm = & $normalize $Package
     $verNorm = & $normalize $Version
 
-    $org = Get-OrgName -OrgUrl $SourceOrg
-    $proj = if ($SourceProject) { "$SourceProject/" } else { '' }
-    $indexUrl = "https://pkgs.dev.azure.com/$org/$proj`_packaging/$($Feed.name)/pypi/simple/$nameNorm/"
+    $indexUrl = "$(Get-PackagingWebBase -OrgUrl $SourceOrg -Project $SourceProject)_packaging/$($Feed.name)/pypi/simple/$nameNorm/"
     try {
         $html = (Invoke-WebRequest -Uri $indexUrl -Headers $script:SourceHeaders -ErrorAction Stop).Content
     }
@@ -1296,12 +1275,11 @@ function Get-PyPiFileUrls {
 function Get-TargetFeedSourceUrl {
     # The NuGet/npm/etc. source URL for the target feed.
     param([string]$FeedName, [string]$Protocol)
-    $org = Get-OrgName -OrgUrl $TargetOrg
-    $proj = if ($TargetProject) { "$TargetProject/" } else { '' }
+    $base = Get-PackagingWebBase -OrgUrl $TargetOrg -Project $TargetProject
     switch ($Protocol) {
-        'nuget' { "https://pkgs.dev.azure.com/$org/$proj`_packaging/$FeedName/nuget/v3/index.json" }
-        'npm'   { "https://pkgs.dev.azure.com/$org/$proj`_packaging/$FeedName/npm/registry/" }
-        'pypi'  { "https://pkgs.dev.azure.com/$org/$proj`_packaging/$FeedName/pypi/upload/" }
+        'nuget' { "${base}_packaging/$FeedName/nuget/v3/index.json" }
+        'npm'   { "${base}_packaging/$FeedName/npm/registry/" }
+        'pypi'  { "${base}_packaging/$FeedName/pypi/upload/" }
         'upack' { "$TargetOrg" }
         default { $null }
     }

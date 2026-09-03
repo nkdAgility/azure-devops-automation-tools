@@ -139,46 +139,27 @@ function Get-BasicAuthHeader {
 }
 
 function Initialize-Auth {
-    # Ambient identity first: an Entra access token works anywhere a PAT does, so
-    # Entra is the default and -Pat (then the AZDO_PAT_<ORG> variable that
-    # Set-AutomationSecrets exports) only the fallback. Called before every
-    # batch, not just once: the module caches the token and renews it shortly
-    # before expiry, so re-resolving keeps a long ID-consuming run
-    # authenticated. Announces the mode once - never the credential.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $OrgUrl }
-        catch { $entraError = $_.Exception.Message }
-    }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:Headers = @{ Authorization = 'Bearer ' + $token }
-        if ($script:AuthMode -ne 'Entra') {
-            Write-Host '==> Auth: Entra.' -ForegroundColor DarkGray
-            $script:AuthMode = 'Entra'
-        }
-        return
-    }
-
-    $envName = Get-DerivedEnvVarName -Org $org
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth, the hosted service uses Entra.
+    #
+    # The derived AZDO_PAT_<ORG> variable that Set-AutomationSecrets exports counts as a
+    # supplied PAT, so it is resolved BEFORE the call - running Set-AutomationSecrets is
+    # naming a credential just as deliberately as passing -Pat.
+    #
+    # Called before every batch, not just once: the module caches the Entra token and
+    # renews it near expiry, so a long ID-consuming run stays authenticated.
     $pat = $Pat
     if ([string]::IsNullOrWhiteSpace($pat)) {
-        $pat = [System.Environment]::GetEnvironmentVariable($envName)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($pat)) {
-        $script:Headers = Get-BasicAuthHeader -Token $pat
-        if ($script:AuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the PAT." -f $entraError)
-            $script:AuthMode = 'PAT'
-        }
-        return
+        $pat = [System.Environment]::GetEnvironmentVariable((Get-DerivedEnvVarName -Org $org))
     }
 
-    throw ("No credential available: Entra sign-in failed ({0}), no -Pat was supplied and `$ENV:{1} is not set. Sign in to Entra, or run Set-AutomationSecrets." -f $entraError, $envName)
+    $auth = Resolve-AzureDevOpsAuth -Collection $OrgUrl -Pat $pat
+    if ($script:AuthMode -ne $auth.Mode) {
+        Write-Host "==> Auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:AuthMode = $auth.Mode
+    }
+    $script:Headers = $auth.Headers
 }
 
 function Write-Step {
@@ -186,7 +167,12 @@ function Write-Step {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
+# $org names things (messages, the AZDO_PAT_<ORG> variable); $collectionBase is
+# what URLs are built from. The organisation URL IS the API base - hosted and
+# on-premises alike - so it is never rebuilt against a hardcoded dev.azure.com,
+# which would aim an on-premises run at a same-named PUBLIC organisation.
 $org = Get-OrgName -Url $OrgUrl
+$collectionBase = $OrgUrl.TrimEnd('/')
 
 if ($TenantId) {
     Write-Warning '-TenantId is deprecated and ignored: the tenant is discovered automatically by Get-AzureDevOpsAccessToken.'
@@ -198,7 +184,7 @@ $script:AuthMode = $null
 Initialize-Auth
 
 $apiVersion = '7.1'
-$createUri = "https://dev.azure.com/$org/$Project/_apis/wit/workitems/`$$WorkItemType`?api-version=$apiVersion"
+$createUri = "$collectionBase/$Project/_apis/wit/workitems/`$$WorkItemType`?api-version=$apiVersion"
 
 function Invoke-AdoRestWithRetry {
     # Wraps Invoke-RestMethod with exponential backoff so transient Azure DevOps
@@ -207,6 +193,16 @@ function Invoke-AdoRestWithRetry {
     # header when present, otherwise backs off exponentially with jitter up to
     # -MaxBackoffSeconds. Non-transient errors are rethrown immediately.
     param([hashtable]$RequestArgs)
+
+    # An empty header set is how Windows integrated auth is expressed: there is no
+    # credential to attach, so ask the stack to negotiate one. Without this the request
+    # goes out anonymous and an on-premises collection answers 401. Applied here, once,
+    # so every call site inherits it.
+    if ($RequestArgs.ContainsKey('Headers') -and
+        (-not $RequestArgs.Headers -or $RequestArgs.Headers.Count -eq 0)) {
+        $RequestArgs.Remove('Headers')
+        $RequestArgs.UseDefaultCredentials = $true
+    }
 
     $attempt = 0
     while ($true) {
@@ -264,7 +260,7 @@ function New-ThrowawayWorkItem {
 function Remove-WorkItem {
     # Permanently destroys a work item so it does not sit in the recycle bin.
     param([int]$Id)
-    $uri = "https://dev.azure.com/$org/$Project/_apis/wit/workitems/$Id`?destroy=true&api-version=$apiVersion"
+    $uri = "$collectionBase/$Project/_apis/wit/workitems/$Id`?destroy=true&api-version=$apiVersion"
     Invoke-AdoRestWithRetry -RequestArgs @{
         Uri     = $uri
         Headers = $script:Headers

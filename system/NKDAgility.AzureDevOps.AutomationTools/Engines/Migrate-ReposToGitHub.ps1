@@ -246,42 +246,18 @@ function Get-GitHubExtraHeader {
 }
 
 function Initialize-SourceAuth {
-    # Ambient identity first: an Entra access token works anywhere a PAT does (Bearer
-    # for REST, http.extraheader for git), so Entra is the default and -SourcePat only
-    # the fallback. Called before every repository, not just once: the module caches
-    # the token and renews it shortly before expiry, so re-resolving per repo keeps a
-    # long run authenticated. Announces the mode once - never the credential.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $SourceOrg }
-        catch { $entraError = $_.Exception.Message }
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth, the hosted service uses Entra. Kept here is only
+    # the per-engine part - announcing the mode once, and holding the credential in the
+    # two shapes this engine consumes. Re-resolved per repository so a long run renews.
+    $auth = Resolve-AzureDevOpsAuth -Collection $SourceOrg -Pat $SourcePat -Label 'source'
+    if ($script:SourceAuthMode -ne $auth.Mode) {
+        Write-Host "==> Source auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:SourceAuthMode = $auth.Mode
     }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:SourceHeaders = @{ Authorization = 'Bearer ' + $token }
-        $script:SourceHeader = "AUTHORIZATION: Bearer $token"
-        if ($script:SourceAuthMode -ne 'Entra') {
-            Write-Host '==> Source auth: Entra.' -ForegroundColor DarkGray
-            $script:SourceAuthMode = 'Entra'
-        }
-        return
-    }
-
-    if ($SourcePat) {
-        $script:SourceHeaders = Get-AdoAuthHeader -Pat $SourcePat
-        $script:SourceHeader = Get-AdoExtraHeader -Pat $SourcePat
-        if ($script:SourceAuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the source PAT." -f $entraError)
-            $script:SourceAuthMode = 'PAT'
-        }
-        return
-    }
-
-    throw ("No source credential available: Entra sign-in failed ({0}) and no -SourcePat was supplied. Sign in to Entra, or add the source PAT to secrets\secrets.json." -f $entraError)
+    $script:SourceHeaders = $auth.Headers
+    $script:SourceHeader = $auth.GitHeader
 }
 
 function Resolve-GitHubToken {
@@ -352,6 +328,13 @@ function Invoke-AdoApi {
     if ($PSBoundParameters.ContainsKey('Body')) {
         $params.Body = ($Body | ConvertTo-Json -Depth 10)
         $params.ContentType = $ContentType
+    }
+    # An empty header set is how Windows integrated auth is expressed: there is no
+    # credential to attach, so ask the stack to negotiate one. Without this the request
+    # goes out anonymous and an on-premises collection answers 401.
+    if (-not $Headers -or $Headers.Count -eq 0) {
+        $params.Remove('Headers')
+        $params.UseDefaultCredentials = $true
     }
     Invoke-RestMethod @params
 }
@@ -848,7 +831,8 @@ function Sync-SourceLfs {
     Push-Location $CloneDir
     try {
         $stderrFile = [System.IO.Path]::GetTempFileName()
-        & git -c "http.extraheader=$script:SourceHeader" lfs fetch --all $RemoteName 2>$stderrFile
+        $authArgs = Get-AzureDevOpsGitAuthArgs -GitHeader $script:SourceHeader
+        & git @authArgs lfs fetch --all $RemoteName 2>$stderrFile
         $exitCode = $LASTEXITCODE
         Register-GitStderr -Path $stderrFile
         Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
@@ -873,7 +857,8 @@ function Get-PendingLfsCount {
 
     Push-Location $CloneDir
     try {
-        $lines = & git -c "http.extraheader=$script:TargetHeader" lfs push --all --dry-run $RemoteName 2>$null
+        $authArgs = Get-AzureDevOpsGitAuthArgs -GitHeader $script:TargetHeader
+        $lines = & git @authArgs lfs push --all --dry-run $RemoteName 2>$null
         if ($LASTEXITCODE -ne 0) {
             # If the dry-run itself fails, fall back to attempting the transfer.
             return -1
@@ -928,7 +913,8 @@ function Push-Lfs {
     Push-Location $CloneDir
     try {
         $stderrFile = [System.IO.Path]::GetTempFileName()
-        & git -c "http.extraheader=$script:TargetHeader" lfs push --all $TargetRemote 2>$stderrFile
+        $authArgs = Get-AzureDevOpsGitAuthArgs -GitHeader $script:TargetHeader
+        & git @authArgs lfs push --all $TargetRemote 2>$stderrFile
         $exitCode = $LASTEXITCODE
         Register-GitStderr -Path $stderrFile
         Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue

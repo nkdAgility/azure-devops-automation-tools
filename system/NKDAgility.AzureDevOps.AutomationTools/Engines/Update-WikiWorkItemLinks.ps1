@@ -6,11 +6,11 @@
 .DESCRIPTION
     The work item migration assigns NEW IDs in the target organisation, so a wiki
     link such as
-        https://dev.azure.com/<srcOrg>/<srcProject>/_workitems/edit/<srcId>
+        <sourceOrgUrl>/<srcProject>/_workitems/edit/<srcId>
     cannot simply have its org/project swapped: the ID changes too. Each target
     work item records its original source reference in Custom.ReflectedWorkItemId,
     absolute URLs of the form
-        https://dev.azure.com/<srcOrg>/<srcProject>/_workitems/edit/<srcId>
+        <sourceOrgUrl>/<srcProject>/_workitems/edit/<srcId>
     are rewritten (both org/project and the numeric id) to the target, and, by
     default, bare '#<srcId>' work item mentions are also remapped to
     '#<targetId>'. To avoid false positives (hex colours like #666666, heading
@@ -124,51 +124,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-function Get-OrgName {
-    param([string]$OrgUrl)
-    ($OrgUrl.TrimEnd('/') -split '/')[-1]
-}
-
-function Get-AuthHeader {
-    param([string]$Pat)
-    @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat")) }
-}
-
 function Initialize-TargetAuth {
-    # Ambient identity first: an Entra access token works anywhere a PAT does, so
-    # Entra is the default and -TargetPat only the fallback. Called before every
-    # work item detail batch, not just once: the module caches the token and renews
-    # it shortly before expiry, so re-resolving keeps a long run authenticated.
-    # Announces the mode once - never the credential.
-    $token = $null
-    $entraError = $null
-    if (Get-Command Get-AzureDevOpsAccessToken -ErrorAction SilentlyContinue) {
-        try { $token = Get-AzureDevOpsAccessToken -Collection $TargetOrg }
-        catch { $entraError = $_.Exception.Message }
+    # Credential resolution lives in the module (Resolve-AzureDevOpsAuth) so every engine
+    # answers "which credential here" identically: a supplied PAT wins, an on-premises
+    # host uses Windows integrated auth, the hosted service uses Entra. Re-resolved per
+    # work item batch so a long run can renew a near-expiry token.
+    $auth = Resolve-AzureDevOpsAuth -Collection $TargetOrg -Pat $TargetPat -Label 'target'
+    if ($script:TargetAuthMode -ne $auth.Mode) {
+        Write-Host "==> Target auth: $($auth.Mode)." -ForegroundColor DarkGray
+        $script:TargetAuthMode = $auth.Mode
     }
-    else {
-        $entraError = 'the NKDAgility.AzureDevOps.AutomationTools module is not loaded'
-    }
-
-    if ($token) {
-        $script:TargetHeaders = @{ Authorization = 'Bearer ' + $token }
-        if ($script:TargetAuthMode -ne 'Entra') {
-            Write-Host '==> Target auth: Entra.' -ForegroundColor DarkGray
-            $script:TargetAuthMode = 'Entra'
-        }
-        return
-    }
-
-    if ($TargetPat) {
-        $script:TargetHeaders = Get-AuthHeader -Pat $TargetPat
-        if ($script:TargetAuthMode -ne 'PAT') {
-            Write-Warning ("Entra sign-in unavailable ({0}); falling back to the target PAT." -f $entraError)
-            $script:TargetAuthMode = 'PAT'
-        }
-        return
-    }
-
-    throw ("No target credential available: Entra sign-in failed ({0}) and no -TargetPat was supplied. Sign in to Entra, or add the target PAT to secrets\secrets.json." -f $entraError)
+    $script:TargetHeaders = $auth.Headers
 }
 
 function Invoke-AdoApi {
@@ -177,6 +143,13 @@ function Invoke-AdoApi {
     if ($PSBoundParameters.ContainsKey('Body')) {
         $params.Body = ($Body | ConvertTo-Json -Depth 10)
         $params.ContentType = 'application/json'
+    }
+    # An empty header set is how Windows integrated auth is expressed: there is no
+    # credential to attach, so ask the stack to negotiate one. Without this the request
+    # goes out anonymous and an on-premises collection answers 401.
+    if (-not $Headers -or $Headers.Count -eq 0) {
+        $params.Remove('Headers')
+        $params.UseDefaultCredentials = $true
     }
     Invoke-RestMethod @params
 }
@@ -187,11 +160,14 @@ function Get-TargetWorkItemIdMap {
     # original source ID; System.Id is the new target ID (they differ).
 
     $reflectedField = 'Custom.ReflectedWorkItemId'
-    $org = Get-OrgName -OrgUrl $TargetOrg
+    # The organisation URL IS the API base - hosted and on-premises alike. Rebuilding
+    # it against a hardcoded dev.azure.com pointed an on-premises run at a same-named
+    # PUBLIC organisation instead of the customer's server.
+    $base = $TargetOrg.TrimEnd('/')
     $projSeg = [uri]::EscapeDataString($TargetProject)
 
     $wiql = @{ query = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '$TargetProject' AND [$reflectedField] <> ''" }
-    $wiqlUrl = "https://dev.azure.com/$org/$projSeg/_apis/wit/wiql?api-version=7.1"
+    $wiqlUrl = "$base/$projSeg/_apis/wit/wiql?api-version=7.1"
 
     $map = @{}
     $result = Invoke-AdoApi -Uri $wiqlUrl -Headers $script:TargetHeaders -Method Post -Body $wiql
@@ -204,7 +180,7 @@ function Get-TargetWorkItemIdMap {
         Initialize-TargetAuth
         $batch = $ids[$i..([math]::Min($i + 199, $ids.Count - 1))]
         $idList = $batch -join ','
-        $detailUrl = "https://dev.azure.com/$org/_apis/wit/workitems?ids=$idList&fields=System.Id,$reflectedField&api-version=7.1"
+        $detailUrl = "$base/_apis/wit/workitems?ids=$idList&fields=System.Id,$reflectedField&api-version=7.1"
         $details = Invoke-AdoApi -Uri $detailUrl -Headers $script:TargetHeaders
         foreach ($wi in $details.value) {
             $reflected = $wi.fields.$reflectedField
@@ -234,12 +210,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $CloneDir 'HEAD'))) {
     throw "CloneDir does not look like a git repository (no HEAD): $CloneDir"
 }
 
-# Ambient-first credential resolution: Entra then the -TargetPat fallback,
-# renewed per work item detail batch (see Initialize-TargetAuth).
+# Credential resolution is shared (Resolve-AzureDevOpsAuth): supplied PAT, else
+# Windows integrated for an on-premises host, else Entra for the hosted service.
+# Renewed per work item detail batch (see Initialize-TargetAuth).
 $script:TargetAuthMode = $null
 Initialize-TargetAuth
-$srcOrg = Get-OrgName -OrgUrl $SourceOrg
-$tgtOrg = Get-OrgName -OrgUrl $TargetOrg
 
 Write-Host "==> Building source -> target work item ID map from '$TargetProject'..." -ForegroundColor Cyan
 $idMap = Get-TargetWorkItemIdMap
@@ -250,10 +225,11 @@ if (-not $idMap.Count) {
 Write-Host ("    Loaded {0} work item ID mapping(s)." -f $idMap.Count) -ForegroundColor DarkGray
 
 # Match source work item links, capturing the numeric ID. The project segment is
-# matched in raw or URL-encoded form.
+# matched in raw or URL-encoded form. Both pattern and replacement are built from
+# the organisation URLs as given, so hosted and on-premises collections both work.
 $srcProjPattern = [regex]::Escape($SourceProject) + '|' + [regex]::Escape([uri]::EscapeDataString($SourceProject))
-$linkPattern = "https://dev\.azure\.com/$([regex]::Escape($srcOrg))/(?:$srcProjPattern)/_workitems/edit/(\d+)"
-$targetBase = "https://dev.azure.com/$tgtOrg/$([uri]::EscapeDataString($TargetProject))/_workitems/edit/"
+$linkPattern = [regex]::Escape($SourceOrg.TrimEnd('/')) + "/(?:$srcProjPattern)/_workitems/edit/(\d+)"
+$targetBase = "$($TargetOrg.TrimEnd('/'))/$([uri]::EscapeDataString($TargetProject))/_workitems/edit/"
 
 $changes = [System.Collections.Generic.List[object]]::new()
 $unresolved = [System.Collections.Generic.List[object]]::new()
