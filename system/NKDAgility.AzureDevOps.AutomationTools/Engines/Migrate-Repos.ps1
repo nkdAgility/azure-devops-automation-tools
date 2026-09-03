@@ -279,9 +279,23 @@ function Get-GitExtraHeader {
     "AUTHORIZATION: Basic $b64"
 }
 
-function Get-OrgName {
+function Get-CollectionBase {
+    # The organisation URL IS the base - nothing needs rebuilding.
+    #
+    #   Azure DevOps Services   https://dev.azure.com/<org>
+    #   Azure DevOps Server     https://<host>/<collection>   (or .../tfs/<collection>)
+    #
+    # Both address REST as <base>/_apis/..., the internal endpoints as
+    # <base>/<project>/_api/... and repositories as <base>/<project>/_git/<repo>, so
+    # passing the URL straight through serves either.
+    #
+    # This used to take the LAST PATH SEGMENT and reassemble it against a hardcoded
+    # https://dev.azure.com/. For a cloud organisation that was an expensive no-op; for
+    # an on-premises collection it silently addressed a same-named PUBLIC organisation
+    # instead of the customer's server - the worst kind of failure, because it succeeds
+    # against the wrong system rather than failing against the right one.
     param([string]$OrgUrl)
-    ($OrgUrl.TrimEnd('/') -split '/')[-1]
+    $OrgUrl.TrimEnd('/')
 }
 
 function Initialize-SourceAuth {
@@ -415,8 +429,8 @@ function Test-GitLfs {
 #region Repo operations -------------------------------------------------------
 
 function Get-SourceRepos {
-    $org = Get-OrgName -OrgUrl $SourceOrg
-    $url = "https://dev.azure.com/$org/$SourceProject/_apis/git/repositories?api-version=7.1"
+    $base = Get-CollectionBase -OrgUrl $SourceOrg
+    $url = "$base/$SourceProject/_apis/git/repositories?api-version=7.1"
     $repos = (Invoke-AdoApi -Uri $url -Headers $script:SourceHeaders).value
     if ($RepoName) {
         $repos = $repos | Where-Object { $_.name -eq $RepoName }
@@ -427,8 +441,8 @@ function Get-SourceRepos {
 
 function Get-TargetRepo {
     param([string]$Name)
-    $org = Get-OrgName -OrgUrl $TargetOrg
-    $url = "https://dev.azure.com/$org/$TargetProject/_apis/git/repositories?api-version=7.1"
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
+    $url = "$base/$TargetProject/_apis/git/repositories?api-version=7.1"
     (Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders).value |
         Where-Object { $_.name -eq $Name } | Select-Object -First 1
 }
@@ -439,17 +453,17 @@ function Get-SourceWikis {
     # API. Only 'projectWiki' entries have their own repo to migrate; a
     # 'codeWiki' is published from an existing code repo that is already
     # migrated as an ordinary repository.
-    $org = Get-OrgName -OrgUrl $SourceOrg
-    $url = "https://dev.azure.com/$org/$SourceProject/_apis/wiki/wikis?api-version=7.1"
+    $base = Get-CollectionBase -OrgUrl $SourceOrg
+    $url = "$base/$SourceProject/_apis/wiki/wikis?api-version=7.1"
     (Invoke-AdoApi -Uri $url -Headers $script:SourceHeaders).value |
         Where-Object { $_.type -eq 'projectWiki' }
 }
 
 function Get-ProjectId {
     param([string]$OrgUrl, [hashtable]$Headers, [string]$Project)
-    $org = Get-OrgName -OrgUrl $OrgUrl
+    $base = Get-CollectionBase -OrgUrl $OrgUrl
     $seg = [uri]::EscapeDataString($Project)
-    $url = "https://dev.azure.com/$org/_apis/projects/$seg`?api-version=7.1"
+    $url = "$base/_apis/projects/$seg`?api-version=7.1"
     (Invoke-AdoApi -Uri $url -Headers $Headers).id
 }
 
@@ -457,8 +471,8 @@ function New-TargetWiki {
     # Ensures a project wiki exists in the target project, provisioning its
     # backing Git repository. Returns the wiki object (with remoteUrl) so its
     # repo can be pushed to. Idempotent: an existing project wiki is reused.
-    $org = Get-OrgName -OrgUrl $TargetOrg
-    $listUrl = "https://dev.azure.com/$org/$TargetProject/_apis/wiki/wikis?api-version=7.1"
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
+    $listUrl = "$base/$TargetProject/_apis/wiki/wikis?api-version=7.1"
     $existing = (Invoke-AdoApi -Uri $listUrl -Headers $script:TargetHeaders).value |
         Where-Object { $_.type -eq 'projectWiki' } | Select-Object -First 1
     if ($existing) {
@@ -469,7 +483,7 @@ function New-TargetWiki {
         return $null
     }
     $projectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
-    $createUrl = "https://dev.azure.com/$org/_apis/wiki/wikis?api-version=7.1"
+    $createUrl = "$base/_apis/wiki/wikis?api-version=7.1"
     $body = @{ type = 'projectWiki'; name = "$TargetProject.wiki"; projectId = $projectId }
     Write-Host "    Creating target project wiki." -ForegroundColor Green
     Invoke-AdoApi -Uri $createUrl -Headers $script:TargetHeaders -Method Post -Body $body
@@ -481,10 +495,10 @@ function Get-WikiGitUrl {
     # clone; the backing repo lives at '_git/<wikiName>' instead. Path segments
     # are URL-encoded so wiki names containing '.' or spaces stay valid.
     param([string]$OrgUrl, [string]$Project, [string]$WikiName)
-    $org = Get-OrgName -OrgUrl $OrgUrl
+    $base = Get-CollectionBase -OrgUrl $OrgUrl
     $projectSeg = [uri]::EscapeDataString($Project)
     $nameSeg = [uri]::EscapeDataString($WikiName)
-    "https://dev.azure.com/$org/$projectSeg/_git/$nameSeg"
+    "$base/$projectSeg/_git/$nameSeg"
 }
 
 function New-TargetRepo {
@@ -498,8 +512,8 @@ function New-TargetRepo {
     if (-not $PSCmdlet.ShouldProcess($Name, 'Create target repository')) {
         return $null
     }
-    $org = Get-OrgName -OrgUrl $TargetOrg
-    $url = "https://dev.azure.com/$org/$TargetProject/_apis/git/repositories?api-version=7.1"
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
+    $url = "$base/$TargetProject/_apis/git/repositories?api-version=7.1"
     $body = @{ name = $Name }
     Write-Host "    Creating target repo '$Name'." -ForegroundColor Green
     Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders -Method Post -Body $body
@@ -537,11 +551,11 @@ function Get-RepositoryOption {
     # All options for a repository, as an ordered hashtable of key -> value.
     param([string]$RepoId)
 
-    $org = Get-OrgName -OrgUrl $TargetOrg
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
     if (-not $script:TargetProjectId) {
         $script:TargetProjectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
     }
-    $url = "https://dev.azure.com/$org/$($script:TargetProjectId)/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId=$RepoId"
+    $url = "$base/$($script:TargetProjectId)/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId=$RepoId"
     $response = Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders
 
     $options = [ordered]@{}
@@ -564,11 +578,11 @@ function Set-RepositoryOption {
         [Parameter(Mandatory)][bool]$Value
     )
 
-    $org = Get-OrgName -OrgUrl $TargetOrg
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
     if (-not $script:TargetProjectId) {
         $script:TargetProjectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
     }
-    $url = "https://dev.azure.com/$org/$($script:TargetProjectId)/_api/_versioncontrol/UpdateRepositoryOption?__v=5&repositoryId=$RepoId"
+    $url = "$base/$($script:TargetProjectId)/_api/_versioncontrol/UpdateRepositoryOption?__v=5&repositoryId=$RepoId"
 
     # Double-encoded on purpose: 'option' is a JSON STRING. An object here is
     # accepted with a 200 and silently ignored.
@@ -655,10 +669,10 @@ function Get-TargetRefCount {
     # 'it finished' is worth proving, not inferring.
     param([string]$Name)
     try {
-        $org = Get-OrgName -OrgUrl $TargetOrg
+        $base = Get-CollectionBase -OrgUrl $TargetOrg
         $projectSeg = [uri]::EscapeDataString($TargetProject)
         $nameSeg = [uri]::EscapeDataString($Name)
-        $url = "https://dev.azure.com/$org/$projectSeg/_apis/git/repositories/$nameSeg/refs?api-version=7.1&`$top=5000"
+        $url = "$base/$projectSeg/_apis/git/repositories/$nameSeg/refs?api-version=7.1&`$top=5000"
         $refs = Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders
         return [int]$refs.count
     }
@@ -679,14 +693,14 @@ function Get-LocalRefCount {
 
 function Get-TargetRepoUrl {
     param([string]$Name)
-    $org = Get-OrgName -OrgUrl $TargetOrg
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
     # URL-encode path segments so names containing spaces or other reserved
     # characters (e.g. 'DEPRECATED GF.MS.Milling.RTPM.Analytics') produce a
     # valid URL. An unescaped space makes curl/git reject the remote with
     # 'Malformed input to a URL function'.
     $projectSeg = [uri]::EscapeDataString($TargetProject)
     $nameSeg = [uri]::EscapeDataString($Name)
-    "https://dev.azure.com/$org/$projectSeg/_git/$nameSeg"
+    "$base/$projectSeg/_git/$nameSeg"
 }
 
 #endregion Repo operations ----------------------------------------------------
