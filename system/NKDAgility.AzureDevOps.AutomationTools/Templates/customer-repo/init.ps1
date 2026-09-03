@@ -371,17 +371,29 @@ foreach ($capability in $capabilities) {
         # 1. Clone or fast-forward pull. A dirty clone is left alone: the local edits are
         #    almost always the point, and clobbering them would be worse than being stale.
         if (-not $NoSync) {
-            if (-not (Test-Path -LiteralPath $enginePath)) {
-                Write-Host "==> Cloning $($resolved.Repo)" -ForegroundColor Cyan
-                git clone $resolved.Repo $enginePath
-                if ($LASTEXITCODE -ne 0) { Write-Warning "Clone failed for $($resolved.Repo); continuing." }
-            }
-            elseif (git -C $enginePath status --porcelain) {
-                Write-Warning "$($resolved.RepoName) has local changes; skipping pull."
-            }
-            else {
-                git -C $enginePath pull --ff-only 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) { Write-Warning "$($resolved.RepoName) pull failed (offline?); continuing with the existing clone." }
+            # Runbooks dot-source this file, and they set
+            # $PSNativeCommandUseErrorActionPreference = $true so a failing exe stops a
+            # migration rather than being ignored. Right for the migration steps, wrong
+            # here: every git call below is checked by hand via $LASTEXITCODE and is MEANT
+            # to degrade to a warning when the network is down. Without this the first
+            # offline 'git pull' takes the whole runbook down before it has done anything.
+            # The child scope keeps the relaxation local - dot-sourcing means a plain
+            # assignment would leak into the caller and silently weaken it for the rest
+            # of the run.
+            & {
+                $PSNativeCommandUseErrorActionPreference = $false
+                if (-not (Test-Path -LiteralPath $enginePath)) {
+                    Write-Host "==> Cloning $($resolved.Repo)" -ForegroundColor Cyan
+                    git clone $resolved.Repo $enginePath
+                    if ($LASTEXITCODE -ne 0) { Write-Warning "Clone failed for $($resolved.Repo); continuing." }
+                }
+                elseif (git -C $enginePath status --porcelain) {
+                    Write-Warning "$($resolved.RepoName) has local changes; skipping pull."
+                }
+                else {
+                    git -C $enginePath pull --ff-only 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { Write-Warning "$($resolved.RepoName) pull failed (offline?); continuing with the existing clone." }
+                }
             }
         }
 
