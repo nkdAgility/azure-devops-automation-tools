@@ -481,10 +481,10 @@ function Get-RepoPolicies {
     @($response)
 }
 
-function ConvertTo-TargetRepoPolicy {
+function Get-RepoPolicySkipReason {
     param($Policy, [string]$SourceRepoId, [string]$TargetRepoId)
-
-    if ($Policy.isDeleted -or $Policy.isEnterpriseManaged) { return $null }
+    if ($Policy.isDeleted) { return 'deleted at source' }
+    if ($Policy.isEnterpriseManaged) { return 'enterprise-managed policy' }
     # These documented types have no cross-project build or identity reference.
     # Everything else needs an explicit mapping and is left for manual setup.
     $simpleTypes = @(
@@ -492,14 +492,21 @@ function ConvertTo-TargetRepoPolicy {
         'fa4e907d-c16b-4a4c-9dfa-4916e5d171ab', # merge strategy
         '40e92b44-2fe1-4dd6-b3d8-74a9c21d0c6e'  # work item linking
     )
-    if ([string]$Policy.type.id -notin $simpleTypes) { return $null }
-    if (-not $Policy.settings -or -not $Policy.settings.scope) { return $null }
+    if ([string]$Policy.type.id -notin $simpleTypes) { return 'unsupported policy type' }
+    if (-not $Policy.settings -or -not $Policy.settings.scope) { return 'missing repository scope' }
+    foreach ($scope in @($Policy.settings.scope)) {
+        if (-not $scope.repositoryId) { return 'project-wide scope' }
+        if ([string]$scope.repositoryId -ine $SourceRepoId) { return 'scope includes another repository' }
+    }
+    $null
+}
+
+function ConvertTo-TargetRepoPolicy {
+    param($Policy, [string]$SourceRepoId, [string]$TargetRepoId)
+    if (Get-RepoPolicySkipReason -Policy $Policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId) { return $null }
 
     $settings = $Policy.settings | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
     foreach ($scope in @($settings.scope)) {
-        # A project-wide policy is owned by the project, not by this repository.
-        # A policy spanning several repos cannot safely be copied by one repo run.
-        if (-not $scope.repositoryId -or [string]$scope.repositoryId -ine $SourceRepoId) { return $null }
         $scope.repositoryId = $TargetRepoId.ToLowerInvariant()
         if ($scope.Contains('matchKind') -and $scope.matchKind) {
             $scope.matchKind = ([string]$scope.matchKind).ToLowerInvariant()
@@ -527,7 +534,8 @@ function ConvertTo-PolicyCanonicalJson {
 function Sync-RepoPolicies {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([string]$SourceRepoId, [string]$TargetRepoId, [string]$RepoName)
-    $result = @{ Copied = 0; Existing = 0; Skipped = 0; Failed = 0 }
+    $result = @{ Copied = 0; Existing = 0; Skipped = 0; Failed = 0;
+        Details = [System.Collections.Generic.List[string]]::new() }
     try {
         $sourcePolicies = @(Get-RepoPolicies -OrgUrl $SourceOrg -Project $SourceProject -RepoId $SourceRepoId -Headers $script:SourceHeaders)
         $targetPolicies = @(Get-RepoPolicies -OrgUrl $TargetOrg -Project $TargetProject -RepoId $TargetRepoId -Headers $script:TargetHeaders)
@@ -535,6 +543,7 @@ function Sync-RepoPolicies {
     catch {
         Write-Warning ("    Could not list branch policies for '{0}': {1}" -f $RepoName, $_.Exception.Message)
         $result.Failed++
+        $result.Details.Add('policy listing: failed')
         return $result
     }
 
@@ -542,11 +551,13 @@ function Sync-RepoPolicies {
     $projectSeg = [uri]::EscapeDataString($TargetProject)
     $createUrl = "$base/$projectSeg/_apis/policy/configurations?api-version=7.1"
     foreach ($policy in $sourcePolicies) {
+        $skipReason = Get-RepoPolicySkipReason -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId
         $body = ConvertTo-TargetRepoPolicy -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId
         $label = "policy $($policy.id) ($($policy.type.displayName))"
         if (-not $body) {
             $result.Skipped++
-            Write-Warning "    Skipped ${label}: type or scope needs manual mapping."
+            $result.Details.Add("${label}: skipped ($skipReason)")
+            Write-Warning "    Skipped ${label}: $skipReason."
             continue
         }
         $desired = ConvertTo-PolicyCanonicalJson -Value $body
@@ -565,15 +576,20 @@ function Sync-RepoPolicies {
             }
             if ((ConvertTo-PolicyCanonicalJson -Value $existingBody) -eq $desired) { $alreadyThere = $true; break }
         }
-        if ($alreadyThere) { $result.Existing++; continue }
-        if (-not $PSCmdlet.ShouldProcess("$RepoName $label", 'Create target branch policy')) { continue }
+        if ($alreadyThere) { $result.Existing++; $result.Details.Add("${label}: already present"); continue }
+        if (-not $PSCmdlet.ShouldProcess("$RepoName $label", 'Create target branch policy')) {
+            $result.Details.Add("${label}: preview creation")
+            continue
+        }
         try {
             $created = Invoke-AdoApi -Uri $createUrl -Headers $script:TargetHeaders -Method Post -Body $body
             $targetPolicies += $created
             $result.Copied++
+            $result.Details.Add("${label}: copied")
         }
         catch {
             $result.Failed++
+            $result.Details.Add("${label}: failed")
             Write-Warning ("    Could not copy {0}: {1}" -f $label, $_.Exception.Message)
         }
     }
@@ -1512,7 +1528,9 @@ function New-RepoSummary {
         [double]$SizeGB,
         [string]$Strategy,
         [string]$Status,
-        [string]$TargetName
+        [string]$TargetName,
+        [string]$PolicyStatus = 'NotRun',
+        $PolicyResult
     )
     [pscustomobject]@{
         SourceProject    = $SourceProject
@@ -1524,6 +1542,12 @@ function New-RepoSummary {
         SizeGB           = $SizeGB
         Strategy         = $Strategy
         Status           = $Status
+        PolicyStatus     = $PolicyStatus
+        PolicyCopied     = if ($PolicyResult) { $PolicyResult.Copied } else { 0 }
+        PolicyExisting   = if ($PolicyResult) { $PolicyResult.Existing } else { 0 }
+        PolicySkipped    = if ($PolicyResult) { $PolicyResult.Skipped } else { 0 }
+        PolicyFailed     = if ($PolicyResult) { $PolicyResult.Failed } else { 0 }
+        PolicyDetails    = if ($PolicyResult) { @($PolicyResult.Details) -join '; ' } else { '' }
     }
 }
 
@@ -1562,10 +1586,12 @@ function Migrate-Repo {
     $action = if ($useSegmented) { 'Mirror-clone and segmented push' } else { 'Mirror-clone and mirror push' }
     if ($targetName -cne $Repo.name) { $action += " as '$targetName'" }
     if (-not $PSCmdlet.ShouldProcess($Repo.name, $action)) {
+        $previewPolicies = $null
         if ($WhatIfPreference -and $targetRepo -and $Repo.id) {
-            Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $targetRepo.id -RepoName $targetName | Out-Null
+            $previewPolicies = Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $targetRepo.id -RepoName $targetName
         }
-        New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'WhatIf (preview)'
+        New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'WhatIf (preview)' `
+            -PolicyStatus 'Preview' -PolicyResult $previewPolicies
         return
     }
 
@@ -1618,19 +1644,24 @@ function Migrate-Repo {
         Write-Host ("    Verified: {0} ref(s) on the target." -f $targetRefs) -ForegroundColor DarkGray
     }
 
+    $policyResult = $null
+    $policyStatus = 'NotRun'
     if ($status -eq 'Migrated' -and $Repo.id) {
         $policyResult = Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $targetRepoId -RepoName $targetName
+        $policyStatus = 'Completed'
         if ($policyResult.Skipped -or $policyResult.Failed) {
             $status += " (policies: $($policyResult.Skipped) skipped, $($policyResult.Failed) failed)"
         }
     }
     elseif ($status -ne 'Migrated') {
+        $policyStatus = 'Deferred'
         Write-Warning "    Branch policies deferred for '$targetName' because target refs could not all be verified. Re-run after reconciling refs."
         $status += ' (policies deferred)'
     }
 
     Write-Host "    Done: $label ${progress}".TrimEnd() -ForegroundColor Green
-    New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status $status
+    New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status $status `
+        -PolicyStatus $policyStatus -PolicyResult $policyResult
 
     }
     finally {

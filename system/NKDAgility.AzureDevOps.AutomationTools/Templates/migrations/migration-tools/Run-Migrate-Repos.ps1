@@ -134,6 +134,43 @@ if (-not $sharedWorkPath) {
 $runIndex = 0
 $runCount = @($runs).Count
 $summaries = @()
+function Write-RepoSummaryCsv {
+    param([object[]]$Rows, [string]$CsvPath = (Join-Path (Join-Path $PSScriptRoot 'output') 'repomigration.csv'))
+    $rowsToWrite = @($Rows | Where-Object { $_ -and $_.PSObject.Properties.Name -contains 'Repository' })
+    $csvDir = Split-Path -Parent $csvPath
+    if (-not (Test-Path -LiteralPath $csvDir)) {
+        New-Item -ItemType Directory -Path $csvDir -Force | Out-Null
+    }
+    $tempPath = Join-Path $csvDir ('.repomigration-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        if (-not $rowsToWrite) {
+            Set-Content -LiteralPath $tempPath -Encoding UTF8 -Value '"project","repo","target_repo","size_mb","status","policy_status","policy_copied","policy_existing","policy_skipped","policy_failed","policy_details"'
+        }
+        else {
+            $rowsToWrite |
+                Sort-Object SizeBytes -Descending |
+                Select-Object @(
+                    @{ Name = 'project';          Expression = { $_.SourceProject } }
+                    @{ Name = 'repo';             Expression = { $_.Repository } }
+                    @{ Name = 'target_repo';      Expression = { $_.TargetRepository } }
+                    @{ Name = 'size_mb';          Expression = { [math]::Round($_.SizeBytes / 1MB, 2) } }
+                    @{ Name = 'status';           Expression = { $_.Status } }
+                    @{ Name = 'policy_status';    Expression = { $_.PolicyStatus } }
+                    @{ Name = 'policy_copied';    Expression = { $_.PolicyCopied } }
+                    @{ Name = 'policy_existing';  Expression = { $_.PolicyExisting } }
+                    @{ Name = 'policy_skipped';   Expression = { $_.PolicySkipped } }
+                    @{ Name = 'policy_failed';    Expression = { $_.PolicyFailed } }
+                    @{ Name = 'policy_details';   Expression = { $_.PolicyDetails } }
+                ) |
+                Export-Csv -LiteralPath $tempPath -NoTypeInformation -Encoding UTF8
+        }
+        [IO.File]::Move($tempPath, $CsvPath, $true)
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force }
+    }
+    $csvPath
+}
 foreach ($run in $runs) {
     $runIndex++
 
@@ -152,12 +189,19 @@ foreach ($run in $runs) {
 
     $label = if ($settings['SourceProject']) { $settings['SourceProject'] } else { '(default)' }
     Write-Host ("==> [{0}/{1}] Invoking Migrate-Repos.ps1 for source project '{2}'" -f $runIndex, $runCount, $label) -ForegroundColor Cyan
-    $summaries += & $migrateScript @params
+    & $migrateScript @params | ForEach-Object {
+        if ($_ -and $_.PSObject.Properties.Name -contains 'Repository') {
+            $summaries += $_
+            # Keep completed repositories if a later one stops.
+            Write-RepoSummaryCsv -Rows $summaries | Out-Null
+        }
+    }
 }
 
 # Summary: list each repository processed and how big it was; persist as CSV
 # in this migration's output folder (committed engagement evidence).
 $summaries = @($summaries | Where-Object { $_ -and $_.PSObject.Properties.Name -contains 'Repository' })
+if (-not $summaries) { Write-RepoSummaryCsv -Rows @() | Out-Null }
 Write-Host ''
 Write-Host '================ Migration summary ================' -ForegroundColor Cyan
 if (-not $summaries) {
@@ -182,22 +226,7 @@ else {
     $totalBytes = ($summaries | Measure-Object -Property SizeBytes -Sum).Sum
     Write-Host ("Total: {0} repository(ies), {1:N2} GB." -f $repoCount, [math]::Round($totalBytes / 1GB, 2)) -ForegroundColor Green
 
-    $csvPath = Join-Path (Join-Path $PSScriptRoot 'output') 'repomigration.csv'
-    $csvDir = Split-Path -Parent $csvPath
-    if (-not (Test-Path -LiteralPath $csvDir)) {
-        New-Item -ItemType Directory -Path $csvDir -Force | Out-Null
-    }
-    $summaries |
-        Sort-Object SizeBytes -Descending |
-        Select-Object @(
-            @{ Name = 'project';     Expression = { $_.SourceProject } }
-            @{ Name = 'repo';        Expression = { $_.Repository } }
-            # Where it actually landed - the evidence that a governed rename was
-            # applied, and the record a later audit is reconciled against.
-            @{ Name = 'target_repo'; Expression = { $_.TargetRepository } }
-            @{ Name = 'size_mb';     Expression = { [math]::Round($_.SizeBytes / 1MB, 2) } }
-        ) |
-        Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    $csvPath = Write-RepoSummaryCsv -Rows $summaries
     Write-Host ("Wrote summary CSV: {0}" -f $csvPath) -ForegroundColor Green
 }
 Write-Host '===================================================' -ForegroundColor Cyan

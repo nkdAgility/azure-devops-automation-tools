@@ -50,8 +50,11 @@ The engine reports policies it cannot safely map, including project-wide policie
 build validation, required reviewers, status checks, and policies spanning several
 repositories. Review those warnings and configure the skipped policies manually.
 If ref verification is incomplete, policy transfer is explicitly deferred until a rerun.
-Policy failures do not undo migrated Git refs; the repository summary marks skipped or
-failed policy counts so the cutover cannot be mistaken for a complete policy transfer.
+Policy failures do not undo migrated Git refs. `output/repomigration.csv` records each
+repository's migration status, policy counts, and policy IDs with outcomes and skip
+reasons. The binder replaces the CSV after every completed repository, so completed
+work remains visible if a later repository stops. The previous CSV stays intact
+until the first repository finishes; an empty completed run writes an empty CSV.
 
 ## Renaming repos in transit
 

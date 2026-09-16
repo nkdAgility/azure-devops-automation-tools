@@ -304,7 +304,7 @@ Describe 'Migrate-Repos engine shape' {
 Describe 'Repository branch policy transfer' {
     BeforeAll {
         . ([scriptblock]::Create((Get-EngineFunctionSource -Name @(
-                    'Get-RepoPolicies', 'ConvertTo-TargetRepoPolicy', 'ConvertTo-PolicyCanonicalJson', 'Sync-RepoPolicies'))))
+                    'Get-RepoPolicies', 'Get-RepoPolicySkipReason', 'ConvertTo-TargetRepoPolicy', 'ConvertTo-PolicyCanonicalJson', 'Sync-RepoPolicies'))))
         $script:SourceOrg = 'https://dev.azure.com/source'
         $script:TargetOrg = 'https://dev.azure.com/target'
         $script:SourceProject = 'Source Project'
@@ -336,10 +336,14 @@ Describe 'Repository branch policy transfer' {
 
     It 'skips policies with external dependencies or a project-wide scope' {
         $script:SourcePolicy.type.id = '0609b952-1397-4640-95ec-e00a01b2c241'
+        Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
+            Should -BeExactly 'unsupported policy type'
         ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
             Should -BeNullOrEmpty
         $script:SourcePolicy.type.id = 'fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'
         $script:SourcePolicy.settings.scope[0].repositoryId = $null
+        Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
+            Should -BeExactly 'project-wide scope'
         ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
             Should -BeNullOrEmpty
     }
@@ -370,6 +374,8 @@ Describe 'Repository branch policy transfer' {
         $result = Sync-RepoPolicies -SourceRepoId 'source-id' -TargetRepoId 'target-id' -RepoName 'repo' -WarningAction SilentlyContinue
         $result.Copied | Should -Be 1
         $result.Skipped | Should -Be 1
+        $result.Details | Should -Contain 'policy 17 (Minimum approval count): copied'
+        $result.Details | Should -Contain 'policy 18 (Minimum approval count): skipped (unsupported policy type)'
         Should -Invoke Invoke-AdoApi -Times 1
     }
 
@@ -385,6 +391,54 @@ Describe 'Repository branch policy transfer' {
         $text = Get-Content $script:EnginePath -Raw
         $text | Should -Match "policies deferred\)"
         $text | Should -Match 'Branch policies deferred.*target refs could not all be verified'
+    }
+}
+
+Describe 'Durable repository migration summary' {
+    BeforeAll {
+        . ([scriptblock]::Create((Get-EngineFunctionSource -Name 'New-RepoSummary')))
+        $binderPath = Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Templates\migrations\migration-tools\Run-Migrate-Repos.ps1'
+        $binderAst = [System.Management.Automation.Language.Parser]::ParseFile($binderPath, [ref]$null, [ref]$null)
+        $csvFunction = $binderAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Write-RepoSummaryCsv'
+            }, $true)
+        . ([scriptblock]::Create($csvFunction.Extent.Text))
+        $script:SourceProject = 'Source Project'
+    }
+
+    It 'persists status, counts, and policy IDs in the existing CSV' {
+        $policyResult = @{ Copied = 1; Existing = 1; Skipped = 1; Failed = 0;
+            Details = @('policy 17 (Minimum approval count): copied', 'policy 18 (Merge strategy): already present',
+                'policy 692 (Commit author email validation): skipped (unsupported policy type)') }
+        $row = New-RepoSummary -Name 'source-repo' -TargetName 'target-repo' -SizeBytes 1048576 `
+            -SizeGB 0.001 -Strategy 'mirror' -Status 'Migrated (policies: 1 skipped, 0 failed)' `
+            -PolicyStatus 'Completed' -PolicyResult $policyResult
+        $path = Join-Path $TestDrive 'repomigration.csv'
+        Write-RepoSummaryCsv -Rows @($row) -CsvPath $path | Out-Null
+        $saved = Import-Csv -LiteralPath $path
+        $saved.Count | Should -Be 1
+        $saved[0].status | Should -BeExactly $row.Status
+        $saved[0].policy_copied | Should -Be '1'
+        $saved[0].policy_existing | Should -Be '1'
+        $saved[0].policy_skipped | Should -Be '1'
+        $saved[0].policy_details | Should -Match 'policy 692 \(Commit author email validation\): skipped \(unsupported policy type\)'
+    }
+
+    It 'replaces stale results with an empty current-run header' {
+        $path = Join-Path $TestDrive 'empty-repomigration.csv'
+        Set-Content -LiteralPath $path -Value 'old run data'
+        Write-RepoSummaryCsv -Rows @() -CsvPath $path | Out-Null
+        (Get-Content -LiteralPath $path -TotalCount 1) | Should -Match 'policy_details'
+        @(Import-Csv -LiteralPath $path).Count | Should -Be 0
+    }
+
+    It 'checkpoints each repository as the engine emits it' {
+        $binderPath = Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Templates\migrations\migration-tools\Run-Migrate-Repos.ps1'
+        $text = Get-Content -LiteralPath $binderPath -Raw
+        $text | Should -Match '\& \$migrateScript @params \| ForEach-Object'
+        $text | Should -Match 'Write-RepoSummaryCsv -Rows \$summaries \| Out-Null'
     }
 }
 
