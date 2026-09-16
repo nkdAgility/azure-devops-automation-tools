@@ -470,6 +470,117 @@ function New-TargetRepo {
     Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders -Method Post -Body $body
 }
 
+function Get-RepoPolicies {
+    param([string]$OrgUrl, [string]$Project, [string]$RepoId, [hashtable]$Headers)
+    $base = Get-CollectionBase -OrgUrl $OrgUrl
+    $projectSeg = [uri]::EscapeDataString($Project)
+    $repoSeg = [uri]::EscapeDataString($RepoId)
+    $url = "$base/$projectSeg/_apis/git/policy/configurations?repositoryId=$repoSeg&api-version=7.1"
+    $response = Invoke-AdoApi -Uri $url -Headers $Headers
+    if ($response.PSObject.Properties.Name -contains 'value') { return @($response.value) }
+    @($response)
+}
+
+function ConvertTo-TargetRepoPolicy {
+    param($Policy, [string]$SourceRepoId, [string]$TargetRepoId)
+
+    if ($Policy.isDeleted -or $Policy.isEnterpriseManaged) { return $null }
+    # These documented types have no cross-project build or identity reference.
+    # Everything else needs an explicit mapping and is left for manual setup.
+    $simpleTypes = @(
+        'fa4e907d-c16b-4a4c-9dfa-4906e5d171dd', # minimum approval count
+        'fa4e907d-c16b-4a4c-9dfa-4916e5d171ab', # merge strategy
+        '40e92b44-2fe1-4dd6-b3d8-74a9c21d0c6e'  # work item linking
+    )
+    if ([string]$Policy.type.id -notin $simpleTypes) { return $null }
+    if (-not $Policy.settings -or -not $Policy.settings.scope) { return $null }
+
+    $settings = $Policy.settings | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
+    foreach ($scope in @($settings.scope)) {
+        # A project-wide policy is owned by the project, not by this repository.
+        # A policy spanning several repos cannot safely be copied by one repo run.
+        if (-not $scope.repositoryId -or [string]$scope.repositoryId -ine $SourceRepoId) { return $null }
+        $scope.repositoryId = $TargetRepoId.ToLowerInvariant()
+        if ($scope.Contains('matchKind') -and $scope.matchKind) {
+            $scope.matchKind = ([string]$scope.matchKind).ToLowerInvariant()
+        }
+    }
+    @{ isEnabled = [bool]$Policy.isEnabled; isBlocking = [bool]$Policy.isBlocking;
+       type = @{ id = [string]$Policy.type.id }; settings = $settings }
+}
+
+function ConvertTo-PolicyCanonicalJson {
+    param($Value)
+    if ($Value -is [System.Collections.IDictionary]) {
+        $parts = foreach ($key in @($Value.Keys | Sort-Object)) {
+            (([string]$key | ConvertTo-Json -Compress) + ':' + (ConvertTo-PolicyCanonicalJson -Value $Value[$key]))
+        }
+        return '{' + ($parts -join ',') + '}'
+    }
+    if ($Value -is [array]) {
+        $parts = foreach ($item in $Value) { ConvertTo-PolicyCanonicalJson -Value $item }
+        return '[' + ($parts -join ',') + ']'
+    }
+    return ($Value | ConvertTo-Json -Depth 30 -Compress)
+}
+
+function Sync-RepoPolicies {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$SourceRepoId, [string]$TargetRepoId, [string]$RepoName)
+    $result = @{ Copied = 0; Existing = 0; Skipped = 0; Failed = 0 }
+    try {
+        $sourcePolicies = @(Get-RepoPolicies -OrgUrl $SourceOrg -Project $SourceProject -RepoId $SourceRepoId -Headers $script:SourceHeaders)
+        $targetPolicies = @(Get-RepoPolicies -OrgUrl $TargetOrg -Project $TargetProject -RepoId $TargetRepoId -Headers $script:TargetHeaders)
+    }
+    catch {
+        Write-Warning ("    Could not list branch policies for '{0}': {1}" -f $RepoName, $_.Exception.Message)
+        $result.Failed++
+        return $result
+    }
+
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
+    $projectSeg = [uri]::EscapeDataString($TargetProject)
+    $createUrl = "$base/$projectSeg/_apis/policy/configurations?api-version=7.1"
+    foreach ($policy in $sourcePolicies) {
+        $body = ConvertTo-TargetRepoPolicy -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId
+        $label = "policy $($policy.id) ($($policy.type.displayName))"
+        if (-not $body) {
+            $result.Skipped++
+            Write-Warning "    Skipped ${label}: type or scope needs manual mapping."
+            continue
+        }
+        $desired = ConvertTo-PolicyCanonicalJson -Value $body
+        $alreadyThere = $false
+        foreach ($existing in $targetPolicies) {
+            if ([string]$existing.type.id -ine [string]$body.type.id) { continue }
+            if ([bool]$existing.isEnabled -ne $body.isEnabled -or [bool]$existing.isBlocking -ne $body.isBlocking) { continue }
+            $existingBody = @{ isEnabled = [bool]$existing.isEnabled; isBlocking = [bool]$existing.isBlocking;
+                               type = @{ id = [string]$existing.type.id };
+                               settings = ($existing.settings | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable) }
+            foreach ($scope in @($existingBody.settings.scope)) {
+                if ($scope.repositoryId) { $scope.repositoryId = ([string]$scope.repositoryId).ToLowerInvariant() }
+                if ($scope.Contains('matchKind') -and $scope.matchKind) {
+                    $scope.matchKind = ([string]$scope.matchKind).ToLowerInvariant()
+                }
+            }
+            if ((ConvertTo-PolicyCanonicalJson -Value $existingBody) -eq $desired) { $alreadyThere = $true; break }
+        }
+        if ($alreadyThere) { $result.Existing++; continue }
+        if (-not $PSCmdlet.ShouldProcess("$RepoName $label", 'Create target branch policy')) { continue }
+        try {
+            $created = Invoke-AdoApi -Uri $createUrl -Headers $script:TargetHeaders -Method Post -Body $body
+            $targetPolicies += $created
+            $result.Copied++
+        }
+        catch {
+            $result.Failed++
+            Write-Warning ("    Could not copy {0}: {1}" -f $label, $_.Exception.Message)
+        }
+    }
+    Write-Host ("    Policies: {0} copied, {1} already present, {2} skipped, {3} failed." -f $result.Copied, $result.Existing, $result.Skipped, $result.Failed) -ForegroundColor DarkGray
+    $result
+}
+
 #region Repository options (UNDOCUMENTED API) ---------------------------------
 # Azure DevOps creates every repository with 'Commit mention linking' and 'Commit
 # mention work item resolution' ON. Pushing a migration then makes the server read
@@ -1451,6 +1562,9 @@ function Migrate-Repo {
     $action = if ($useSegmented) { 'Mirror-clone and segmented push' } else { 'Mirror-clone and mirror push' }
     if ($targetName -cne $Repo.name) { $action += " as '$targetName'" }
     if (-not $PSCmdlet.ShouldProcess($Repo.name, $action)) {
+        if ($WhatIfPreference -and $targetRepo -and $Repo.id) {
+            Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $targetRepo.id -RepoName $targetName | Out-Null
+        }
         New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'WhatIf (preview)'
         return
     }
@@ -1502,6 +1616,17 @@ function Migrate-Repo {
     }
     else {
         Write-Host ("    Verified: {0} ref(s) on the target." -f $targetRefs) -ForegroundColor DarkGray
+    }
+
+    if ($status -eq 'Migrated' -and $Repo.id) {
+        $policyResult = Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $targetRepoId -RepoName $targetName
+        if ($policyResult.Skipped -or $policyResult.Failed) {
+            $status += " (policies: $($policyResult.Skipped) skipped, $($policyResult.Failed) failed)"
+        }
+    }
+    elseif ($status -ne 'Migrated') {
+        Write-Warning "    Branch policies deferred for '$targetName' because target refs could not all be verified. Re-run after reconciling refs."
+        $status += ' (policies deferred)'
     }
 
     Write-Host "    Done: $label ${progress}".TrimEnd() -ForegroundColor Green

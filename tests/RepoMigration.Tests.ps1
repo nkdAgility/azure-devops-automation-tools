@@ -301,6 +301,93 @@ Describe 'Migrate-Repos engine shape' {
     }
 }
 
+Describe 'Repository branch policy transfer' {
+    BeforeAll {
+        . ([scriptblock]::Create((Get-EngineFunctionSource -Name @(
+                    'Get-RepoPolicies', 'ConvertTo-TargetRepoPolicy', 'ConvertTo-PolicyCanonicalJson', 'Sync-RepoPolicies'))))
+        $script:SourceOrg = 'https://dev.azure.com/source'
+        $script:TargetOrg = 'https://dev.azure.com/target'
+        $script:SourceProject = 'Source Project'
+        $script:TargetProject = 'Target Project'
+        $script:SourceHeaders = @{}
+        $script:TargetHeaders = @{}
+        function Get-CollectionBase { param([string]$OrgUrl) $OrgUrl }
+        function Invoke-AdoApi { param($Uri, $Headers, $Method, $Body) throw 'Invoke-AdoApi must be mocked in policy tests' }
+    }
+
+    BeforeEach {
+        $script:SourcePolicy = [pscustomobject]@{
+            id = 17; isEnabled = $true; isBlocking = $true; isDeleted = $false
+            type = [pscustomobject]@{ id = 'fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'; displayName = 'Minimum approval count' }
+            settings = [pscustomobject]@{
+                minimumApproverCount = 2
+                scope = @([pscustomobject]@{ repositoryId = 'source-id'; refName = 'refs/heads/main'; matchKind = 'Exact' })
+            }
+        }
+    }
+
+    It 'maps a simple policy without altering the source settings' {
+        $body = ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id'
+        $body.settings.scope[0].repositoryId | Should -BeExactly 'target-id'
+        $body.settings.minimumApproverCount | Should -Be 2
+        $body.isBlocking | Should -BeTrue
+        $script:SourcePolicy.settings.scope[0].repositoryId | Should -BeExactly 'source-id'
+    }
+
+    It 'skips policies with external dependencies or a project-wide scope' {
+        $script:SourcePolicy.type.id = '0609b952-1397-4640-95ec-e00a01b2c241'
+        ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
+            Should -BeNullOrEmpty
+        $script:SourcePolicy.type.id = 'fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'
+        $script:SourcePolicy.settings.scope[0].repositoryId = $null
+        ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
+            Should -BeNullOrEmpty
+    }
+
+    It 'does not create an identical target policy on re-run' {
+        $target = [pscustomobject]@{
+            isEnabled = $true; isBlocking = $true
+            type = $script:SourcePolicy.type
+            settings = [pscustomobject]@{
+                scope = @([pscustomobject]@{ matchKind = 'exact'; refName = 'refs/heads/main'; repositoryId = 'target-id' })
+                minimumApproverCount = 2
+            }
+        }
+        Mock Get-RepoPolicies { if ($RepoId -eq 'source-id') { @($script:SourcePolicy) } else { @($target) } }
+        Mock Invoke-AdoApi { throw 'Unexpected policy creation' }
+        $result = Sync-RepoPolicies -SourceRepoId 'source-id' -TargetRepoId 'target-id' -RepoName 'repo'
+        $result.Existing | Should -Be 1
+        $result.Copied | Should -Be 0
+        Should -Invoke Invoke-AdoApi -Times 0
+    }
+
+    It 'creates a supported policy and reports a skipped policy' {
+        $complex = $script:SourcePolicy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $complex.id = 18
+        $complex.type.id = '0609b952-1397-4640-95ec-e00a01b2c241'
+        Mock Get-RepoPolicies { if ($RepoId -eq 'source-id') { @($script:SourcePolicy, $complex) } else { @() } }
+        Mock Invoke-AdoApi { [pscustomobject]@{ type = $script:SourcePolicy.type; settings = $Body.settings; isEnabled = $true; isBlocking = $true } }
+        $result = Sync-RepoPolicies -SourceRepoId 'source-id' -TargetRepoId 'target-id' -RepoName 'repo' -WarningAction SilentlyContinue
+        $result.Copied | Should -Be 1
+        $result.Skipped | Should -Be 1
+        Should -Invoke Invoke-AdoApi -Times 1
+    }
+
+    It 'lists policies for the exact repository and accepts the collection response' {
+        $script:LastPolicyUri = $null
+        Mock Invoke-AdoApi { $script:LastPolicyUri = $Uri; [pscustomobject]@{ value = @($script:SourcePolicy) } }
+        $found = @(Get-RepoPolicies -OrgUrl $script:SourceOrg -Project $script:SourceProject -RepoId 'source-id' -Headers @{})
+        $found.Count | Should -Be 1
+        $script:LastPolicyUri | Should -BeExactly 'https://dev.azure.com/source/Source%20Project/_apis/git/policy/configurations?repositoryId=source-id&api-version=7.1'
+    }
+
+    It 'reports policy deferral when pushed refs are not fully verified' {
+        $text = Get-Content $script:EnginePath -Raw
+        $text | Should -Match "policies deferred\)"
+        $text | Should -Match 'Branch policies deferred.*target refs could not all be verified'
+    }
+}
+
 Describe 'Commit mention linking' {
 
     BeforeAll {

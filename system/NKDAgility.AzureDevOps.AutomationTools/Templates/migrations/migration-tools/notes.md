@@ -38,6 +38,21 @@ migration** rather than pushing with mentions live. If a run starts failing with
 about repository options, that endpoint has most likely changed: check it before working
 around it, and never disable the check to get a migration through.
 
+## Branch policies
+
+After a repository's refs are pushed and verified, the repo engine copies repository-scoped
+minimum approval count, merge strategy, and work item linking policies. It preserves enabled
+and blocking flags and branch scopes, and maps the source repository ID to the target.
+An identical target policy is left alone on re-run. `-WhatIf` previews policy creation
+when the target repository already exists.
+
+The engine reports policies it cannot safely map, including project-wide policies,
+build validation, required reviewers, status checks, and policies spanning several
+repositories. Review those warnings and configure the skipped policies manually.
+If ref verification is incomplete, policy transfer is explicitly deferred until a rerun.
+Policy failures do not undo migrated Git refs; the repository summary marks skipped or
+failed policy counts so the cutover cannot be mistaken for a complete policy transfer.
+
 ## Renaming repos in transit
 
 When the target names repositories by convention rather than by history - a governed
