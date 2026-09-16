@@ -23,12 +23,14 @@ function Get-AutomationSecrets {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$SecretsPath
+        [string]$SecretsPath,
+
+        [switch]$Refresh
     )
 
     if (-not $script:AutomationSecretsCache) { $script:AutomationSecretsCache = @{} }
     $cacheKey = $SecretsPath.ToLowerInvariant()
-    if ($script:AutomationSecretsCache.ContainsKey($cacheKey)) {
+    if (-not $Refresh -and $script:AutomationSecretsCache.ContainsKey($cacheKey)) {
         return $script:AutomationSecretsCache[$cacheKey]
     }
 

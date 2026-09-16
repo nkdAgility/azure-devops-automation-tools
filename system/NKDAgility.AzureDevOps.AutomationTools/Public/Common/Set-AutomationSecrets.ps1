@@ -1,7 +1,7 @@
 function Set-AutomationSecrets {
     <#
     .SYNOPSIS
-    Exports organisation PATs from the workspace secrets file as environment variables.
+    Exports organisation credentials from the workspace secrets file as environment variables.
 
     .DESCRIPTION
     Generalisation of the NKDAClient-United-Machine Set-MigrationSecrets.ps1 script. For every
@@ -14,10 +14,10 @@ function Set-AutomationSecrets {
         JSON configs leave AccessToken empty and bind names such as
         MigrationTools__Endpoints__Source__Authentication__AccessToken from the environment.
 
-    An entry whose AccessToken is still a placeholder is skipped WITH a warning; one with no
-    AccessToken at all is skipped quietly, because ambient identity is the intended state
-    rather than a misconfiguration. Only variable NAMES are
-    printed and returned - values are never written to the console or logs.
+    For Azure DevOps Services entries without a PAT, obtains an Entra token. Existing
+    process values are refreshed unless -NoClobber is explicitly requested. Both flat
+    and nested endpoint bindings are populated when either is configured. Only variable
+    names and credential sources are printed - never values.
 
     .PARAMETER SecretsPath
     Path to the secrets JSON file. Defaults to the initialised workspace's secrets path
@@ -44,7 +44,9 @@ function Set-AutomationSecrets {
         [ValidateSet('Process', 'User', 'Machine')]
         [string]$Scope = 'Process',
 
-        [switch]$NoClobber
+        [switch]$NoClobber,
+
+        [switch]$ClearMissing
     )
 
     if (-not $SecretsPath) {
@@ -53,72 +55,98 @@ function Set-AutomationSecrets {
         }
         $SecretsPath = $script:Workspace.SecretsPath
     }
-    if (-not (Test-Path -LiteralPath $SecretsPath)) {
+    if (-not (Test-Path -LiteralPath $SecretsPath) -and -not $ClearMissing) {
         throw "Secrets file not found: $SecretsPath. Copy secrets\secrets.example.json to secrets\secrets.json and fill in the PATs."
     }
 
-    $entries = Get-AutomationSecrets -SecretsPath $SecretsPath
+    # Interactive initialization owns these process bindings. Clear first so a
+    # removed organisation, binding, or secrets file cannot leave an old token live.
+    $previousNames = @{}
+    if (-not $NoClobber) {
+        foreach ($variable in (Get-ChildItem Env:)) {
+            if ($variable.Name -match '^AZDO_PAT_[A-Z0-9_]+$|^MigrationTools__Endpoints__(?:Source|Target)__(?:Authentication__)?AccessToken$') {
+                $previousNames[$variable.Name] = $true
+                [Environment]::SetEnvironmentVariable($variable.Name, $null, 'Process')
+            }
+        }
+    }
+
+    $entries = Get-AutomationSecrets -SecretsPath $SecretsPath -Refresh
     $scopeEnum = [System.EnvironmentVariableTarget]::$Scope
     $setNames = [System.Collections.Generic.List[string]]::new()
     $keptNames = [System.Collections.Generic.List[string]]::new()
 
-    $entraOrgs = [System.Collections.Generic.List[string]]::new()
-    $ambientOrgs = [System.Collections.Generic.List[string]]::new()
-
     foreach ($entry in $entries) {
         if (-not $entry.Org) { continue }
-        if (-not $entry.AccessToken) {
-            # No token is usually the INTENDED state, not a misconfiguration - ambient
-            # identity is the doctrine and a PAT only the fallback. Warning about it
-            # trains people to ignore warnings, and a real missing token then goes
-            # unnoticed. Only a leftover placeholder is worth interrupting for.
-            if ($entry.IsPlaceholder) {
-                Write-Warning "Skipping org '$($entry.Org)': its AccessToken is still the '<...>' placeholder. Fill it in, or remove the AccessToken line entirely if this organisation authenticates with Entra or your Windows identity."
-            }
-            elseif ($entry.SignInAs) {
-                $entraOrgs.Add(('{0} (as {1})' -f $entry.Org, $entry.SignInAs))
-            }
-            else {
-                # No token, no placeholder, no named identity: whatever the process is
-                # already signed in as. Entra where the collection is Entra-backed, the
-                # current Windows identity on an on-premises Azure DevOps Server - which
-                # is exactly how a domain-joined engineer reaches their own server.
-                $ambientOrgs.Add([string]$entry.Org)
-            }
-            continue
-        }
-
         $names = [System.Collections.Generic.List[string]]::new()
         foreach ($explicit in $entry.EnvVars) {
             if (-not $names.Contains([string]$explicit)) { $names.Add([string]$explicit) }
+            if ($explicit -match '^(MigrationTools__Endpoints__(?:Source|Target))__(?:Authentication__)?AccessToken$') {
+                foreach ($binding in @("$($Matches[1])__AccessToken", "$($Matches[1])__Authentication__AccessToken")) {
+                    if (-not $names.Contains($binding)) { $names.Add($binding) }
+                }
+            }
         }
         $derived = Get-DerivedPatEnvVarName -Org $entry.Org
         if (-not $names.Contains($derived)) { $names.Add($derived) }
 
+        $credential = $entry.AccessToken
+        $method = 'PAT'
+        if ($NoClobber) {
+            $existingValues = @($names | ForEach-Object { [Environment]::GetEnvironmentVariable($_) } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            if ($existingValues.Count -gt 1) {
+                throw "Org '$($entry.Org)' has conflicting pre-existing credential bindings; align CI values before initialization."
+            }
+            if ($existingValues.Count -eq 1) {
+                $credential = $existingValues[0]
+                $method = 'existing CI credential'
+            }
+        }
+        if (-not $credential) {
+            if ($entry.IsPlaceholder) {
+                Write-Warning "Org '$($entry.Org)' has a placeholder AccessToken; no credential was loaded."
+            }
+            elseif ($entry.Url -match '^https://(?:dev\.azure\.com/|[^/]+\.visualstudio\.com(?:/|$))') {
+                try {
+                    $credential = Get-AzureDevOpsAccessToken -Collection $entry.Url
+                    $method = 'Entra'
+                }
+                catch {
+                    Write-Warning "Org '$($entry.Org)': Entra sign-in failed; credential bindings remain absent. Sign in or configure a PAT, then rerun init.ps1."
+                }
+            }
+        }
+
+        if (-not $credential) {
+            foreach ($name in $names) {
+                if (-not $NoClobber) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+                Write-FixStep "$($entry.Org): $name absent"
+            }
+            continue
+        }
+
         foreach ($name in $names) {
             if ($NoClobber -and -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
                 if (-not $keptNames.Contains($name)) { $keptNames.Add($name) }
+                Write-FixStep "$($entry.Org): $name kept (existing value)"
                 continue
             }
-            Set-Item -Path ("Env:{0}" -f $name) -Value $entry.AccessToken
+            $action = if ($previousNames.ContainsKey($name) -or -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { 'refreshed' } else { 'loaded' }
+            Set-Item -Path ("Env:{0}" -f $name) -Value $credential
             if ($Scope -ne 'Process') {
-                [System.Environment]::SetEnvironmentVariable($name, $entry.AccessToken, $scopeEnum)
+                [System.Environment]::SetEnvironmentVariable($name, $credential, $scopeEnum)
             }
             if (-not $setNames.Contains($name)) { $setNames.Add($name) }
+            Write-FixStep "$($entry.Org): $name $action ($method)"
         }
     }
 
-    if ($entraOrgs.Count) {
-        Write-FixStep "Entra sign-in (no PAT needed): $($entraOrgs -join ', ')"
+    foreach ($name in $previousNames.Keys) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+            Write-FixStep "$name cleared (absent from current secrets)"
+        }
     }
-    if ($ambientOrgs.Count) {
-        Write-FixStep "Ambient identity (no PAT needed): $($ambientOrgs -join ', ')"
-    }
-    if ($keptNames.Count) {
-        Write-FixStep "Left $($keptNames.Count) environment variable(s) already set (CI secrets and shell overrides win): $($keptNames -join ', ')"
-    }
-    Write-FixStep "Loaded $($setNames.Count) environment variable(s) from secrets (scope: $Scope)."
-    $setNames | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 
     return $setNames
 }

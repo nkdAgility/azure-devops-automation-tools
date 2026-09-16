@@ -612,12 +612,11 @@ Initialize-AutomationWorkspace -Path $workspaceRoot | Out-Null
 
 # --- Export the workspace secrets as environment variables ------------------
 # One secrets file serves every capability: the migration tools bind them into .NET
-# config, and a governance manifest.yaml names one as its accessToken. -NoClobber means
-# a CI-provided secret or a deliberate per-shell override always wins over the file.
+# config, and a governance manifest.yaml names one as its accessToken. Interactive
+# sessions refresh process credentials on every init; CI can preserve injected values.
 $secretsPath = (Get-AutomationWorkspace).SecretsPath
-if (Test-Path -LiteralPath $secretsPath) {
-    Set-AutomationSecrets -SecretsPath $secretsPath -NoClobber | Out-Null
-}
+$preserveCiCredentials = $env:CI -in @('true', '1')
+Set-AutomationSecrets -SecretsPath $secretsPath -NoClobber:$preserveCiCredentials -ClearMissing | Out-Null
 
 # --- Load each capability ---------------------------------------------------
 foreach ($loaded in $loadedCapabilities) {
