@@ -206,7 +206,26 @@ function Get-AuthHeader {
 
 function Get-OrgName {
     param([string]$OrgUrl)
-    ($OrgUrl.TrimEnd('/') -split '/')[-1]
+    $uri = [uri]$OrgUrl
+    if ($uri.Host -match '^([^.]+)\.visualstudio\.com$') {
+        return $Matches[1]
+    }
+    ($uri.AbsolutePath.TrimEnd('/') -split '/')[-1]
+}
+
+function New-AdoRequestError {
+    param([string]$Operation, [string]$Method, [string]$Uri, $ErrorRecord)
+    $safeUri = [System.UriBuilder]::new($Uri)
+    $safeUri.UserName = ''
+    $safeUri.Password = ''
+    $safeUri.Query = ''
+    $safeUri.Fragment = ''
+    $safeUrl = $safeUri.Uri.GetLeftPart([System.UriPartial]::Path)
+    $response = $ErrorRecord.Exception.PSObject.Properties['Response']
+    $status = if ($response -and $response.Value) { $response.Value.StatusCode } else { $null }
+    if ($null -eq $status) { $status = 'unavailable' }
+    else { $status = [int]$status }
+    [System.InvalidOperationException]::new("$Operation failed: $Method $safeUrl (HTTP $status).")
 }
 
 function Initialize-SourceAuth {
@@ -317,7 +336,11 @@ function Invoke-AdoApi {
         $params.Remove('Headers')
         $params.UseDefaultCredentials = $true
     }
-    Invoke-RestMethod @params
+    try { Invoke-RestMethod @params }
+    catch {
+        $operation = (Get-PSCallStack)[1].Command
+        throw (New-AdoRequestError -Operation $operation -Method $Method -Uri $Uri -ErrorRecord $_)
+    }
 }
 
 function Invoke-AdoWebRequest {
@@ -342,7 +365,12 @@ function Invoke-AdoWebRequest {
     if ($h.Count) { $request.Headers = $h }
     if (-not $authPresent) { $request.UseDefaultCredentials = $true }
     if ($ExtraArgs) { foreach ($k in $ExtraArgs.Keys) { $request[$k] = $ExtraArgs[$k] } }
-    Invoke-WebRequest @request
+    try { Invoke-WebRequest @request }
+    catch {
+        $operation = (Get-PSCallStack)[1].Command
+        $method = if ($request.Method) { $request.Method } else { 'Get' }
+        throw (New-AdoRequestError -Operation $operation -Method $method -Uri $Uri -ErrorRecord $_)
+    }
 }
 
 function Write-Step {
