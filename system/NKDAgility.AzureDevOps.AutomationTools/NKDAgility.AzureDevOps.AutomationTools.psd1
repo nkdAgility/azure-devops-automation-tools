@@ -29,6 +29,7 @@
         'Set-AutomationSecrets'
         # Common - workspace
         'Initialize-AutomationWorkspace'
+        'Invoke-AutomationWorkspaceInit'
         'Get-AutomationWorkspace'
         # Common - scaffolding
         'New-AutomationWorkspace'

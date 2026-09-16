@@ -195,3 +195,8 @@ Safety Notes:
 - PAT values are never logged.
 
 To adapt behaviour (e.g., additive push instead of mirror) extend the script locally—by design optional switches were removed for simplicity.
+# Workspace bootstrap
+
+Customer `init.ps1` is a small loader. It locates the automation tools module and
+calls `Invoke-AutomationWorkspaceInit`, which owns capability resolution,
+materialisation, scaffolding, guidance, workspace setup, and secrets loading.

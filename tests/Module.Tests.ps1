@@ -181,7 +181,7 @@ Describe 'Workspace init.ps1' {
     # capability's module is copied from, and it shipped broken.
 
     BeforeAll {
-        $template = Join-Path $script:ModuleRoot 'Templates\customer-repo\init.ps1'
+        $template = Join-Path $script:ModuleRoot 'Public\Common\Invoke-AutomationWorkspaceInit.ps1'
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($template, [ref]$null, [ref]$null)
         $assignment = $ast.Find({
                 param($node)
