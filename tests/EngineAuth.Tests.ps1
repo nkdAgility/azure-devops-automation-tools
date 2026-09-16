@@ -139,6 +139,11 @@ Describe 'Binder templates treat tokens as optional fallbacks (<Binder>)' -ForEa
         }
         $script:BinderText | Should -Match 'AllowMissing:\(\$fallbackTokenParams -contains' -Because 'the lenient switch must actually be wired to the expansion call'
     }
+
+    It 'resolves one engine path from the active exported command when two module copies are loaded' {
+        $script:BinderText | Should -Match '\$moduleBase = \(Get-Command -Name Resolve-AzureDevOpsAuth -CommandType Function -ErrorAction Stop\)\.Module\.ModuleBase'
+        $script:BinderText | Should -Not -Match '\$moduleBase = \(Get-Module -Name'
+    }
 }
 
 Describe 'Shared credential resolver (Resolve-AzureDevOpsAuth)' {

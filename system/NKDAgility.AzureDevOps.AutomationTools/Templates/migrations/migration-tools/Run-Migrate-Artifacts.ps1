@@ -54,7 +54,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 # The engine ships INSIDE the module, so it travels with it into .system\ and stays
 # locked to the module version that drives it. Resolve it from ModuleBase - never
 # by walking up, because above the module is the customer's own repo.
-$moduleBase = (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools').ModuleBase
+$moduleBase = (Get-Command -Name Resolve-AzureDevOpsAuth -CommandType Function -ErrorAction Stop).Module.ModuleBase
 $migrateScript = Join-Path $moduleBase 'Engines\Migrate-Artifacts.ps1'
 if (-not (Test-Path -LiteralPath $migrateScript)) {
     throw "Migrate-Artifacts.ps1 not found at: $migrateScript"
