@@ -34,7 +34,7 @@ The old standalone mode — running from this repo's root with `data/<environmen
 | `Public/WorkItemTracking` | REST reads useful to every toolchain: work item types, link types, links, link inventories |
 | `Engines/` | Standalone scripts invoked by path: git repo + wiki migration, artifact feeds, wiki work item link rewriting, comment attachment link repair, work item ID counter alignment |
 
-For historical build and release drops, the [pipeline artifact inventory and Universal Package publishing engines](system/NKDAgility.AzureDevOps.AutomationTools/README.md#historical-build-pipeline-and-release-artifacts) are called by a client workspace's single migration runbook. They are separate from Azure Artifacts feed migration.
+For historical build and release drops, `Engines/Migrate-PipelineArtifacts.ps1` and `Engines/Publish-PipelineArtifacts.ps1` are called by a client workspace's single migration runbook. The [pipeline artifact guide](system/NKDAgility.AzureDevOps.AutomationTools/README.md#historical-build-pipeline-and-release-artifacts) documents both engines. They are separate from Azure Artifacts feed migration.
 
 Two conventions worth knowing before you read any runbook:
 
