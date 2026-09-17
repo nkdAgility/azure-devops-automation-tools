@@ -1,0 +1,9 @@
+# Files this capability OWNS in a customer workspace. init.ps1 overwrites each one
+# from Templates\customer-repo\ on every run, so they must be edited in the tools repo.
+# Everything else in the template is a seed: copied once, then the workspace's own.
+#
+# One relative path per line. Blank lines and # comments ignored.
+
+init.ps1
+secrets/secrets.example.json
+.claude/hooks/deny-system-edits.ps1

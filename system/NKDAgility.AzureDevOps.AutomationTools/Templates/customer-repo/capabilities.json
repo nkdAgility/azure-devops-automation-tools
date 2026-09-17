@@ -1,0 +1,17 @@
+{
+  "$comment": "Which nkdAgility engines this workspace uses. Add an entry to take on a capability; remove one to drop it. init.ps1 materialises each into .system/ and loads it. This file is yours - it is never overwritten.",
+  "capabilities": [
+    {
+      "name": "automation",
+      "module": "NKDAgility.AzureDevOps.AutomationTools",
+      "repo": "https://github.com/nkdAgility/azure-devops-automation-tools.git"
+    }
+  ],
+  "available": {
+    "governance": {
+      "name": "governance",
+      "module": "NKDAgility.AzureDevOps.Governance",
+      "repo": "https://github.com/nkdAgility/azure-devops-governance-as-code.git"
+    }
+  }
+}

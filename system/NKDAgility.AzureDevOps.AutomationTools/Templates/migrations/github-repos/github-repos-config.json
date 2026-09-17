@@ -1,0 +1,17 @@
+{
+  "SourceOrg": "https://dev.azure.com/your-source-org",
+  "SourcePat": "$ENV:AZDO_PAT_YOUR_SOURCE_ORG",
+  "GitHubOrg": "your-github-org",
+  "GitHubToken": "$ENV:GITHUB_TOKEN",
+  "InventoryCsv": "repo-inventory.csv",
+  "OversizeDecisions": "oversize-decisions.json",
+  "Visibility": "Private",
+  "MaxPushSizeGB": 2,
+  "CommitBatchSize": 2000,
+  "WorkPath": null,
+  "KeepClones": true,
+  "SkipLfs": false,
+  "SkipOversizeCheck": false,
+  "LfsMigrateOversize": false,
+  "LfsMigrateAboveMB": 100
+}

@@ -1,0 +1,7 @@
+{
+  "queryString": "api-version=7.0",
+  "queryStringPreview": "api-version=7.1-preview.3",
+  "dataFolder": "data",
+  "outputFolder": "output",
+  "exportsFolder": "exports"
+}

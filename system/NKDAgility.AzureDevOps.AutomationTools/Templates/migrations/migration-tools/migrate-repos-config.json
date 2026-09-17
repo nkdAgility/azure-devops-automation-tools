@@ -1,0 +1,14 @@
+{
+  "WorkPath": null,
+  "KeepClones": true,
+  "Runs": [
+    {
+      "SourceOrg": "https://dev.azure.com/your-source-org",
+      "SourcePat": "$ENV:AZDO_PAT_YOUR_SOURCE_ORG",
+      "SourceProject": "SourceProject",
+      "TargetOrg": "https://dev.azure.com/your-target-org",
+      "TargetPat": "$ENV:AZDO_PAT_YOUR_TARGET_ORG",
+      "TargetProject": "TargetProject"
+    }
+  ]
+}

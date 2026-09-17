@@ -1,0 +1,73 @@
+{
+  "$schema": "https://devopsmigration.io/schema/configuration.schema.json",
+  "Serilog": {
+    "MinimumLevel": "Information"
+  },
+  "MigrationTools": {
+    "Version": "16.3",
+    "Endpoints": {
+      "Source": {
+        "EndpointType": "TfsTeamProjectEndpoint",
+        "Collection": "https://dev.azure.com/your-source-org/",
+        "Project": "SourceProject",
+        "Authentication": {
+          "AuthenticationMode": "AccessToken",
+          "AccessToken": ""
+        },
+        "ReflectedWorkItemIdField": "Custom.ReflectedWorkItemId",
+        "LanguageMaps": {
+          "AreaPath": "Area",
+          "IterationPath": "Iteration"
+        },
+        "ProductVersion": "OnPremises"
+      },
+      "Target": {
+        "EndpointType": "TfsTeamProjectEndpoint",
+        "Collection": "https://dev.azure.com/your-target-org/",
+        "Project": "TargetProject",
+        "Authentication": {
+          "AuthenticationMode": "AccessToken",
+          "AccessToken": ""
+        },
+        "ReflectedWorkItemIdField": "Custom.ReflectedWorkItemId",
+        "LanguageMaps": {
+          "AreaPath": "Area",
+          "IterationPath": "Iteration"
+        },
+        "ProductVersion": "OnPremises"
+      }
+    },
+    "Processors": [
+      {
+        "ProcessorType": "TfsWorkItemMigrationProcessor",
+        "Enabled": true,
+        "WIQLQuery": "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @TeamProject AND [System.WorkItemType] NOT IN ('Test Suite', 'Test Plan','Shared Steps','Shared Parameter','Feedback Request') ORDER BY [System.ChangedDate] desc",
+        "FixHtmlAttachmentLinks": true,
+        "WorkItemCreateRetryLimit": 5,
+        "FilterWorkItemsThatAlreadyExistInTarget": false,
+        "GenerateMigrationComment": true,
+        "SourceName": "Source",
+        "TargetName": "Target"
+      }
+    ],
+    "CommonTools": {
+      "TfsNodeStructureTool": {
+        "Enabled": true,
+        "Areas": {
+          "Filters": [],
+          "Mappings": []
+        },
+        "Iterations": {
+          "Filters": [],
+          "Mappings": []
+        },
+        "ReplicateAllExistingNodes": true,
+        "ShouldCreateMissingRevisionPaths": true
+      },
+      "FieldMappingTool": {
+        "Enabled": false,
+        "FieldMaps": []
+      }
+    }
+  }
+}
