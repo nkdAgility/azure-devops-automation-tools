@@ -134,6 +134,8 @@ Describe 'Publish pipeline artifact plan and transfer' {
     It 'downloads the selected original file and publishes its staging directory' {
         (New-InventoryRow '2.13.0.4' 101) | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
         $global:publishCallCount = 0
+        $global:publishMessages = @()
+        Mock Write-Host { $global:publishMessages += [string]$Object }
         Mock Invoke-RestMethod {
             if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
             if ($Uri -like 'https://pkgs.dev.azure.com/*') {
@@ -159,6 +161,30 @@ Describe 'Publish pipeline artifact plan and transfer' {
         $global:publishedFiles[0].Name | Should -Be 'UM.DB.Opc.2.13.0.4.zip'
         $global:publishedFiles[0].Bytes | Should -Be '65,66,67'
         @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
+        ($global:publishMessages | Where-Object { $_ -match '^Publish progress:' }) | Should -HaveCount 2
+        $global:publishMessages[-1] | Should -Match 'Done 1 \| Skipped 0 \| To go 0 \| Elapsed .* \| ETA 00:00:00'
+        ($global:publishMessages | Where-Object { $_ -match '^Published:' }) | Should -HaveCount 0
+    }
+
+    It 'reports remaining work when a publish run stops on a source error' {
+        (New-InventoryRow '2.13.0.4' 101) | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
+        $global:publishMessages = @()
+        Mock Write-Host { $global:publishMessages += [string]$Object }
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
+            if ($Uri -like 'https://pkgs.dev.azure.com/*') {
+                $error = [Exception]::new('Not found')
+                $error | Add-Member -NotePropertyName Response -NotePropertyValue @{ StatusCode = 404 }
+                throw $error
+            }
+            if ($Uri -like '*/_apis/build/builds/101/artifacts?*') {
+                return [pscustomobject]@{ resource = [pscustomobject]@{ type = 'Unexpected'; data = '' } }
+            }
+            throw "Unexpected request: $Uri"
+        }
+
+        { & $engine @common -Publish } | Should -Throw '*not a Container artifact*'
+        $global:publishMessages[-1] | Should -Match '^Publish progress: Stopped: Done 0 \| Skipped 0 \| To go 1 \| Elapsed .* \| ETA calculating$'
     }
 
     It 'replans an interrupted run and skips a version published previously' {
@@ -193,6 +219,8 @@ Describe 'Publish pipeline artifact plan and transfer' {
         (New-InventoryRow '2.13.0.4' 101) | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
         $global:publishCallCount = 0
         $global:versionLookupCount = 0
+        $global:publishMessages = @()
+        Mock Write-Host { $global:publishMessages += [string]$Object }
         Mock Invoke-RestMethod {
             if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
             if ($Uri -like 'https://pkgs.dev.azure.com/*') {
@@ -214,6 +242,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
         $global:publishCallCount | Should -Be 0
         Should -Invoke Invoke-WebRequest -Times 0
         @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
+        $global:publishMessages[-1] | Should -Match 'Done 0 \| Skipped 1 \| To go 0'
     }
 
     It 'ignores a staged older revision when publishing a newer selection' {

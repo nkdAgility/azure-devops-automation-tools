@@ -254,11 +254,37 @@ function Invoke-SourceApi {
 $workRoot = [IO.Path]::GetFullPath($WorkPath)
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 $artifactCache = @{}
+$publishClock = [Diagnostics.Stopwatch]::StartNew()
+$publishTotal = $ready.Count
+$publishDone = 0
+$publishSkipped = 0
+$lastStatus = [TimeSpan]::Zero
+function Write-PublishStatus {
+    param([switch]$Final, [switch]$Stopped)
+    $processed = $publishDone + $publishSkipped
+    $remaining = $publishTotal - $processed
+    $elapsed = $publishClock.Elapsed
+    $eta = if ($processed -gt 0 -and $remaining -gt 0) {
+        [TimeSpan]::FromSeconds($elapsed.TotalSeconds * $remaining / $processed).ToString('hh\:mm\:ss')
+    } elseif ($remaining -eq 0) { '00:00:00' } else { 'calculating' }
+    $status = "Done $publishDone | Skipped $publishSkipped | To go $remaining | Elapsed $($elapsed.ToString('hh\:mm\:ss')) | ETA $eta"
+    if ($Stopped) { $status = "Stopped: $status" }
+    Write-Progress -Activity 'Publishing Universal Packages' -Status $status -PercentComplete ([math]::Floor(100 * $processed / $publishTotal)) -Completed:$Final
+    if ($Final -or $processed -eq 0 -or $processed % 10 -eq 0 -or ($elapsed - $lastStatus).TotalSeconds -ge 60) {
+        Write-Host "Publish progress: $status"
+        $script:lastStatus = $elapsed
+    }
+}
+Write-PublishStatus
+$publishRunCompleted = $false
+try {
 foreach ($row in $ready) {
     if (Test-TargetVersion -Row $row) {
         $row.Status = 'AlreadyPublished'
         $row.Detail = 'This package version appeared in the target feed before upload; skipped.'
         Write-PublishPlan
+        $publishSkipped++
+        Write-PublishStatus
         continue
     }
     $artifactKey = "$($row.BuildId)`n$($row.Artifact)"
@@ -306,6 +332,8 @@ foreach ($row in $ready) {
         Write-PublishPlan
         Remove-Item -LiteralPath $filePath
         Remove-Item -LiteralPath $packageDir
+        $publishSkipped++
+        Write-PublishStatus
         continue
     }
 
@@ -317,10 +345,16 @@ foreach ($row in $ready) {
     } finally {
         [Environment]::SetEnvironmentVariable('AZURE_DEVOPS_EXT_PAT', $previousPat)
     }
-    Write-Host "Published: $($row.PackageName) $($row.PackageVersion) ($($row.FileName))"
     $row.Status = 'Published'
     $row.Detail = 'Published by this run.'
     Write-PublishPlan
+    $publishDone++
+    Write-PublishStatus
     Remove-Item -LiteralPath $filePath
     Remove-Item -LiteralPath $packageDir
+}
+$publishRunCompleted = $true
+} finally {
+    $publishClock.Stop()
+    Write-PublishStatus -Final -Stopped:(-not $publishRunCompleted)
 }
