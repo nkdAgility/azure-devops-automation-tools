@@ -33,9 +33,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if (-not (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools')) {
-    . "$PSScriptRoot\..\..\init.ps1"
-}
+. "$PSScriptRoot\..\..\init.ps1"
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"

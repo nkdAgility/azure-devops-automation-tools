@@ -26,9 +26,7 @@ $ErrorActionPreference = 'Stop'
 # variable into an error instead of a silent empty string mid-migration.
 Set-StrictMode -Version Latest
 
-if (-not (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools')) {
-    . "$PSScriptRoot\..\..\init.ps1"
-}
+. "$PSScriptRoot\..\..\init.ps1"
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
