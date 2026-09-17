@@ -17,10 +17,12 @@ param(
     [Parameter(Mandatory)][string]$SourceProject,
     [string]$SourcePat,
     [Parameter(Mandatory)][string]$CsvPath,
+    [Parameter(Mandatory)][string]$SummaryPath,
     [Parameter(Mandatory)][string]$CoveragePath,
     [Parameter(Mandatory)][string]$ErrorsPath,
-    [string[]]$Extensions = @('.zip', '.nspec', '.nuspec', '.nupkg'),
-    [string]$VersionPattern = '(?<!\d)\d+\.\d+\.\d+(?:\.\d+)*(?:-[a-zA-Z0-9.-]+)?(?=\.[^.]+$)',
+    [string[]]$ExtensionInclude = @('.zip', '.nspec', '.nuspec', '.nupkg'),
+    [string[]]$ExtensionExclude,
+    [string]$FilePattern = '^(?<product>.+?)[.-](?<version>\d+\.\d+\.\d+(?:\.\d+)*(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)\.(?<format>[A-Za-z0-9]+)$',
     [string[]]$BranchInclude,
     [string[]]$BranchExclude,
     [int]$MaxBuilds = 0,
@@ -75,12 +77,20 @@ function Write-CsvRow {
     $Writer.WriteLine($line)
 }
 
-$allowedExtensions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach ($extension in $Extensions) {
-    if ($extension -notmatch '^\.[a-z0-9]+$') { throw "Invalid extension '$extension'. Include the leading dot." }
-    [void]$allowedExtensions.Add($extension)
+$fileRegex = [regex]::new($FilePattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase, [TimeSpan]::FromSeconds(1))
+foreach ($group in @('product', 'version', 'format')) {
+    if ($fileRegex.GetGroupNames() -notcontains $group) { throw "FilePattern must contain a named '$group' capture." }
 }
-$versionRegex = [regex]::new($VersionPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase, [TimeSpan]::FromSeconds(1))
+$extensionIncludes = [Collections.Generic.List[Management.Automation.WildcardPattern]]::new()
+$extensionExcludes = [Collections.Generic.List[Management.Automation.WildcardPattern]]::new()
+foreach ($pattern in $ExtensionInclude) {
+    if ([string]::IsNullOrWhiteSpace($pattern)) { throw 'Extension include patterns cannot be empty.' }
+    $extensionIncludes.Add([Management.Automation.WildcardPattern]::new($pattern, [Management.Automation.WildcardOptions]::IgnoreCase))
+}
+foreach ($pattern in $ExtensionExclude) {
+    if ([string]::IsNullOrWhiteSpace($pattern)) { throw 'Extension exclude patterns cannot be empty.' }
+    $extensionExcludes.Add([Management.Automation.WildcardPattern]::new($pattern, [Management.Automation.WildcardOptions]::IgnoreCase))
+}
 $includeGlobs = [Collections.Generic.List[Management.Automation.WildcardPattern]]::new()
 $excludeGlobs = [Collections.Generic.List[Management.Automation.WildcardPattern]]::new()
 foreach ($pattern in $BranchInclude) {
@@ -100,12 +110,28 @@ function Test-SelectedBranch {
     foreach ($glob in $excludeGlobs) { if ($glob.IsMatch($value)) { return $false } }
     $true
 }
-function Test-CandidateFile {
+function Test-SelectedExtension {
+    param([string]$Extension)
+    $included = $extensionIncludes.Count -eq 0
+    foreach ($glob in $extensionIncludes) { if ($glob.IsMatch($extension)) { $included = $true; break } }
+    if (-not $included) { return $false }
+    foreach ($glob in $extensionExcludes) { if ($glob.IsMatch($extension)) { return $false } }
+    $true
+}
+function Get-CandidateMetadata {
     param([string]$Path)
-    if (-not $Path) { return $false }
+    if (-not $Path) { return $null }
     $name = [IO.Path]::GetFileName($Path)
-    $allowedExtensions.Contains([IO.Path]::GetExtension($name)) -and
-        $versionRegex.IsMatch($name)
+    $extension = [IO.Path]::GetExtension($name)
+    if (-not (Test-SelectedExtension -Extension $extension)) { return $null }
+    $match = $fileRegex.Match($name)
+    if (-not $match.Success) { return $null }
+    $product = $match.Groups['product'].Value
+    $version = $match.Groups['version'].Value
+    $format = $match.Groups['format'].Value
+    if (-not $product -or -not $version -or -not $format) { return $null }
+    if ($extension -ine '.' + $format) { return $null }
+    [pscustomobject]@{ Product = $product; Version = $version; Format = $format }
 }
 
 function Write-ArtifactRow {
@@ -115,6 +141,13 @@ function Write-ArtifactRow {
         [string]$ArtifactType, [string]$SourceProjectName, $SourceRunId,
         [string]$SourceVersion, [string]$Path, $Bytes, [string]$Status
     )
+    if (-not (Test-SelectedBranch -Branch $Branch)) { return }
+    $candidate = if ($Status -eq 'File' -or $Status -eq 'ReleaseFileReference') { Get-CandidateMetadata -Path $Path } else { $null }
+    if ($Status -eq 'File' -and $null -eq $candidate) {
+        if (-not (Test-SelectedExtension -Extension ([IO.Path]::GetExtension($Path)))) { return }
+        $Status = 'FilePatternNotMatched'
+    }
+    if ($Status -eq 'ReleaseFileReference' -and $null -eq $candidate) { return }
     $row = [pscustomobject]@{
         Location = $Location
         RunId = $RunId
@@ -129,15 +162,32 @@ function Write-ArtifactRow {
         SourceVersion = $SourceVersion
         Path = $Path
         FileName = if ($Path) { [IO.Path]::GetFileName($Path) } else { '' }
+        Product = if ($candidate) { $candidate.Product } else { '' }
+        Version = if ($candidate) { $candidate.Version } else { '' }
+        Format = if ($candidate) { $candidate.Format } else { '' }
         Bytes = $Bytes
         Status = $Status
     }
-    if (-not (Test-SelectedBranch -Branch $Branch)) { return }
     if ($Status -eq 'File' -or $Status -eq 'ReleaseFileReference') {
-        if (-not (Test-CandidateFile -Path $Path)) { return }
         Write-CsvRow $script:csvWriter $row
         $script:rowCount++
         $script:fileCount++
+        $productKey = $candidate.Product
+        if (-not $script:productSummary.ContainsKey($productKey)) {
+            $script:productSummary[$productKey] = [pscustomobject]@{
+                Versions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                Files = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                Formats = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                BuildRows = 0
+                ReleaseRows = 0
+            }
+        }
+        $summary = $script:productSummary[$productKey]
+        [void]$summary.Versions.Add($candidate.Version)
+        [void]$summary.Files.Add($row.FileName)
+        [void]$summary.Formats.Add($candidate.Format)
+        if ($Location -eq 'BuildArtifact') { $summary.BuildRows++ }
+        elseif ($Location -eq 'ReleaseArtifact') { $summary.ReleaseRows++ }
         if ($Location -eq 'BuildArtifact') {
             $key = [string]$RunId
             if (-not $script:candidatesByBuild.ContainsKey($key)) {
@@ -163,20 +213,23 @@ function Write-InventoryError {
     $script:errorCount++
 }
 
-foreach ($path in @($CsvPath, $CoveragePath, $ErrorsPath)) {
+foreach ($path in @($CsvPath, $SummaryPath, $CoveragePath, $ErrorsPath)) {
     $parent = Split-Path -Parent $path
     if ($parent -and -not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 }
 $script:csvWriter = [IO.StreamWriter]::new([IO.Path]::GetFullPath($CsvPath), $false, [Text.UTF8Encoding]::new($true))
+$script:summaryWriter = [IO.StreamWriter]::new([IO.Path]::GetFullPath($SummaryPath), $false, [Text.UTF8Encoding]::new($true))
 $script:coverageWriter = [IO.StreamWriter]::new([IO.Path]::GetFullPath($CoveragePath), $false, [Text.UTF8Encoding]::new($true))
 $script:errorWriter = [IO.StreamWriter]::new([IO.Path]::GetFullPath($ErrorsPath), $false, [Text.UTF8Encoding]::new($true))
-$columns = 'Location,RunId,RunName,Definition,CreatedOn,Branch,Artifact,ArtifactType,SourceProject,SourceRunId,SourceVersion,Path,FileName,Bytes,Status'
+$columns = 'Location,RunId,RunName,Definition,CreatedOn,Branch,Artifact,ArtifactType,SourceProject,SourceRunId,SourceVersion,Path,FileName,Product,Version,Format,Bytes,Status'
 $script:csvWriter.WriteLine($columns)
+$script:summaryWriter.WriteLine('Product,Versions,UniqueFiles,Formats,BuildRows,ReleaseRows')
 $script:coverageWriter.WriteLine($columns)
 $script:errorWriter.WriteLine('Location,RunId,Artifact,Error')
 $script:candidatesByBuild = @{}
+$script:productSummary = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
 $script:branchByBuild = @{}
 $script:authMode = ''
 $script:rowCount = 0
@@ -268,13 +321,26 @@ try {
     } while ($continuation -and ($MaxReleases -eq 0 -or $releaseCount -lt $MaxReleases))
 }
 finally {
+    foreach ($product in @($script:productSummary.Keys | Sort-Object)) {
+        $summary = $script:productSummary[$product]
+        Write-CsvRow $script:summaryWriter ([pscustomobject]@{
+            Product = $product
+            Versions = $summary.Versions.Count
+            UniqueFiles = $summary.Files.Count
+            Formats = (@($summary.Formats | Sort-Object) -join ',')
+            BuildRows = $summary.BuildRows
+            ReleaseRows = $summary.ReleaseRows
+        })
+    }
     $script:csvWriter.Dispose()
+    $script:summaryWriter.Dispose()
     $script:coverageWriter.Dispose()
     $script:errorWriter.Dispose()
 }
 
 Write-Host "Scan finished: $buildCount builds, $releaseCount releases, $script:fileCount candidate rows, $script:metadataCount coverage rows, $script:errorCount errors."
 Write-Host "Candidates: $CsvPath"
+Write-Host "Products: $SummaryPath"
 Write-Host "Coverage: $CoveragePath"
 Write-Host "Errors: $ErrorsPath"
 if ($script:errorCount -gt 0) {

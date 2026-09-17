@@ -1,0 +1,279 @@
+<#
+.SYNOPSIS
+    Plans or publishes inventoried build files as Universal Packages.
+
+.DESCRIPTION
+    Uses BuildArtifact/File rows from the pipeline artifact inventory. Release
+    rows refer to those same build files and are not published a second time.
+    Checks the destination before writing the plan, marking versions that
+    already exist as AlreadyPublished. -Publish downloads one original file
+    per remaining package, checks its length, and publishes without recompression.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$InventoryPath,
+    [Parameter(Mandatory)][string]$PlanPath,
+    [Parameter(Mandatory)][string]$WorkPath,
+    [Parameter(Mandatory)][string]$SourceOrg,
+    [Parameter(Mandatory)][string]$SourceProject,
+    [string]$SourcePat,
+    [Parameter(Mandatory)][string]$TargetOrg,
+    [Parameter(Mandatory)][string]$TargetProject,
+    [Parameter(Mandatory)][object[]]$FeedMappings,
+    [string]$TargetPat,
+    [switch]$Publish,
+    [switch]$AllowPartial,
+    [switch]$WhatIf
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+if ($Publish -and $WhatIf) { throw 'Use -Publish for uploads or -WhatIf for a plan, not both.' }
+if (-not (Test-Path -LiteralPath $InventoryPath -PathType Leaf)) { throw "Inventory not found: $InventoryPath" }
+
+function Convert-PackageVersion {
+    param([string]$Version)
+    $match = [regex]::Match($Version, '^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:\.(?<revision>0|[1-9]\d*))?(?:-(?<suffix>[a-zA-Z0-9][a-zA-Z0-9.-]*))?$')
+    if (-not $match.Success) { return $null }
+    $revision = if ($match.Groups['revision'].Success) { [long]$match.Groups['revision'].Value } else { [long]-1 }
+    $packageVersion = "$($match.Groups['major'].Value).$($match.Groups['minor'].Value).$($match.Groups['patch'].Value)"
+    if ($match.Groups['suffix'].Success) { $packageVersion += '-' + $match.Groups['suffix'].Value.ToLowerInvariant() }
+    [pscustomobject]@{
+        PackageVersion = $packageVersion
+        Revision = $revision
+    }
+}
+
+$requiredColumns = @('Location', 'Status', 'RunId', 'Artifact', 'Path', 'FileName', 'Product', 'Version', 'Format', 'Bytes', 'Branch')
+$compiledMappings = [Collections.Generic.List[object]]::new()
+foreach ($mapping in $FeedMappings) {
+    if (-not $mapping.ProductPattern -or -not $mapping.Feed) { throw 'Each feed mapping needs ProductPattern and Feed.' }
+    $compiledMappings.Add([pscustomobject]@{
+        Pattern = [Management.Automation.WildcardPattern]::new([string]$mapping.ProductPattern, [Management.Automation.WildcardOptions]::IgnoreCase)
+        Feed = [string]$mapping.Feed
+    })
+}
+if ($compiledMappings.Count -eq 0) { throw 'At least one product-to-feed mapping is required.' }
+$inventory = @(Import-Csv -LiteralPath $InventoryPath)
+if ($inventory.Count -eq 0) { throw "Inventory has no rows: $InventoryPath" }
+foreach ($column in $requiredColumns) {
+    if ($inventory[0].PSObject.Properties.Name -notcontains $column) { throw "Inventory is missing column '$column'. Rerun the inventory with the current engine." }
+}
+$buildRows = @($inventory | Where-Object { $_.Location -eq 'BuildArtifact' -and $_.Status -eq 'File' })
+$plan = [Collections.Generic.List[object]]::new()
+foreach ($row in $buildRows) {
+    $feed = ''
+    foreach ($mapping in $compiledMappings) {
+        if ($mapping.Pattern.IsMatch($row.Product)) { $feed = $mapping.Feed; break }
+    }
+    $name = "$($row.Product).$($row.Format)".ToLowerInvariant()
+    $parsedVersion = Convert-PackageVersion -Version $row.Version
+    $version = if ($parsedVersion) { $parsedVersion.PackageVersion } else { '' }
+    $status = 'Ready'
+    $detail = ''
+    if (-not $feed) {
+        $status = 'NoFeedMapping'; $detail = 'No product pattern maps this product to a feed.'
+    } elseif ($name -notmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*$') {
+        $status = 'InvalidPackageName'; $detail = 'Product and format do not form a valid Universal Package name.'
+    } elseif (-not $parsedVersion) {
+        $status = 'InvalidVersion'; $detail = 'Expected a three- or four-part numeric version with an optional prerelease label.'
+    } elseif (-not $row.RunId -or -not $row.Artifact -or -not $row.Path -or -not $row.FileName) {
+        $status = 'MissingSource'; $detail = 'Build ID, artifact, path, or filename is missing.'
+    }
+    $plan.Add([pscustomobject]@{
+        Feed = $feed
+        PackageName = $name
+        PackageVersion = [string]$version
+        Product = $row.Product
+        SourceVersion = $row.Version
+        Revision = if ($parsedVersion) { $parsedVersion.Revision } else { '' }
+        Format = $row.Format
+        FileName = $row.FileName
+        Branch = $row.Branch
+        BuildId = $row.RunId
+        Artifact = $row.Artifact
+        ArtifactPath = $row.Path
+        Bytes = $row.Bytes
+        Status = $status
+        Detail = $detail
+    })
+}
+
+foreach ($group in @($plan | Where-Object Status -eq 'Ready' | Group-Object Feed, PackageName, PackageVersion)) {
+    $latestRevision = @($group.Group | Measure-Object -Property Revision -Maximum)[0].Maximum
+    foreach ($row in $group.Group) {
+        if ($row.Revision -lt $latestRevision) {
+            $row.Status = 'SupersededByRevision'
+            $row.Detail = "A later source revision maps to $($row.PackageVersion)."
+        }
+    }
+    $latest = @($group.Group | Where-Object Status -eq 'Ready')
+    if ($latest.Count -lt 2) { continue }
+    $latestBuildId = @($latest | Measure-Object -Property BuildId -Maximum)[0].Maximum
+    foreach ($row in $latest) {
+        if ([long]$row.BuildId -lt [long]$latestBuildId) {
+            $row.Status = 'SupersededByBuild'
+            $row.Detail = "A later build contains the same source revision for $($row.PackageVersion)."
+        }
+    }
+    $latest = @($group.Group | Where-Object Status -eq 'Ready')
+    if ($latest.Count -lt 2) { continue }
+    foreach ($row in $latest) {
+        $row.Status = 'DuplicateSource'
+        $row.Detail = 'Multiple files in the latest build share this package identity; select a source before publishing.'
+    }
+}
+if (-not (Get-Command Resolve-AzureDevOpsAuth -ErrorAction SilentlyContinue)) { throw 'Load the automation module before publishing.' }
+
+$targetUri = [Uri]$TargetOrg
+$targetName = if ($targetUri.Host -match '^([^.]+)\.visualstudio\.com$') { $Matches[1] } else { ($targetUri.AbsolutePath.Trim('/') -split '/')[0] }
+if (-not $targetName) { throw "Cannot determine target organization from '$TargetOrg'." }
+$targetProjectPart = [Uri]::EscapeDataString($TargetProject)
+$targetAuth = Resolve-AzureDevOpsAuth -Collection $TargetOrg -Pat $TargetPat -Label 'target'
+
+function Invoke-TargetApi {
+    param([string]$Uri)
+    $params = @{ Uri = $Uri; ErrorAction = 'Stop' }
+    if ($targetAuth.Mode -eq 'Windows') { $params.UseDefaultCredentials = $true } else { $params.Headers = $targetAuth.Headers }
+    Invoke-RestMethod @params
+}
+function Get-ResponseStatus {
+    param([Exception]$ErrorException)
+    $response = $ErrorException.PSObject.Properties['Response']
+    if ($null -ne $response -and $null -ne $response.Value) { return [int]$response.Value.StatusCode }
+    $status = $ErrorException.PSObject.Properties['StatusCode']
+    if ($null -ne $status -and $null -ne $status.Value) { return [int]$status.Value }
+    0
+}
+
+function Test-TargetVersion {
+    param($Row)
+    $targetFeedPart = [Uri]::EscapeDataString($Row.Feed)
+    $packagePart = [Uri]::EscapeDataString($Row.PackageName)
+    $versionPart = [Uri]::EscapeDataString($Row.PackageVersion)
+    $versionUrl = "https://pkgs.dev.azure.com/$targetName/$targetProjectPart/_apis/packaging/feeds/$targetFeedPart/upack/packages/$packagePart/versions/$versionPart`?api-version=7.1-preview.1"
+    try {
+        $null = Invoke-TargetApi -Uri $versionUrl
+        return $true
+    } catch {
+        if ((Get-ResponseStatus -ErrorException $_.Exception) -eq 404) { return $false }
+        throw "Could not check target version $($Row.PackageName) $($Row.PackageVersion): $($_.Exception.Message)"
+    }
+}
+
+function Write-PublishPlan {
+    $planDirectory = Split-Path -Parent $PlanPath
+    if ($planDirectory -and -not (Test-Path -LiteralPath $planDirectory)) { New-Item -ItemType Directory -Path $planDirectory -Force | Out-Null }
+    $plan | Sort-Object PackageName, PackageVersion, BuildId | Export-Csv -LiteralPath $PlanPath -NoTypeInformation -Encoding utf8
+}
+
+$ready = @($plan | Where-Object Status -eq 'Ready')
+foreach ($feedName in @($ready | Select-Object -ExpandProperty Feed -Unique)) {
+    $feedPart = [Uri]::EscapeDataString($feedName)
+    $feedUrl = "https://feeds.dev.azure.com/$targetName/$targetProjectPart/_apis/packaging/feeds/$feedPart`?api-version=7.1"
+    try { $feed = Invoke-TargetApi -Uri $feedUrl }
+    catch { throw "Target project feed '$feedName' could not be read in '$TargetProject': $($_.Exception.Message)" }
+    Write-Host "Target feed: $($feed.name) ($TargetProject)."
+}
+
+foreach ($row in $ready) {
+    if (Test-TargetVersion -Row $row) {
+        $row.Status = 'AlreadyPublished'
+        $row.Detail = 'This package version already exists in the target feed; skipped.'
+    }
+}
+Write-PublishPlan
+$ready = @($plan | Where-Object Status -eq 'Ready')
+$skipped = @($plan | Where-Object { $_.Status -eq 'SupersededByRevision' -or $_.Status -eq 'SupersededByBuild' -or $_.Status -eq 'AlreadyPublished' })
+$blocked = @($plan | Where-Object { $_.Status -ne 'Ready' -and $_.Status -ne 'SupersededByRevision' -and $_.Status -ne 'SupersededByBuild' -and $_.Status -ne 'AlreadyPublished' })
+Write-Host "Plan: $($plan.Count) build-file rows; $($ready.Count) to publish; $($skipped.Count) skipped (including existing versions); $($blocked.Count) blocked."
+Write-Host "Plan CSV: $PlanPath"
+if ($blocked.Count) { Write-Warning 'Resolve blocked plan rows before a complete migration.' }
+if (-not $Publish) { return }
+if ($blocked.Count -and -not $AllowPartial) { throw 'Publishing stopped: the plan contains blocked rows. Resolve them or use -AllowPartial to publish only ready rows.' }
+if (-not $ready.Count) { Write-Host 'All selected package versions are already published or intentionally skipped.'; return }
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI (az) is required for Universal Package publishing.' }
+
+$sourceBase = $SourceOrg.TrimEnd('/')
+$sourceProjectPart = [Uri]::EscapeDataString($SourceProject)
+$sourceAuth = Resolve-AzureDevOpsAuth -Collection $SourceOrg -Pat $SourcePat -Label 'source'
+function Invoke-SourceApi {
+    param([string]$Uri)
+    $params = @{ Uri = $Uri; ErrorAction = 'Stop' }
+    if ($sourceAuth.Mode -eq 'Windows') { $params.UseDefaultCredentials = $true } else { $params.Headers = $sourceAuth.Headers }
+    Invoke-RestMethod @params
+}
+
+$workRoot = [IO.Path]::GetFullPath($WorkPath)
+New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
+$artifactCache = @{}
+foreach ($row in $ready) {
+    if (Test-TargetVersion -Row $row) {
+        $row.Status = 'AlreadyPublished'
+        $row.Detail = 'This package version appeared in the target feed before upload; skipped.'
+        Write-PublishPlan
+        continue
+    }
+    $artifactKey = "$($row.BuildId)`n$($row.Artifact)"
+    if (-not $artifactCache.ContainsKey($artifactKey)) {
+        $artifactName = [Uri]::EscapeDataString($row.Artifact)
+        $artifactUrl = "$sourceBase/$sourceProjectPart/_apis/build/builds/$($row.BuildId)/artifacts?artifactName=$artifactName&api-version=7.1"
+        $artifact = Invoke-SourceApi -Uri $artifactUrl
+        if ($artifact.resource.type -ne 'Container' -or $artifact.resource.data -notmatch '^#/(\d+)/(.+)$') {
+            throw "Build $($row.BuildId) artifact '$($row.Artifact)' is not a Container artifact."
+        }
+        $containerId = $Matches[1]
+        $rootItem = [Uri]::EscapeDataString($Matches[2])
+        $itemsUrl = "$sourceBase/_apis/resources/Containers/$containerId`?itemPath=$rootItem&isShallow=false&api-version=7.1-preview.4"
+        $items = Invoke-SourceApi -Uri $itemsUrl
+        $artifactCache[$artifactKey] = @($items.value | Where-Object itemType -eq 'file')
+    }
+    $matches = @($artifactCache[$artifactKey] | Where-Object { $_.path -eq $row.ArtifactPath })
+    if ($matches.Count -ne 1 -or -not $matches[0].fileId) { throw "Could not resolve one source file ID for build $($row.BuildId): $($row.ArtifactPath)" }
+    $fileId = $matches[0].fileId
+    # A fresh directory prevents an interrupted older revision from entering this package.
+    $packageDir = Join-Path $workRoot ([guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+    $filePath = Join-Path $packageDir $row.FileName
+    $partPath = "$filePath.partial"
+    $artifactName = [Uri]::EscapeDataString($row.Artifact)
+    $fileName = [Uri]::EscapeDataString($row.FileName)
+    $fileUrl = "$sourceBase/$sourceProjectPart/_apis/build/builds/$($row.BuildId)/artifacts?artifactName=$artifactName&fileId=$fileId&fileName=$fileName&api-version=7.1"
+    $download = @{ Uri = $fileUrl; OutFile = $partPath; ErrorAction = 'Stop' }
+    if ($sourceAuth.Mode -eq 'Windows') { $download.UseDefaultCredentials = $true } else { $download.Headers = $sourceAuth.Headers }
+    try {
+        Invoke-WebRequest @download | Out-Null
+        if ($row.Bytes -and (Get-Item -LiteralPath $partPath).Length -ne [int64]$row.Bytes) { throw "Downloaded byte count differs from inventory for $($row.FileName)." }
+        Move-Item -LiteralPath $partPath -Destination $filePath -Force
+    } finally {
+        if (Test-Path -LiteralPath $partPath) { Remove-Item -LiteralPath $partPath }
+    }
+    $stagedFiles = @(Get-ChildItem -LiteralPath $packageDir -File)
+    if ($stagedFiles.Count -ne 1 -or $stagedFiles[0].Name -ne $row.FileName) {
+        throw "Staging directory must contain only the original file: $packageDir"
+    }
+
+    if (Test-TargetVersion -Row $row) {
+        $row.Status = 'AlreadyPublished'
+        $row.Detail = 'This package version appeared in the target feed during download; skipped.'
+        Write-PublishPlan
+        Remove-Item -LiteralPath $filePath
+        Remove-Item -LiteralPath $packageDir
+        continue
+    }
+
+    $previousPat = [Environment]::GetEnvironmentVariable('AZURE_DEVOPS_EXT_PAT')
+    try {
+        if ($targetAuth.Token) { $env:AZURE_DEVOPS_EXT_PAT = $targetAuth.Token }
+        & az artifacts universal publish --organization $TargetOrg --project $TargetProject --scope project --feed $row.Feed --name $row.PackageName --version $row.PackageVersion --path $packageDir --description "Original build artifact: $($row.FileName)" --only-show-errors --output none
+        if ($LASTEXITCODE -ne 0) { throw "Universal Package publish failed: $($row.PackageName) $($row.PackageVersion)" }
+    } finally {
+        [Environment]::SetEnvironmentVariable('AZURE_DEVOPS_EXT_PAT', $previousPat)
+    }
+    Write-Host "Published: $($row.PackageName) $($row.PackageVersion) ($($row.FileName))"
+    $row.Status = 'Published'
+    $row.Detail = 'Published by this run.'
+    Write-PublishPlan
+    Remove-Item -LiteralPath $filePath
+    Remove-Item -LiteralPath $packageDir
+}
