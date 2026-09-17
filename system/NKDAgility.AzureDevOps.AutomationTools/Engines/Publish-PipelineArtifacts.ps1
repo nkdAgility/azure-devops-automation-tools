@@ -258,9 +258,8 @@ $publishClock = [Diagnostics.Stopwatch]::StartNew()
 $publishTotal = $ready.Count
 $publishDone = 0
 $publishSkipped = 0
-$lastStatus = [TimeSpan]::Zero
 function Write-PublishStatus {
-    param([switch]$Final, [switch]$Stopped)
+    param([object]$Item, [string]$Action = 'Progress', [switch]$Final, [switch]$Stopped)
     $processed = $publishDone + $publishSkipped
     $remaining = $publishTotal - $processed
     $elapsed = $publishClock.Elapsed
@@ -268,14 +267,16 @@ function Write-PublishStatus {
         [TimeSpan]::FromSeconds($elapsed.TotalSeconds * $remaining / $processed).ToString('hh\:mm\:ss')
     } elseif ($remaining -eq 0) { '00:00:00' } else { 'calculating' }
     $status = "Done $publishDone | Skipped $publishSkipped | To go $remaining | Elapsed $($elapsed.ToString('hh\:mm\:ss')) | ETA $eta"
-    if ($Stopped) { $status = "Stopped: $status" }
-    Write-Progress -Activity 'Publishing Universal Packages' -Status $status -PercentComplete ([math]::Floor(100 * $processed / $publishTotal)) -Completed:$Final
-    if ($Final -or $processed -eq 0 -or $processed % 10 -eq 0 -or ($elapsed - $lastStatus).TotalSeconds -ge 60) {
-        Write-Host "Publish progress: $status"
-        $script:lastStatus = $elapsed
+    $label = if ($Stopped) { 'Stopped' } else { $Action }
+    if ($Final) {
+        Write-Progress -Id 1 -Activity 'Publishing Universal Packages' -Completed
+        Write-Host "${label}: $status"
+        return
     }
+    $operation = if ($Item) { "${label}: $($Item.PackageName) $($Item.PackageVersion) ($($Item.FileName))" } else { $label }
+    Write-Progress -Id 1 -Activity 'Publishing Universal Packages' -Status $status -CurrentOperation $operation -PercentComplete ([math]::Floor(100 * $processed / $publishTotal))
 }
-Write-PublishStatus
+Write-Host "Starting publish: $publishTotal packages to process."
 $publishRunCompleted = $false
 try {
 foreach ($row in $ready) {
@@ -284,9 +285,10 @@ foreach ($row in $ready) {
         $row.Detail = 'This package version appeared in the target feed before upload; skipped.'
         Write-PublishPlan
         $publishSkipped++
-        Write-PublishStatus
+        Write-PublishStatus -Item $row -Action 'Skipped'
         continue
     }
+    Write-PublishStatus -Item $row -Action 'Downloading'
     $artifactKey = "$($row.BuildId)`n$($row.Artifact)"
     if (-not $artifactCache.ContainsKey($artifactKey)) {
         $artifactName = [Uri]::EscapeDataString($row.Artifact)
@@ -333,15 +335,23 @@ foreach ($row in $ready) {
         Remove-Item -LiteralPath $filePath
         Remove-Item -LiteralPath $packageDir
         $publishSkipped++
-        Write-PublishStatus
+        Write-PublishStatus -Item $row -Action 'Skipped'
         continue
     }
 
     $previousPat = [Environment]::GetEnvironmentVariable('AZURE_DEVOPS_EXT_PAT')
     try {
+        Write-PublishStatus -Item $row -Action 'Publishing'
         if ($targetAuth.Token) { $env:AZURE_DEVOPS_EXT_PAT = $targetAuth.Token }
-        & az artifacts universal publish --organization $TargetOrg --project $TargetProject --scope project --feed $row.Feed --name $row.PackageName --version $row.PackageVersion --path $packageDir --description "Original build artifact: $($row.FileName)" --only-show-errors --output none
-        if ($LASTEXITCODE -ne 0) { throw "Universal Package publish failed: $($row.PackageName) $($row.PackageVersion)" }
+        $publishOutput = [Collections.Generic.Queue[string]]::new()
+        & az artifacts universal publish --organization $TargetOrg --project $TargetProject --scope project --feed $row.Feed --name $row.PackageName --version $row.PackageVersion --path $packageDir --description "Original build artifact: $($row.FileName)" --only-show-errors --output none 2>&1 | ForEach-Object {
+            if ($publishOutput.Count -ge 8) { $null = $publishOutput.Dequeue() }
+            $publishOutput.Enqueue([string]$_)
+        }
+        if ($LASTEXITCODE -ne 0) {
+            $detail = if ($publishOutput.Count) { ': ' + ($publishOutput.ToArray() -join ' ') } else { '' }
+            throw "Universal Package publish failed: $($row.PackageName) $($row.PackageVersion)$detail"
+        }
     } finally {
         [Environment]::SetEnvironmentVariable('AZURE_DEVOPS_EXT_PAT', $previousPat)
     }
@@ -349,12 +359,12 @@ foreach ($row in $ready) {
     $row.Detail = 'Published by this run.'
     Write-PublishPlan
     $publishDone++
-    Write-PublishStatus
+    Write-PublishStatus -Item $row -Action 'Published'
     Remove-Item -LiteralPath $filePath
     Remove-Item -LiteralPath $packageDir
 }
 $publishRunCompleted = $true
 } finally {
     $publishClock.Stop()
-    Write-PublishStatus -Final -Stopped:(-not $publishRunCompleted)
+    Write-PublishStatus -Action 'Finished' -Final -Stopped:(-not $publishRunCompleted)
 }

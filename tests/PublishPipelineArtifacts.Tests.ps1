@@ -135,7 +135,9 @@ Describe 'Publish pipeline artifact plan and transfer' {
         (New-InventoryRow '2.13.0.4' 101) | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
         $global:publishCallCount = 0
         $global:publishMessages = @()
+        $global:progressUpdates = @()
         Mock Write-Host { $global:publishMessages += [string]$Object }
+        Mock Write-Progress { if (-not $Completed) { $global:progressUpdates += [pscustomobject]@{ Status = $Status; Operation = $CurrentOperation } } }
         Mock Invoke-RestMethod {
             if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
             if ($Uri -like 'https://pkgs.dev.azure.com/*') {
@@ -161,7 +163,11 @@ Describe 'Publish pipeline artifact plan and transfer' {
         $global:publishedFiles[0].Name | Should -Be 'UM.DB.Opc.2.13.0.4.zip'
         $global:publishedFiles[0].Bytes | Should -Be '65,66,67'
         @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
-        ($global:publishMessages | Where-Object { $_ -match '^Publish progress:' }) | Should -HaveCount 2
+        $global:progressUpdates[0].Operation | Should -Match 'Downloading: um.db.opc 2.13.0 \(UM.DB.Opc.2.13.0.4.zip\)'
+        $global:progressUpdates[0].Status | Should -Match 'Done 0 \| Skipped 0 \| To go 1'
+        ($global:progressUpdates.Operation | Where-Object { $_ -match '^Publishing: um.db.opc 2.13.0' }) | Should -HaveCount 1
+        $global:progressUpdates[-1].Operation | Should -Match '^Published: um.db.opc 2.13.0'
+        $global:progressUpdates[-1].Status | Should -Match 'Done 1 \| Skipped 0 \| To go 0'
         $global:publishMessages[-1] | Should -Match 'Done 1 \| Skipped 0 \| To go 0 \| Elapsed .* \| ETA 00:00:00'
         ($global:publishMessages | Where-Object { $_ -match '^Published:' }) | Should -HaveCount 0
     }
@@ -184,7 +190,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
         }
 
         { & $engine @common -Publish } | Should -Throw '*not a Container artifact*'
-        $global:publishMessages[-1] | Should -Match '^Publish progress: Stopped: Done 0 \| Skipped 0 \| To go 1 \| Elapsed .* \| ETA calculating$'
+        $global:publishMessages[-1] | Should -Match '^Stopped: Done 0 \| Skipped 0 \| To go 1 \| Elapsed .* \| ETA calculating$'
     }
 
     It 'replans an interrupted run and skips a version published previously' {
