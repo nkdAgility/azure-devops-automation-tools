@@ -1,204 +1,73 @@
 # Azure DevOps Automation Tools
 
-A PowerShell automation wrapper around the common tasks used when migrating Azure DevOps data, whether that is with the [Azure DevOps Data Import Tool](https://learn.microsoft.com/en-us/azure/devops/migrate/migration-overview) from Microsoft, the [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools), or the Azure DevOps Migration Platform — depending on context.
+PowerShell tools for running Azure DevOps migrations from a private client workspace. The module supplies workspace setup, migration runbook templates, commands for Microsoft Data Import Tool preparation and repair, and engines for moving repositories and artifacts. This repository is the shared toolkit; customer configuration, exports, runbooks, output, and secrets belong in the client workspace.
 
-All these tools are built in PowerShell and have both a $data and a $output folder. Those folders belong to the **client workspace repo** — this repo is the toolkit and never holds customer data. Placeholder examples of every expected data file are in `samples/`.
+## Start here
 
-## How it works
-
-Each engagement gets a **private client git repo** holding that customer's data, configs, runbooks and export snapshots under source control. The client repo loads this repo (cloned to `%USERPROFILE%\source\repos\azure-devops-automation-tools`) and imports the PowerShell module from it. Bootstrap a new (or empty) client repo by running this from its root:
+Use PowerShell 7 and Git. From the root of a new or existing private client repository, run:
 
 ```powershell
 irm https://raw.githubusercontent.com/nkdAgility/azure-devops-automation-tools/main/bootstrap.ps1 | iex
 ```
 
-The bootstrap clones/updates this repo and Microsoft's `process-customization-scripts` into `%USERPROFILE%\source\repos\`, imports the module from that clone, then calls `New-AutomationWorkspace` to scaffold the workspace (`init.ps1`, `workspace.json`, `.gitignore`, `secrets/`, `data/`, `exports/`, `migrations/`, client `CLAUDE.md`) from the templates shipped **inside the module** — copying each file **only if it does not already exist**, so re-running is always safe. In the client repo:
+Bootstrap clones or updates this toolkit and Microsoft's `process-customization-scripts` under `%USERPROFILE%\source\repos`, then creates missing workspace files. It preserves files already owned by the client. Review `workspace.json`, `capabilities.json`, `data/organisations.json`, and `secrets/secrets.example.json` in the client repository before running a migration. Store tokens only in its gitignored `secrets/secrets.json`.
 
-- Migration runbooks call `. .\init.ps1` on every invocation, even when the module is already loaded. For each engine in the workspace's `capabilities.json`, init pulls the clone, copies the module into `.system/`, refreshes the framework-owned files, renders the agent guidance, then imports and initialises. Add the governance engine to `capabilities.json` and the same workspace gains `Invoke-GovernancePlan` alongside the migration commands.
-- `New-Migration -Name <Name> -Type DataImport|MigrationTools|MigrationPlatform` scaffolds a numbered `migrations\NN-<Name>\` engagement folder from the module's `Templates/migrations/`, stamping `.template.json` with what produced it.
-- `New-ExportSnapshot -Source <Collection>` creates dated `exports\<source>\<yyyyMMdd>\{xml,json}\` folders for pristine server exports.
-- PATs live only in the gitignored `secrets\secrets.json`; `Set-AutomationSecrets` exports them as `AZDO_PAT_<ORG>` (plus any explicit `EnvVars` names for .NET config binding) and `Get-Organisation` merges them into `organisations.json` entries at load time.
-
-Seed files are copied once and then belong to the workspace; the framework-owned subset listed in each engine's `Templates/customer-repo/.managed` is refreshed from the module on every `init.ps1`.
-
-The old standalone mode — running from this repo's root with `data/<environment>/` folders selected by `config.json` — is **retired**. This repo is the toolkit and never holds customer data: `/data/` and `/config.json` stay gitignored so anything dropped here by habit can never be committed, and `runmefirst.ps1` now just points at the bootstrap and lists the client workspaces on your machine.
-
-## What the module gives you
-
-61 exported commands plus five standalone engines. **`CLAUDE.md` holds the full command reference**; the shape is:
-
-| Group | For |
-| ----- | --- |
-| `Public/Common` | Workspace and session context, secrets, logging, and the `New-*` scaffolding commands |
-| `Public/DataImportTool` | The Microsoft Data Import Tool fix workflow — `Migrator.exe` wrappers, and the `witadmin` primitives and task-level commands that clear a collection's validation errors |
-| `Public/WorkItemTracking` | REST reads useful to every toolchain: work item types, link types, links, link inventories |
-| `Engines/` | Standalone scripts invoked by path: git repo + wiki migration, artifact feeds, wiki work item link rewriting, comment attachment link repair, work item ID counter alignment |
-
-For historical build and release drops, `Engines/Migrate-PipelineArtifacts.ps1` and `Engines/Publish-PipelineArtifacts.ps1` are called by a client workspace's single migration runbook. The [pipeline artifact guide](system/NKDAgility.AzureDevOps.AutomationTools/README.md#historical-build-pipeline-and-release-artifacts) documents both engines. They are separate from Azure Artifacts feed migration.
-
-Two conventions worth knowing before you read any runbook:
-
-- **The command name says the transport.** `Get-WitWorkItemType` shells out to `witadmin.exe` against an on-premises collection; `Get-WorkItemType` is REST against a Services organisation. Every witadmin command carries the `Wit` noun-prefix, and every pre-rename name survives as an exported alias.
-- **REST authenticates with Entra by default.** `-Pat` wins if supplied, then `-UseDefaultCredentials`; otherwise the module discovers the collection's tenant and signs in. An on-premises Server collection has no Entra tenant, so it needs `-UseDefaultCredentials` explicitly.
-
-## Repository layout
-
-| Path | Purpose |
-| ---- | ------- |
-| `bootstrap.ps1` | Remote-runnable bootstrap for client workspaces (see [How it works](#how-it-works)) |
-| `system/NKDAgility.AzureDevOps.AutomationTools/` | PowerShell module with the Data Import Tool fix functions, `Migrator.exe` wrappers, workspace/secrets/logging context, and scaffolding commands. Self-contained: it is copied into client workspaces, so it never resolves anything above its own root |
-| `system/…/Templates/customer-repo/` | Scaffold templates for a customer workspace, used by `New-AutomationWorkspace` (`init.ps1`, `workspace.json`, customer `CLAUDE.md`, ...) |
-| `system/…/Templates/migrations/` | Per-type engagement templates used by `New-Migration` (`data-import`, `migration-tools`, `migration-platform`, `github-repos`) |
-| `src/_includes/` | Legacy shared code dot-sourced by the scripts: `setup.ps1` (config + environment), `logging.ps1` (PoShLog wrappers), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (now a shim that imports the module) |
-| `src/DataImportTools/` | Assets supporting the Microsoft Azure DevOps Data Import Tool |
-| `system/…/Engines/` | The reusable `Migrate-Repos.ps1` / `Migrate-Artifacts.ps1` / `Migrate-ReposToGitHub.ps1` engines (repo, artifact-feed and ADO→GitHub migration), invoked by the `Run-*.ps1` binders in an engagement folder |
-| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: config generation, execution, and the older `Migrate-GitRepos.ps1` repo mirroring script |
-| `src/processFieldMigrator/` | REST-API scripts for custom fields, pages, process discovery, and project stats |
-| `src/processMigrator/` | Wrapper around microsoft/process-migrator |
-| `src/powershell/` | Misc environment utilities |
-| `tests/` | Pester suite, run on every push by `.github/workflows/ci.yml`. Everything that talks to a collection is stubbed, so no PAT or network is needed: `Invoke-Pester -Path .\tests` |
-| `samples/` | Committed examples of every expected data file, placeholder values only — read-only reference, not a working data folder |
-| `output/` | Scratch output from ad-hoc local runs — not under source control. Real engagement output belongs in the client repo |
-
-## Setting up the environment
-
-1. Clone this repository
-2. Install Visual Studio Code (<https://code.visualstudio.com/>)
-3. Enable Powershell Plugins in Visual Studio Code
-4. Install Powershell 7
-
-## Run the Scripts with your own data
-
-Your data lives in a **client workspace repo**, never in this one. Bootstrap one as described above, then start every session from its root:
+Start a fresh PowerShell session in the client repository and load its engines:
 
 ```powershell
 . .\init.ps1
+New-Migration -Name 'ExampleMigration' -Type MigrationTools
 ```
 
-`init.ps1` imports the module and calls `Initialize-AutomationWorkspace`, which reads `workspace.json` and resolves the workspace's `data`, `output` and `exports` folders. The legacy scripts below additionally dot-source `src/_includes/setup.ps1` from the toolkit, which resolves `$dataFolder` and `$outputFolder` from that workspace:
+`New-Migration` creates the next numbered `migrations/NN-<Name>/` folder. Choose `DataImport`, `MigrationTools`, `MigrationPlatform`, or `GitHubRepos` for `-Type`. The generated runbooks and configuration are client-owned seeds; review and edit them for the engagement. Run `Sync.ps1 -WhatIf` before a Migration Tools, Migration Platform, or GitHub repository migration. Data Import cleanup runbooks are designed to be run section by section after inspecting validation results.
+
+Use `New-ExportSnapshot -Source '<Collection>'` to create a dated location for pristine server exports. Runbooks and their outputs stay in the client repository. Re-run `. .\init.ps1` in a new shell when starting work so the workspace refreshes its engine copies.
+
+## What it supports
+
+| Workflow | What to use |
+| --- | --- |
+| Microsoft Data Import Tool, Server to Services | `DataImport` template and module commands for `Migrator.exe` preparation, validation summaries, and `witadmin` process fixes |
+| Azure DevOps Migration Tools | `MigrationTools` template with `Sync.ps1`, configuration, and binders for repository and Azure Artifacts feed migration |
+| Azure DevOps Migration Platform | `MigrationPlatform` template and platform configuration |
+| Azure DevOps to GitHub repositories | `GitHubRepos` template with inventory, approval, preview, and migration runbooks |
+| Related repairs and transfers | Module engines for wiki and comment links, work item ID alignment, and historical pipeline artifact publishing |
+
+The [module guide](system/NKDAgility.AzureDevOps.AutomationTools/README.md) documents the commands and detailed workflows. The [workspace guide](system/NKDAgility.AzureDevOps.AutomationTools/Templates/customer-repo/README.md) explains daily use of a generated client repository. The [capability guide](system/NKDAgility.AzureDevOps.AutomationTools/Agents/CAPABILITY.md) covers migration safety and authentication. Each generated migration folder also has a `notes.md` for its specific workflow.
+
+`Invoke-AutomationWorkspaceInit` is the workspace initialization command used by generated `init.ps1`. For historical pipeline artifacts, the module ships `Migrate-PipelineArtifacts.ps1` and `Publish-PipelineArtifacts.ps1`; see the [historical artifact workflow](system/NKDAgility.AzureDevOps.AutomationTools/README.md#historical-build-pipeline-and-release-artifacts).
+
+## Repository map
+
+| Path | Purpose |
+| --- | --- |
+| `bootstrap.ps1` | Create or update the client workspace scaffold |
+| `system/NKDAgility.AzureDevOps.AutomationTools/` | Self-contained PowerShell module, engines, and templates copied into client workspaces |
+| `tests/` | Pester tests for the module and engines |
+| `samples/` | Placeholder examples for older input formats; no customer data |
+| `legacy/` | Retained older standalone scripts and helpers |
+
+The old root-level `config.json` and `data/` execution model is retired. Do not put customer data or tokens in this repository.
+
+## Legacy Features
+
+The scripts in `legacy/` are retained for existing runbooks. They are outside the current module and template workflow. If an engagement still calls one, update its path from `src/` to `legacy/`, initialize the client workspace first, and review the script before use.
+
+- `legacy/_includes/`: setup, logging, REST, Excel, and Data Import compatibility helpers.
+- `legacy/DataImportTools/`: older Data Import supporting asset.
+- `legacy/migrationTools/`: configuration generation, execution, and the older Git repository mirror script.
+- `legacy/processFieldMigrator/`: custom field and page scripts, process discovery, and project statistics.
+- `legacy/processMigrator/`: wrapper around Microsoft's process migrator.
+- `legacy/powershell/`: environment and download utilities.
+
+For new work, use the module and migration templates under `system/NKDAgility.AzureDevOps.AutomationTools/`.
+
+## Developing the toolkit
+
+Run the local test suite with PowerShell 7:
 
 ```powershell
-. $env:USERPROFILE\source\repos\azure-devops-automation-tools\src\_includes\setup.ps1
+Invoke-Pester -Path .\tests
 ```
 
-If no workspace has been initialised, `setup.ps1` throws rather than falling back to a folder inside the toolkit — that fallback is what the client-workspace model exists to prevent.
-
-With the workspace initialised, you can run the following scripts:
-
-- **Generate-ConfigurationsFromTemplates.ps1** - This will generate a configuration file for each template file in the data folder. Loaded from `migrationConfigSaples` folder and it will create a folder for each project on each organisation configured with the template populated for every project. This assumes that you are migrating many projects to a single organisation. If you are migrating a single project to many organisations, you will need to edit the output with the target locations. Note: it looks for `templates` in the workspace data folder first, falling back to this repo's committed `samples/templates`.
-- **Delete-CustomField.ps1** - Whoops, I need to delete a field from an organisation. This will delete a field from all projects in an organisation.
-- **Generate-ProcessOutput.ps1** - This will populate the process, list, field, and work item configuration data from all of the processes in each org. It will create a folder for each organisation and populate it with the data. This is for reference and can be used to build the input for the other scripts.
-- **Generate-ProjectStats.ps1** - How big is my migration? Creates a CSV file with the number of work items, pipelines, builds, and other data in each project in each organisation.
-- **Install-CustomFields.ps1** - Adds all of the configured fields to the configured organisations and processes. Fields are enabled in `DataLocation\fields.json` and each field is configured in `DataLocation\fields\{field-name}.json`. This script will create the fields in the configured organisations and processes.
-- **Install-CustomPages.ps1** - Adds all of the configured pages to the configured organisations and processes. Each page is configured in `DataLocation\pages\{page-name}.json`. This script will create the pages in the configured organisations,  processes, & WorkItems.
-- **Install-ReflectedWorkItemID.ps1** - Adds the ReflectedWorkItemID field to all of the configured organisations and processes. This is a special field that is used by the [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools) to track the work items as they are migrated. This script will create the field in the configured organisations and processes.
-- **Search-ProcessesWeCareAbout.ps1** - This will search all of the configured organisations for processes that contain the configured work item field. This is useful if you are looking for a process that you know contains a specific field. It will create a CSV file with the results, and update the `organisations.json` file.
-
-## Legacy `src/**` scripts and their data files
-
-The sections from here down describe the older dot-sourced scripts under `src/**`, which
-predate the module and are still used by some engagements. They read their inputs from the
-client workspace's `data` folder; `samples/` has a placeholder example of every file. New
-shared code goes in the module, not here.
-
-The client workspace's `data` folder contains the data used by each script. You can check the `.\samples\*` folder in this repo for examples of the data required.
-
-- `organisations.json` - This is a list of all of the organsaitions and PAT tokens used for access. They can be disabled, and the scripts will skip them. This is used by all of the scripts.
-- `ReflectedWorkItemId.json` - This contains the single field configuration for the ReflectedWorkItemId field. This is used by the `Install-ReflectedWorkItemID.ps1` script.
-- `fields.json` - This contains the list of fields to be created. This is used by the `Install-CustomFields.ps1` script, and each field can be enabled or disabled. It will load the individual field from the `fields` folder based on the `refname` property.
-- `fields\{field-name}.json` - This contains the configuration for each field. This is used by the `Install-CustomFields.ps1` script. Each field definition contains all of the POST information needed to create and add them to a process.
-- `pages\{page-name}.json` - This contains the configuration for each page. This is used by the `Install-CustomPages.ps1` script. Each page definition contains all of the POST information needed to create and add them to a process. `Pages` are iterated over and you can use them to add `Groups` to existing `Pages`.
-- `templates\{template-name}.json` - This contains templates for different [Azure DevOps Migration Tools](https://github.com/nkdAgility/azure-devops-migration-tools) configurations. This is used by the `Generate-ConfigurationsFromTemplates.ps1` script. Each configuration template will have the source updated to reflect the source organisation and project, the target will not be updated.
-
-## Documentation for POSTS
-
-- [Create Field](https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/fields/create?view=azure-devops-rest-7.0&tabs=HTTP)
-- [Create Picklist](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/lists/create?view=azure-devops-rest-7.0&tabs=HTTP)
-- [Add Field](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/fields/add?view=azure-devops-rest-7.0&tabs=HTTP)
-- [Add Control](https://learn.microsoft.com/en-us/rest/api/azure/devops/processes/controls/create?view=azure-devops-rest-7.0&tabs=HTTP)
-
-## Azure DevOps Data Import Tool (server → services)
-
-When lifting a TFS / Azure DevOps Server collection into Azure DevOps Services with Microsoft's Data Import Tool, the loop is: run `Migrator.exe` validate/prepare, read the validation log, fix the collection, repeat until clean. This repo supports that loop with:
-
-- **Per-client runbooks** in `data/<environment>/DataImportTools/` (untracked):
-  - `run.ps1` — invokes `Migrator.exe Prepare` against the client collection to produce the import specification and validation log.
-  - `fix.ps1` — a sectioned runbook, executed selection-by-selection, that resolves the validation errors using the functions below. Section comments record the error codes (TF400526, TF402538, VS237302, …) each block addresses and any ordering constraints.
-- **The `NKDAgility.AzureDevOps.AutomationTools` module** in `system/` — a library of Verb-Noun functions that wrap `Migrator.exe`, `witadmin.exe` (located automatically), and local XML editing. A typical runbook starts with:
-
-  ```powershell
-  Import-Module .\system\NKDAgility.AzureDevOps.AutomationTools -Force
-  Set-MigrationContext -Collection 'http://tfs:8080/tfs/DefaultCollection/'
-  ```
-
-  `Set-MigrationContext` sets session defaults (collection, project, tool paths) so individual fix lines stay short. Task-level commands collapse whole runbook sections into one call per project: `Install-FeedbackWorkItemTypes` (work item types + categories prerequisites) followed by `Repair-ProcessConfiguration` (export → repair → import of `ProjectProcessConfiguration`, with state mappings as parameters). `Invoke-DataImportPrepare` / `Invoke-DataImportValidate` wrap `Migrator.exe`. The primitives remain available for one-off fixes:
-  - `Resolve-AzureDevOpsAuth` / `Get-AzureDevOpsGitAuthArgs` / `Test-AzureDevOpsHosted` — shared credential resolution for every engine: supplied PAT first, Windows integrated for on-premises hosts, Entra for the hosted service.
-  - `Rename-WitField` — resolve collection-level field name conflicts with Azure DevOps Services.
-  - `Add-WitReflectedWorkItemIdField` (XML process, witadmin) / `Add-ReflectedWorkItemIdField` (inherited process, REST) — add the `Custom.ReflectedWorkItemId` field the Azure DevOps Migration Tools require on the target before they will move a single work item.
-  - `Import-WitWorkItemTypeFile`, `Add-WitWorkItemCategory`, `Add-WitWorkItemCategoryType`, `Remove-WitWorkItemCategoryType`, `Copy-WitWorkItemType` — get work item types and categories into the shape ProcessConfiguration requires.
-  - `Export-WitProcessConfigurationFixFile` / `Import-WitProcessConfigurationFixFile` plus `Add-ProcessConfigurationElement`, `Add-ProcessConfigurationTypeField`, `Set-ProcessConfigurationAttribute`, `Set-ProcessConfigurationStates`, `Set-ProcessConfigurationColumns`, `Set-ProcessConfigurationAddPanel` — export a project's `ProjectProcessConfiguration`, repair the XML locally, and push it back.
-  - `Find-WitRuleScope`, `Find-WitGlobalWorkflowRuleScope`, `Remove-WitRuleScope`, `Remove-WitGlobalWorkflowRuleScope` — locate and remove AD-scoped field rules (VS237302).
-  - `Remove-WitFieldRule` — strip unsupported field rules such as NOTSAMEAS / PROHIBITEDVALUES (TF402538).
-  - `Remove-WitWorkItemLinkType` — delete custom link types (TF402583). **Deleting a link type deletes every link of that type in the collection.**
-  - `Get-WitWorkItemType`, `Get-WitWorkItemTypeState` — inspection helpers used to verify state before applying fixes.
-
-The fix functions are designed to be idempotent where possible — re-running a fix that is already applied reports "no change" instead of failing — so a runbook section can be re-run safely after a partial pass.
-
-### Validating one step at a time
-
-Because the fixes mutate a live collection, runbooks are executed a bit at a time and each action verified before moving on. The module supports this loop directly:
-
-- **`Invoke-FixStep`** — wraps a runbook step with a name, an optional `-Verify` scriptblock, and a checkpoint file. Completed steps are skipped on re-run (`-Force` overrides), and the checkpoint is only written after verification passes, so the whole runbook can be safely re-run top-to-bottom after a partial pass. Set the checkpoint file once per client with `Set-MigrationContext -CheckpointPath ...`.
-- **`Get-DataImportValidationSummary`** — parses a validation run's `ProjectProcessesMap.log` into per-project error counts and per-error-code counts. Point it at the logs parent folder (e.g. `...\Logs\<Collection>`) and it picks the newest run. Capture a summary before fixing, re-run `Invoke-DataImportPrepare` after a batch of fixes, and compare — the error counts for the fixed projects should drop to zero.
-
-### Reference originals: process-customization-scripts
-
-When getting the local collection into shape for import, use Microsoft's [process-customization-scripts](https://github.com/Microsoft/process-customization-scripts) repository (cloned as a sibling of this repo) as the reference for what the out-of-the-box templates look like:
-
-- The `Import\<Template>\WorkItem Tracking` folders hold the OOB type definitions, categories, and process configuration — these are the "known good" shapes the Data Import Tool validates against. The fix functions take their values (TypeFields refnames, category names, feedback work item states) from here, and `Install-FeedbackWorkItemTypes` imports `FeedbackRequest.xml` / `FeedbackResponse.xml` directly from it.
-- The `Export\ExportProjectTemplate.ps1` script exports a project's full template the same way the migrator sees it — useful for diffing a customised project against the OOB originals to pinpoint exactly what a validation error refers to.
-
-The goal is always to change the minimum needed to satisfy validation while **maintaining the customer's customisations as much as possible** — check against the originals to see what's required, don't overwrite customised definitions wholesale with OOB ones.
-
-## Git Repository Migration
-
-The repository migration functionality is provided by a single script: `src/migrationTools/Migrate-GitRepos.ps1`.
-
-Purpose: Mirror (one-way) all enabled Git repositories from the source organisations & projects defined in a data environment `organisations.json` into an existing target Azure DevOps organisation (projects must already exist in target). Repositories are created if missing, then a `git --mirror` push updates all refs (branches, tags, deletes).
-
-Parameters (only three):
-
-- `-ConfigFile` (optional) Path to an `organisations.json`. If omitted the current data environment path from `setup.ps1` is used.
-- `-TargetOrgUrl` (required) Base URL of the target organisation, e.g. `https://dev.azure.com/TargetOrg/`.
-- `-TargetPat` (required) PAT for target organisation with Code (Read & Write) scope (and permission to create repositories).
-
-Example:
-
-```powershell
-pwsh ./src/migrationTools/Migrate-GitRepos.ps1 -TargetOrgUrl https://dev.azure.com/TargetOrg/ -TargetPat $env:TARGET_PAT
-```
-
-Source Authentication: Each source organisation entry in `organisations.json` must include a `pat` property (Code Read scope) and `enabled: true`. Each project that should be migrated must also have `enabled: true` and an `id` (GUID) and `name`.
-
-Behaviour Summary:
-
-1. Enumerate enabled organisations & projects from source config.
-2. List repos via Azure DevOps REST API.
-3. For each repo:
-   - Create target repo if it does not exist (same project name / repo name).
-   - Perform a temporary bare clone locally.
-   - Execute `git push --mirror` to target.
-4. Emit summary statistics to the log.
-
-Safety Notes:
-
-- Mirror push will delete refs in target that were deleted in source.
-- Projects are NOT created automatically; create them first in target.
-- PAT values are never logged.
-
-To adapt behaviour (e.g., additive push instead of mirror) extend the script locally—by design optional switches were removed for simplicity.
-# Workspace bootstrap
-
-Customer `init.ps1` is a small loader. It locates the automation tools module and
-calls `Invoke-AutomationWorkspaceInit`, which owns capability resolution,
-materialisation, scaffolding, guidance, workspace setup, and secrets loading.
+See [AGENTS.md](AGENTS.md) for repository ownership, safety rules, and contribution guidance.

@@ -4,7 +4,7 @@ function Initialize-AutomationLogging {
     Starts PoShLog-based logging with a file sink rooted at the given folder.
 
     .DESCRIPTION
-    Module replacement for the legacy src/_includes/logging.ps1 (which hard-codes ./output/log/
+    Module replacement for the legacy/_includes/logging.ps1 (which hard-codes ./output/log/
     relative to the current directory). The log folder is a parameter, so customer workspaces can
     log under their own output folder. Installs PoShLog and PoShLog.Enrichers for the current user
     if missing. Safe to call repeatedly: once a logger is running, subsequent calls report

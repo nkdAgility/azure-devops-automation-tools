@@ -15,7 +15,7 @@
         output/<org>/<project>/repos/<repoName>
 
 EXAMPLE
-    pwsh ./src/migrationTools/Migrate-GitRepos.ps1
+    pwsh ./legacy/migrationTools/Migrate-GitRepos.ps1
 
 .NOTES
     Does NOT create target projects; they must already exist.

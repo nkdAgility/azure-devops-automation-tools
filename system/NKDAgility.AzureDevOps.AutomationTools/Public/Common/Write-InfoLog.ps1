@@ -6,7 +6,7 @@ function Write-InfoLog {
     .DESCRIPTION
     Delegates to PoShLog's Write-InfoLog when Initialize-AutomationLogging has started a logger;
     otherwise falls back to the console so scripts never fail just because logging was not set up.
-    Signature matches the legacy src/_includes/logging.ps1 usage.
+    Signature matches the legacy/_includes/logging.ps1 usage.
     #>
     [CmdletBinding()]
     param(

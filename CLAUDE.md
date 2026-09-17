@@ -10,7 +10,7 @@ PowerShell automation wrappers around the tasks Naked Agility (nkdAgility) uses 
 - **Azure DevOps Migration Tools** (nkdAgility) — work-item-level migration between organisations/projects.
 - **Azure DevOps Migration Platform** — the newer nkdAgility tooling.
 
-The scripts in `src/` are generic and committed. Everything customer-specific — organisation URLs, PAT tokens, exported process XML, per-client runbooks — lives OUTSIDE this repo in **private client workspace repos** (`NKDAClient-<Customer>`). This repo is the toolkit; it is never a workspace.
+The shared module and retained legacy scripts are generic and committed. Everything customer-specific — organisation URLs, PAT tokens, exported process XML, per-client runbooks — lives OUTSIDE this repo in **private client workspace repos** (`NKDAClient-<Customer>`). This repo is the toolkit; it is never a workspace.
 
 ## This repo never holds customer data
 
@@ -30,10 +30,7 @@ The old standalone mode — `runmefirst.ps1` + `config.json` + `data/<environmen
 Everything runs from the **client repo root** with PowerShell 7 (`pwsh`):
 
 1. The client repo's `init.ps1` imports the module and calls `Initialize-AutomationWorkspace`, which reads `workspace.json` and resolves the data, output and exports folders against the client repo.
-2. Legacy `src/**` scripts additionally dot-source `src/_includes/setup.ps1`, which no longer creates folders or writes `config.json`. It resolves `$queryString`, `$queryStringPreview`, `$dataFolder` and `$outputFolder` from the initialised workspace, and **throws** if there is no workspace — so a legacy script can never silently fall back to a data folder inside the toolkit.
-3. Those scripts read their inputs from `$dataFolder` (e.g. `organisations.json`), which now points at the client repo.
-
-Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.AutomationTools`** PowerShell module (Data Import Tool fix functions, Migrator.exe wrappers, session context), and the legacy dot-sourced `.ps1` files under `src/_includes/` (setup, logging, REST helpers). `src/_includes/DataImportFixes.ps1` is now just a shim that imports the module, so older runbooks keep working. New shared code goes in the module.
+2. The current runbooks use the module copied into the client workspace. New shared code goes in `system/NKDAgility.AzureDevOps.AutomationTools`. Older scripts are retained under `legacy/` for existing runbooks.
 
 ## Layout
 
@@ -45,12 +42,7 @@ Shared code exists in two forms: the newer **`system/NKDAgility.AzureDevOps.Auto
 | `system/…/Templates/migrations/` | Per-type engagement templates: `data-import/` (Scratchbook + Cleanup runbooks), `migration-tools/` (Sync + Run-* binders + configs), `migration-platform/` (Sync + platform-config) |
 | `system/…/Engines/` | Standalone migration engines: `Migrate-Repos.ps1` (git repos incl. LFS/segmented pushes and project wikis) and `Migrate-Artifacts.ps1` (artifact feeds/packages), invoked by the `Run-Migrate-*.ps1` binders; `Update-WikiWorkItemLinks.ps1` (repoints wiki work item links via `Custom.ReflectedWorkItemId`), `Update-CommentAttachmentLinks.ps1` (migrates attachments referenced by markdown links in work item comments — the migration fixes HTML references but not markdown — and rewrites the comments; preview by default, `-Commit` to apply), and `Set-WorkItemStartId.ps1` (advances the work item ID counter), run directly. They live in the module so they travel into `.system/` with it and stay locked to the module version that drives them; binders resolve them from `ModuleBase\Engines`, never by walking up |
 | `system/…/Agents/CAPABILITY.md` | Guidance for agents *using* this capability in a workspace. Rendered into the workspace's `CLAUDE.md`, `AGENTS.md` and `.github/copilot-instructions.md`. Contrast with this file, which is for agents *building* the toolkit |
-| `src/_includes/` | Legacy shared code: `setup.ps1` (shim → workspace-resolved session variables), `logging.ps1` (`BeginLoggerTitle` + PoShLog availability), `methods.ps1` (REST helpers), `DataImportFixes.ps1` (shim → module), `ImportExcel.ps1` |
-| `src/DataImportTools/` | Assets supporting the Microsoft Data Import Tool (e.g. SQL helpers) |
-| `src/migrationTools/` | Azure DevOps Migration Tools wrappers: generate configs from templates, execute migrations, and the older `Migrate-GitRepos.ps1` mirroring script. The engines the `Run-*` binders drive moved into the module — see `Engines/` above |
-| `src/processFieldMigrator/` | REST-API scripts: install custom fields/pages, delete fields, process discovery, project stats |
-| `src/processMigrator/` | Wrapper around microsoft/process-migrator (inherited-process migration) |
-| `src/powershell/` | Misc environment utilities (downloads, TFS ISOs, policy tweaks) |
+| `legacy/` | Retained older standalone scripts; see the README's Legacy Features list |
 | `tests/` | Pester suite — module hygiene, no-customer-data structural guards, and the REST link commands against a stubbed transport |
 | `samples/` | Committed examples of every expected data file, placeholder values only. Read-only reference — not a working data folder |
 | `output/` | Scratch output from ad-hoc local runs — untracked. Real engagement output belongs in the client repo |

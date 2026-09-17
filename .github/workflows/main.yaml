@@ -87,7 +87,7 @@ jobs:
           filters: |
             module:
               - 'system/**'
-              - 'src/**'
+              - 'legacy/**'
               - 'tests/**'
               - '.github/workflows/**'
               - 'GitVersion.yml'

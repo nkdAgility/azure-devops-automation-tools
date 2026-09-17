@@ -3,14 +3,14 @@
 # Every engagement now runs from its own client workspace repo, scaffolded by
 # bootstrap.ps1 (see the README). This file used to create .\data\<environment>\
 # inside the tools repo and generate config.json; it no longer does either.
-# Instead it resolves the session variables the older src\** scripts expect from
+# Instead it resolves the session variables the older legacy\** scripts expect from
 # the initialised workspace, so those scripts read the CLIENT repo's data folder.
 #
 # Dot-source it after the client repo's init.ps1:
 #
 #     cd <client repo>
 #     . .\init.ps1
-#     . $env:USERPROFILE\source\repos\azure-devops-automation-tools\src\_includes\setup.ps1
+#     . $env:USERPROFILE\source\repos\azure-devops-automation-tools\legacy\_includes\setup.ps1
 
 $modulePath = Join-Path $PSScriptRoot '..\..\system\NKDAgility.AzureDevOps.AutomationTools\NKDAgility.AzureDevOps.AutomationTools.psd1'
 if (-not (Get-Module -Name 'NKDAgility.AzureDevOps.AutomationTools')) {

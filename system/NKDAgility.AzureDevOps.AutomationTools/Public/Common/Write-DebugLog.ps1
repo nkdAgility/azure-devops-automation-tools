@@ -6,7 +6,7 @@ function Write-DebugLog {
     .DESCRIPTION
     Delegates to PoShLog's Write-DebugLog when Initialize-AutomationLogging has started a logger;
     otherwise falls back to the standard debug stream. Signature matches the legacy
-    src/_includes/logging.ps1 usage.
+    legacy/_includes/logging.ps1 usage.
     #>
     [CmdletBinding()]
     param(
