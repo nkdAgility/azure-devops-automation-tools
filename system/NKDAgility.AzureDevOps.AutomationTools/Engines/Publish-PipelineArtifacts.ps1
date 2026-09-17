@@ -5,8 +5,8 @@
 .DESCRIPTION
     Uses BuildArtifact/File rows from the pipeline artifact inventory. Release
     rows refer to those same build files and are not published a second time.
-    Checks the destination before writing the plan, marking versions that
-    already exist as AlreadyPublished. -Publish downloads one original file
+    Checks the destination before writing the action-only plan, omitting
+    versions that already exist. -Publish downloads one original file
     per remaining package, checks its length, and publishes without recompression.
 #>
 [CmdletBinding()]
@@ -20,6 +20,7 @@ param(
     [Parameter(Mandatory)][string]$TargetOrg,
     [Parameter(Mandatory)][string]$TargetProject,
     [Parameter(Mandatory)][object[]]$FeedMappings,
+    [Parameter(Mandatory)][string[]]$FormatPrecedence,
     [string]$TargetPat,
     [switch]$Publish,
     [switch]$AllowPartial,
@@ -60,13 +61,43 @@ foreach ($column in $requiredColumns) {
     if ($inventory[0].PSObject.Properties.Name -notcontains $column) { throw "Inventory is missing column '$column'. Rerun the inventory with the current engine." }
 }
 $buildRows = @($inventory | Where-Object { $_.Location -eq 'BuildArtifact' -and $_.Status -eq 'File' })
+$formatPatterns = [Collections.Generic.List[object]]::new()
+$seenPatterns = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+for ($index = 0; $index -lt $FormatPrecedence.Count; $index++) {
+    $pattern = $FormatPrecedence[$index].TrimStart('.')
+    if (-not $pattern -or -not $seenPatterns.Add($pattern)) { throw "Duplicate or empty format precedence entry: $($FormatPrecedence[$index])" }
+    $formatPatterns.Add([Management.Automation.WildcardPattern]::new($pattern, [Management.Automation.WildcardOptions]::IgnoreCase))
+}
+if ($FormatPrecedence.Count -eq 0 -or $FormatPrecedence[-1] -ne '*') { throw 'FormatPrecedence must end with *.' }
+function Get-FormatRank {
+    param([string]$Format)
+    for ($index = 0; $index -lt $formatPatterns.Count; $index++) {
+        if ($formatPatterns[$index].IsMatch($Format)) { return $index }
+    }
+    throw "No format precedence pattern matches '$Format'."
+}
+$formatsByProduct = @{}
+foreach ($row in $buildRows) {
+    $productKey = $row.Product.ToLowerInvariant()
+    if (-not $formatsByProduct.ContainsKey($productKey)) {
+        $formatsByProduct[$productKey] = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    }
+    $null = $formatsByProduct[$productKey].Add($row.Format)
+}
+$primaryFormatByProduct = @{}
+foreach ($productKey in $formatsByProduct.Keys) {
+    $primaryFormatByProduct[$productKey] = @($formatsByProduct[$productKey] | Sort-Object `
+        @{ Expression = { Get-FormatRank -Format $_ } }, `
+        @{ Expression = { $_.ToLowerInvariant() } } | Select-Object -First 1)[0]
+}
 $plan = [Collections.Generic.List[object]]::new()
 foreach ($row in $buildRows) {
     $feed = ''
     foreach ($mapping in $compiledMappings) {
         if ($mapping.Pattern.IsMatch($row.Product)) { $feed = $mapping.Feed; break }
     }
-    $name = "$($row.Product).$($row.Format)".ToLowerInvariant()
+    $name = if ($row.Format -ieq $primaryFormatByProduct[$row.Product.ToLowerInvariant()]) { $row.Product } else { "$($row.Product).$($row.Format)" }
+    $name = $name.ToLowerInvariant()
     $parsedVersion = Convert-PackageVersion -Version $row.Version
     $version = if ($parsedVersion) { $parsedVersion.PackageVersion } else { '' }
     $status = 'Ready'
@@ -147,9 +178,10 @@ function Get-ResponseStatus {
 }
 
 function Test-TargetVersion {
-    param($Row)
+    param($Row, [string]$PackageName)
+    if (-not $PackageName) { $PackageName = $Row.PackageName }
     $targetFeedPart = [Uri]::EscapeDataString($Row.Feed)
-    $packagePart = [Uri]::EscapeDataString($Row.PackageName)
+    $packagePart = [Uri]::EscapeDataString($PackageName)
     $versionPart = [Uri]::EscapeDataString($Row.PackageVersion)
     $versionUrl = "https://pkgs.dev.azure.com/$targetName/$targetProjectPart/_apis/packaging/feeds/$targetFeedPart/upack/packages/$packagePart/versions/$versionPart`?api-version=7.1-preview.1"
     try {
@@ -157,14 +189,22 @@ function Test-TargetVersion {
         return $true
     } catch {
         if ((Get-ResponseStatus -ErrorException $_.Exception) -eq 404) { return $false }
-        throw "Could not check target version $($Row.PackageName) $($Row.PackageVersion): $($_.Exception.Message)"
+        throw "Could not check target version $PackageName $($Row.PackageVersion): $($_.Exception.Message)"
     }
 }
 
 function Write-PublishPlan {
     $planDirectory = Split-Path -Parent $PlanPath
     if ($planDirectory -and -not (Test-Path -LiteralPath $planDirectory)) { New-Item -ItemType Directory -Path $planDirectory -Force | Out-Null }
-    $plan | Sort-Object PackageName, PackageVersion, BuildId | Export-Csv -LiteralPath $PlanPath -NoTypeInformation -Encoding utf8
+    $actions = @($plan | Where-Object Status -eq 'Ready' | Sort-Object PackageName, PackageVersion, BuildId)
+    if ($actions.Count) {
+        $actions | Export-Csv -LiteralPath $PlanPath -NoTypeInformation -Encoding utf8
+    } else {
+        # Keep an empty plan as a valid CSV with the same columns.
+        $columns = @('Feed', 'PackageName', 'PackageVersion', 'Product', 'SourceVersion', 'Revision', 'Format', 'FileName', 'Branch', 'BuildId', 'Artifact', 'ArtifactPath', 'Bytes', 'Status', 'Detail')
+        $header = ($columns | ForEach-Object { '"' + $_ + '"' }) -join ','
+        [IO.File]::WriteAllText($PlanPath, "$header`r`n", [Text.UTF8Encoding]::new($false))
+    }
 }
 
 $ready = @($plan | Where-Object Status -eq 'Ready')
@@ -180,13 +220,20 @@ foreach ($row in $ready) {
     if (Test-TargetVersion -Row $row) {
         $row.Status = 'AlreadyPublished'
         $row.Detail = 'This package version already exists in the target feed; skipped.'
+    } elseif ($row.PackageName -eq $row.Product.ToLowerInvariant() -and
+        (Test-TargetVersion -Row $row -PackageName ("$($row.Product).$($row.Format)".ToLowerInvariant()))) {
+        $row.Status = 'LegacyPackageNameConflict'
+        $row.Detail = 'This version was already published under a format-suffixed package name. Resolve that package before publishing under the product-only name.'
     }
 }
 Write-PublishPlan
 $ready = @($plan | Where-Object Status -eq 'Ready')
-$skipped = @($plan | Where-Object { $_.Status -eq 'SupersededByRevision' -or $_.Status -eq 'SupersededByBuild' -or $_.Status -eq 'AlreadyPublished' })
+$supersededRevision = @($plan | Where-Object Status -eq 'SupersededByRevision').Count
+$supersededBuild = @($plan | Where-Object Status -eq 'SupersededByBuild').Count
+$alreadyPublished = @($plan | Where-Object Status -eq 'AlreadyPublished').Count
+$legacyConflicts = @($plan | Where-Object Status -eq 'LegacyPackageNameConflict').Count
 $blocked = @($plan | Where-Object { $_.Status -ne 'Ready' -and $_.Status -ne 'SupersededByRevision' -and $_.Status -ne 'SupersededByBuild' -and $_.Status -ne 'AlreadyPublished' })
-Write-Host "Plan: $($plan.Count) build-file rows; $($ready.Count) to publish; $($skipped.Count) skipped (including existing versions); $($blocked.Count) blocked."
+Write-Host "Plan: $($ready.Count) upload actions; $supersededRevision older revisions; $supersededBuild older builds; $alreadyPublished already published; $legacyConflicts legacy-name conflicts; $($blocked.Count) blocked."
 Write-Host "Plan CSV: $PlanPath"
 if ($blocked.Count) { Write-Warning 'Resolve blocked plan rows before a complete migration.' }
 if (-not $Publish) { return }
@@ -229,17 +276,17 @@ foreach ($row in $ready) {
         $artifactCache[$artifactKey] = @($items.value | Where-Object itemType -eq 'file')
     }
     $matches = @($artifactCache[$artifactKey] | Where-Object { $_.path -eq $row.ArtifactPath })
-    if ($matches.Count -ne 1 -or -not $matches[0].fileId) { throw "Could not resolve one source file ID for build $($row.BuildId): $($row.ArtifactPath)" }
-    $fileId = $matches[0].fileId
+    if ($matches.Count -ne 1 -or -not $matches[0].contentLocation) { throw "Could not resolve one source Container file download URL for build $($row.BuildId): $($row.ArtifactPath)" }
+    $contentUri = [Uri]$matches[0].contentLocation
+    if ($contentUri.Scheme -ne 'https' -or $contentUri.Host -ne ([Uri]$SourceOrg).Host) {
+        throw "Unexpected source Container file download host for build $($row.BuildId): $($row.ArtifactPath)"
+    }
     # A fresh directory prevents an interrupted older revision from entering this package.
     $packageDir = Join-Path $workRoot ([guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
     $filePath = Join-Path $packageDir $row.FileName
     $partPath = "$filePath.partial"
-    $artifactName = [Uri]::EscapeDataString($row.Artifact)
-    $fileName = [Uri]::EscapeDataString($row.FileName)
-    $fileUrl = "$sourceBase/$sourceProjectPart/_apis/build/builds/$($row.BuildId)/artifacts?artifactName=$artifactName&fileId=$fileId&fileName=$fileName&api-version=7.1"
-    $download = @{ Uri = $fileUrl; OutFile = $partPath; ErrorAction = 'Stop' }
+    $download = @{ Uri = $contentUri; OutFile = $partPath; ErrorAction = 'Stop' }
     if ($sourceAuth.Mode -eq 'Windows') { $download.UseDefaultCredentials = $true } else { $download.Headers = $sourceAuth.Headers }
     try {
         Invoke-WebRequest @download | Out-Null

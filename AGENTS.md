@@ -20,6 +20,7 @@ The old standalone mode — `runmefirst.ps1` + `config.json` + `data/<environmen
 
 ## Critical rules
 
+- **Document at the owner.** Shared feature behavior, contracts and reusable examples belong beside the implementing shared engine in this toolkit. A client runbook's actual commands, configuration, outputs, prerequisites and customer decisions belong beside that runbook in the client workspace. Link the runbook guide to the shared feature guide instead of duplicating the feature reference. Update both when a change affects both. Keep this rule in `Templates/customer-repo/CLAUDE.managed.md` so generated client `AGENTS.md` files inherit it.
 - **Never create a `data/` folder or write customer data in this repo.** It belongs in the client workspace repo. `/data/` and `/config.json` are gitignored precisely so a mistake here cannot become a commit.
 - `output/` is gitignored, and client repos gitignore their own `output/` and `secrets/`. Never commit customer data or PATs, never copy their contents into committed files, and never print PATs into logs, console output, or chat.
 - When creating example/test data, put it in `samples/` with placeholder values only.

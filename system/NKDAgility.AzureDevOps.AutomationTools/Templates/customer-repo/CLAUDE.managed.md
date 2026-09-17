@@ -39,6 +39,14 @@ Two different lifecycles, and mixing them up loses work:
 This block, `AGENTS.md` and `.github/copilot-instructions.md` are rendered the same way.
 Anything you write outside the markers survives; anything inside them does not.
 
+## Documentation ownership
+
+Document each feature beside the shared code that implements it. Document each customer
+runbook beside that runbook, including its actual commands, configuration, output paths,
+prerequisites and customer decisions. Link from the runbook guide to the shared feature
+guide for reusable behavior; do not duplicate the feature reference in customer docs.
+Update both guides when a change affects both the shared feature and a customer runbook.
+
 ## Committed output policy
 
 Inventory and summary CSVs under `migrations/*/output/` are engagement evidence — commit

@@ -15,14 +15,15 @@ BeforeAll {
         TargetOrg = 'https://dev.azure.com/target'
         TargetProject = 'TargetProject'
         FeedMappings = @([pscustomobject]@{ ProductPattern = '*'; Feed = 'TargetFeed' })
+        FormatPrecedence = @('*nupkg', '*nuspec', '*nspec', '.zip', '*')
     }
     function New-InventoryRow {
-        param([string]$Version, [int]$BuildId, [string]$Product = 'UM.DB.Opc')
+        param([string]$Version, [int]$BuildId, [string]$Product = 'UM.DB.Opc', [string]$Format = 'zip')
         [pscustomobject]@{
             Location = 'BuildArtifact'; Status = 'File'; RunId = [string]$BuildId
-            Artifact = 'drop'; Path = "drop/$Product.$Version.zip"
-            FileName = "$Product.$Version.zip"; Product = $Product
-            Version = $Version; Format = 'zip'; Bytes = '3'; Branch = 'refs/heads/main'
+            Artifact = 'drop'; Path = "drop/$Product.$Version.$Format"
+            FileName = "$Product.$Version.$Format"; Product = $Product
+            Version = $Version; Format = $Format; Bytes = '3'; Branch = 'refs/heads/main'
         }
     }
     function Resolve-AzureDevOpsAuth {
@@ -47,6 +48,42 @@ AfterAll {
 }
 
 Describe 'Publish pipeline artifact plan and transfer' {
+    It 'adds a format suffix only when the product has multiple formats' {
+        @(
+            (New-InventoryRow '1.0.0' 1 'Single')
+            (New-InventoryRow '1.0.0' 2 'Mixed' 'zip')
+            (New-InventoryRow '1.0.0' 3 'Mixed' 'nupkg')
+        ) | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
+        & $engine @common -WhatIf
+        $names = @((Import-Csv -LiteralPath $planPath).PackageName | Sort-Object)
+        $names | Should -Be @('mixed', 'mixed.zip', 'single')
+    }
+
+    It 'writes a header-only plan when no build file rows exist' {
+        $row = New-InventoryRow '1.0.0' 1
+        $row.Location = 'ReleaseArtifact'
+        $row | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
+        & $engine @common -WhatIf
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
+        (Get-Content -LiteralPath $planPath -TotalCount 1) | Should -Match 'PackageName'
+    }
+
+    It 'blocks a product-only name when its version exists under the old format-suffixed name' {
+        (New-InventoryRow '1.0.0' 1 'Single') | Export-Csv -LiteralPath $inventoryPath -NoTypeInformation
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
+            if ($Uri -like '*/upack/packages/single.zip/versions/*') { return [pscustomobject]@{ name = 'single.zip'; version = '1.0.0' } }
+            if ($Uri -like 'https://pkgs.dev.azure.com/*') {
+                $error = [Exception]::new('Not found')
+                $error | Add-Member -NotePropertyName Response -NotePropertyValue @{ StatusCode = 404 }
+                throw $error
+            }
+            throw "Unexpected request: $Uri"
+        }
+        & $engine @common -WhatIf
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
+    }
+
     BeforeEach {
         Mock Invoke-RestMethod {
             if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
@@ -70,10 +107,9 @@ Describe 'Publish pipeline artifact plan and transfer' {
 
         & $engine @common -WhatIf
         $plan = @(Import-Csv -LiteralPath $planPath)
-        @($plan | Where-Object Status -eq 'Ready').Count | Should -Be 2
+        $plan.Count | Should -Be 2
         ($plan | Where-Object SourceVersion -eq '2.13.0.4').PackageVersion | Should -Be '2.13.0'
         ($plan | Where-Object SourceVersion -eq '2.13.0.4').Status | Should -Be 'Ready'
-        ($plan | Where-Object SourceVersion -eq '2.13.0.5-beta').Status | Should -Be 'SupersededByRevision'
         ($plan | Where-Object SourceVersion -eq '2.13.0.6-beta').PackageVersion | Should -Be '2.13.0-beta'
         ($plan | Where-Object SourceVersion -eq '2.13.0.6-beta').Status | Should -Be 'Ready'
     }
@@ -89,7 +125,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
         Mock Invoke-WebRequest { throw 'Download must not run before target preflight.' }
 
         & $engine @common -Publish
-        (Import-Csv -LiteralPath $planPath)[0].Status | Should -Be 'AlreadyPublished'
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
         Should -Invoke Invoke-WebRequest -Times 0
         $global:publishCallCount | Should -Be 0
         (Test-Path -LiteralPath $workPath) | Should -BeFalse
@@ -109,7 +145,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
                 return [pscustomobject]@{ resource = [pscustomobject]@{ type = 'Container'; data = '#/10/drop' } }
             }
             if ($Uri -like '*/_apis/resources/Containers/10?*') {
-                return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; fileId = 55 }) }
+                return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; contentLocation = 'https://dev.azure.com/source/_apis/resources/Containers/10?itemPath=drop%2FUM.DB.Opc.2.13.0.4.zip' }) }
             }
             throw "Unexpected request: $Uri"
         }
@@ -122,7 +158,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
         $global:publishedFiles.Count | Should -Be 1
         $global:publishedFiles[0].Name | Should -Be 'UM.DB.Opc.2.13.0.4.zip'
         $global:publishedFiles[0].Bytes | Should -Be '65,66,67'
-        (Import-Csv -LiteralPath $planPath)[0].Status | Should -Be 'Published'
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
     }
 
     It 'replans an interrupted run and skips a version published previously' {
@@ -140,7 +176,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
                 return [pscustomobject]@{ resource = [pscustomobject]@{ type = 'Container'; data = '#/10/drop' } }
             }
             if ($Uri -like '*/_apis/resources/Containers/10?*') {
-                return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; fileId = 55 }) }
+                return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; contentLocation = 'https://dev.azure.com/source/_apis/resources/Containers/10?itemPath=drop%2FUM.DB.Opc.2.13.0.4.zip' }) }
             }
             throw "Unexpected request: $Uri"
         }
@@ -150,7 +186,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
         & $engine @common -Publish
 
         $global:publishCallCount | Should -Be 1
-        (Import-Csv -LiteralPath $planPath)[0].Status | Should -Be 'AlreadyPublished'
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
     }
 
     It 'skips a version that appears after planning but before its upload' {
@@ -160,8 +196,10 @@ Describe 'Publish pipeline artifact plan and transfer' {
         Mock Invoke-RestMethod {
             if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
             if ($Uri -like 'https://pkgs.dev.azure.com/*') {
-                $global:versionLookupCount++
-                if ($global:versionLookupCount -gt 1) { return [pscustomobject]@{ version = '2.13.0' } }
+                if ($Uri -like '*/upack/packages/um.db.opc/versions/*') {
+                    $global:versionLookupCount++
+                    if ($global:versionLookupCount -gt 1) { return [pscustomobject]@{ version = '2.13.0' } }
+                }
                 $error = [Exception]::new('Not found')
                 $error | Add-Member -NotePropertyName Response -NotePropertyValue @{ StatusCode = 404 }
                 throw $error
@@ -175,7 +213,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
         $global:versionLookupCount | Should -Be 2
         $global:publishCallCount | Should -Be 0
         Should -Invoke Invoke-WebRequest -Times 0
-        (Import-Csv -LiteralPath $planPath)[0].Status | Should -Be 'AlreadyPublished'
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
     }
 
     It 'ignores a staged older revision when publishing a newer selection' {
@@ -192,7 +230,7 @@ Describe 'Publish pipeline artifact plan and transfer' {
                 throw $error
             }
             if ($Uri -like '*/_apis/build/builds/101/artifacts?*') { return [pscustomobject]@{ resource = [pscustomobject]@{ type = 'Container'; data = '#/10/drop' } } }
-            if ($Uri -like '*/_apis/resources/Containers/10?*') { return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; fileId = 55 }) } }
+            if ($Uri -like '*/_apis/resources/Containers/10?*') { return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; contentLocation = 'https://dev.azure.com/source/_apis/resources/Containers/10?itemPath=drop%2FUM.DB.Opc.2.13.0.4.zip' }) } }
             throw "Unexpected request: $Uri"
         }
         Mock Invoke-WebRequest { [IO.File]::WriteAllBytes($OutFile, [byte[]]@(65, 66, 67)) }
@@ -211,14 +249,16 @@ Describe 'Publish pipeline artifact plan and transfer' {
         Mock Invoke-RestMethod {
             if ($Uri -like 'https://feeds.dev.azure.com/*') { return [pscustomobject]@{ name = 'TargetFeed' } }
             if ($Uri -like 'https://pkgs.dev.azure.com/*') {
-                $global:versionLookupCount++
-                if ($global:versionLookupCount -gt 2) { return [pscustomobject]@{ version = '2.13.0' } }
+                if ($Uri -like '*/upack/packages/um.db.opc/versions/*') {
+                    $global:versionLookupCount++
+                    if ($global:versionLookupCount -gt 2) { return [pscustomobject]@{ version = '2.13.0' } }
+                }
                 $error = [Exception]::new('Not found')
                 $error | Add-Member -NotePropertyName Response -NotePropertyValue @{ StatusCode = 404 }
                 throw $error
             }
             if ($Uri -like '*/_apis/build/builds/101/artifacts?*') { return [pscustomobject]@{ resource = [pscustomobject]@{ type = 'Container'; data = '#/10/drop' } } }
-            if ($Uri -like '*/_apis/resources/Containers/10?*') { return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; fileId = 55 }) } }
+            if ($Uri -like '*/_apis/resources/Containers/10?*') { return [pscustomobject]@{ value = @([pscustomobject]@{ itemType = 'file'; path = 'drop/UM.DB.Opc.2.13.0.4.zip'; contentLocation = 'https://dev.azure.com/source/_apis/resources/Containers/10?itemPath=drop%2FUM.DB.Opc.2.13.0.4.zip' }) } }
             throw "Unexpected request: $Uri"
         }
         Mock Invoke-WebRequest { [IO.File]::WriteAllBytes($OutFile, [byte[]]@(65, 66, 67)) }
@@ -227,6 +267,6 @@ Describe 'Publish pipeline artifact plan and transfer' {
 
         $global:versionLookupCount | Should -Be 3
         $global:publishCallCount | Should -Be 0
-        (Import-Csv -LiteralPath $planPath)[0].Status | Should -Be 'AlreadyPublished'
+        @(Import-Csv -LiteralPath $planPath).Count | Should -Be 0
     }
 }
