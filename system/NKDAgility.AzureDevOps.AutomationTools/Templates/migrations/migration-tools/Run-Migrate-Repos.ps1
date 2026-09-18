@@ -31,6 +31,8 @@ $ErrorActionPreference = 'Stop'
 # variable into an error instead of a silent empty string mid-migration.
 Set-StrictMode -Version Latest
 
+# init.ps1 also declares -Repo; dot-sourcing it clears this runbook parameter.
+$requestedRepo = $Repo
 . "$PSScriptRoot\..\..\init.ps1"
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
@@ -130,8 +132,8 @@ foreach ($prop in $config.PSObject.Properties) {
     }
     $shared[$prop.Name] = $prop.Value
 }
-if ($Repo) {
-    $runs = @(Select-ConfiguredRepoRun -Runs $runs -Repo $Repo)
+if ($requestedRepo) {
+    $runs = @(Select-ConfiguredRepoRun -Runs $runs -Repo $requestedRepo)
 }
 if (-not $runs) {
     $runs = @([pscustomobject]@{})
@@ -148,7 +150,7 @@ if (-not $sharedWorkPath) {
 $runIndex = 0
 $runCount = @($runs).Count
 $summaries = @()
-$summaryName = if ($Repo) { 'repomigration-' + [Uri]::EscapeDataString($Repo) + '.csv' } else { 'repomigration.csv' }
+$summaryName = if ($requestedRepo) { 'repomigration-' + [Uri]::EscapeDataString($requestedRepo) + '.csv' } else { 'repomigration.csv' }
 $summaryPath = Join-Path (Join-Path $PSScriptRoot 'output') $summaryName
 function Write-RepoSummaryCsv {
     param([object[]]$Rows, [string]$CsvPath = $summaryPath)

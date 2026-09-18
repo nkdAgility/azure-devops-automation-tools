@@ -444,8 +444,8 @@ Describe 'Durable repository migration summary' {
 
 Describe 'Configured single-repository run' {
     BeforeAll {
-        $binderPath = Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Templates\migrations\migration-tools\Run-Migrate-Repos.ps1'
-        $binderAst = [System.Management.Automation.Language.Parser]::ParseFile($binderPath, [ref]$null, [ref]$null)
+        $script:BinderPath = Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Templates\migrations\migration-tools\Run-Migrate-Repos.ps1'
+        $binderAst = [System.Management.Automation.Language.Parser]::ParseFile($script:BinderPath, [ref]$null, [ref]$null)
         $selector = $binderAst.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -466,6 +466,16 @@ Describe 'Configured single-repository run' {
     It 'stops on a missing or duplicate configured run' {
         { Select-ConfiguredRepoRun -Runs $script:configuredRuns -Repo 'Missing' } | Should -Throw '*found 0*'
         { Select-ConfiguredRepoRun -Runs @($script:configuredRuns[0], $script:configuredRuns[0]) -Repo 'GF.MS.DB.Opc' } | Should -Throw '*found 2*'
+    }
+
+    It 'preserves the -Repo argument before dot-sourcing init.ps1' {
+        $text = Get-Content -LiteralPath $script:BinderPath -Raw
+        $saved = $text.IndexOf('$requestedRepo = $Repo')
+        $init = $text.IndexOf('. "$PSScriptRoot\..\..\init.ps1"')
+        $selection = $text.IndexOf('Select-ConfiguredRepoRun -Runs $runs -Repo $requestedRepo')
+        $saved | Should -BeGreaterThan -1
+        $init | Should -BeGreaterThan $saved
+        $selection | Should -BeGreaterThan $init
     }
 }
 
