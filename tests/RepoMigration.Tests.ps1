@@ -442,6 +442,33 @@ Describe 'Durable repository migration summary' {
     }
 }
 
+Describe 'Configured single-repository run' {
+    BeforeAll {
+        $binderPath = Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Templates\migrations\migration-tools\Run-Migrate-Repos.ps1'
+        $binderAst = [System.Management.Automation.Language.Parser]::ParseFile($binderPath, [ref]$null, [ref]$null)
+        $selector = $binderAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Select-ConfiguredRepoRun'
+            }, $true)
+        . ([scriptblock]::Create($selector.Extent.Text))
+        $script:configuredRuns = @(
+            [pscustomobject]@{ RepoName = 'GF.MS.DB.Opc'; TargetRepoName = 'UM.DB.Opc' }
+            [pscustomobject]@{ RepoName = 'GF.MS.DB.Opc.Kyocera.Module'; TargetRepoName = 'UM.DB.Opc.Kyocera.Module' }
+        )
+    }
+
+    It 'selects exactly the named configured run without matching a name prefix' {
+        $selected = Select-ConfiguredRepoRun -Runs $script:configuredRuns -Repo 'gf.ms.db.opc.kyocera.module'
+        $selected.TargetRepoName | Should -BeExactly 'UM.DB.Opc.Kyocera.Module'
+    }
+
+    It 'stops on a missing or duplicate configured run' {
+        { Select-ConfiguredRepoRun -Runs $script:configuredRuns -Repo 'Missing' } | Should -Throw '*found 0*'
+        { Select-ConfiguredRepoRun -Runs @($script:configuredRuns[0], $script:configuredRuns[0]) -Repo 'GF.MS.DB.Opc' } | Should -Throw '*found 2*'
+    }
+}
+
 Describe 'Commit mention linking' {
 
     BeforeAll {

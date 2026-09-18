@@ -15,10 +15,15 @@
 .PARAMETER ConfigPath
     Optional path to the configuration file. Defaults to
     migrate-repos-config.json alongside this script.
+
+.PARAMETER Repo
+    Run only the configured repository whose RepoName matches this value.
+    The match is exact and case-insensitive.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'migrate-repos-config.json')
+    [string]$ConfigPath = (Join-Path $PSScriptRoot 'migrate-repos-config.json'),
+    [ValidateNotNullOrEmpty()][string]$Repo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,6 +111,14 @@ function ConvertTo-MigrateParams {
     $params
 }
 
+# Select one configured run before invoking any migration engine.
+function Select-ConfiguredRepoRun {
+    param([object[]]$Runs, [string]$Repo)
+    $selected = @($Runs | Where-Object { $_.PSObject.Properties['RepoName'] -and $_.RepoName -ieq $Repo })
+    if ($selected.Count -ne 1) { throw "Expected exactly one configured repository named '$Repo'; found $($selected.Count)." }
+    $selected[0]
+}
+
 # Collect shared settings (everything except the per-run 'Runs' array) so they
 # can be applied to every run and overridden by per-run properties.
 $shared = [ordered]@{}
@@ -116,6 +129,9 @@ foreach ($prop in $config.PSObject.Properties) {
         continue
     }
     $shared[$prop.Name] = $prop.Value
+}
+if ($Repo) {
+    $runs = @(Select-ConfiguredRepoRun -Runs $runs -Repo $Repo)
 }
 if (-not $runs) {
     $runs = @([pscustomobject]@{})
@@ -132,8 +148,10 @@ if (-not $sharedWorkPath) {
 $runIndex = 0
 $runCount = @($runs).Count
 $summaries = @()
+$summaryName = if ($Repo) { 'repomigration-' + [Uri]::EscapeDataString($Repo) + '.csv' } else { 'repomigration.csv' }
+$summaryPath = Join-Path (Join-Path $PSScriptRoot 'output') $summaryName
 function Write-RepoSummaryCsv {
-    param([object[]]$Rows, [string]$CsvPath = (Join-Path (Join-Path $PSScriptRoot 'output') 'repomigration.csv'))
+    param([object[]]$Rows, [string]$CsvPath = $summaryPath)
     $rowsToWrite = @($Rows | Where-Object { $_ -and $_.PSObject.Properties.Name -contains 'Repository' })
     $csvDir = Split-Path -Parent $csvPath
     if (-not (Test-Path -LiteralPath $csvDir)) {

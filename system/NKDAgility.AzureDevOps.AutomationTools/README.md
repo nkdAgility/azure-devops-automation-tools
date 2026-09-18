@@ -13,6 +13,10 @@ Set-MigrationContext -Collection 'http://tfs:8080/tfs/DefaultCollection/' -Migra
 
 `Set-MigrationContext` stores session defaults and applies them via `$Global:PSDefaultParameterValues`, so subsequent calls don't need to repeat `-Collection` etc. `-Project` is only defaulted on commands where it is mandatory, so commands with an optional `-Project` (e.g. `Find-WitGlobalWorkflowRuleScope`) keep collection scope unless told otherwise. `Clear-MigrationContext` undoes it.
 
+## Repository migration runbooks
+
+The `MigrationTools` repository runbook reads its `migrate-repos-config.json` and runs every entry in `Runs` by default. Pass `-Repo <source repository name>` to run exactly one configured entry. Matching is exact and case-insensitive; no match or duplicate matches stop before the migration engine runs. `-WhatIf` previews the selected run. A selected run writes `output/repomigration-<repo>.csv` so it does not replace the full-run `output/repomigration.csv`. The runbook calls `init.ps1` on every invocation to sync and load the configured engines.
+
 ## Historical build, pipeline, and release artifacts
 
 The standalone `Engines/Migrate-PipelineArtifacts.ps1` inventories artifact metadata, and `Engines/Publish-PipelineArtifacts.ps1` selects files and publishes them as [Universal Packages](https://learn.microsoft.com/en-us/azure/devops/artifacts/quickstarts/universal-packages?view=azure-devops). A client workspace supplies one `Run-Migrate-PipelineArtifacts.ps1` runbook, source and target organisations, PATs, CSV paths, and an ordered YAML configuration. Run the client runbook rather than the shared engines directly.
