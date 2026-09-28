@@ -54,6 +54,20 @@ if ($clone) {
     }
     if (-not (Test-Path $moduleFile)) { throw 'Automation tools is unavailable locally. Select a clone or install the module.' }
 }
-Import-Module $moduleFile -Force
-if (-not (Get-Command Invoke-AutomationWorkspaceInit -ErrorAction SilentlyContinue)) { throw "Automation tools at '$moduleFile' predates the thin init entry point. Update it first." }
-Invoke-AutomationWorkspaceInit -WorkspaceRoot $root -InitScriptPath $PSCommandPath @PSBoundParameters
+$bootstrapModule = Import-Module $moduleFile -Force -PassThru
+if (-not $bootstrapModule.ExportedCommands.ContainsKey('Invoke-AutomationWorkspaceInit')) { throw "Automation tools at '$moduleFile' predates the thin init entry point. Update it first." }
+& $bootstrapModule.ExportedCommands['Invoke-AutomationWorkspaceInit'] -WorkspaceRoot $root -InitScriptPath $PSCommandPath @PSBoundParameters
+
+# Initialisation imports the workspace's recorded .system copy. The bootstrap
+# module and any copies from earlier runs must not remain alongside it.
+$runtimeManifest = Join-Path $root (Join-Path '.system' (Join-Path $module "$module.psd1"))
+$runtimePath = (Resolve-Path -LiteralPath $runtimeManifest -ErrorAction Stop).ProviderPath
+$runtimeBase = Split-Path -Parent $runtimePath
+$runtimeModules = @(Get-Module -Name $module | Where-Object { $_.ModuleBase -eq $runtimeBase })
+if ($runtimeModules.Count -ne 1) { throw "Expected one workspace automation module at '$runtimePath'; found $($runtimeModules.Count)." }
+foreach ($loadedModule in @(Get-Module -Name $module)) {
+    if (-not [object]::ReferenceEquals($loadedModule, $runtimeModules[0])) {
+        Remove-Module -ModuleInfo $loadedModule -Force -WhatIf:$false -ErrorAction Stop
+    }
+}
+if (@(Get-Module -Name $module).Count -ne 1) { throw "Multiple automation modules remain loaded after initialisation." }
