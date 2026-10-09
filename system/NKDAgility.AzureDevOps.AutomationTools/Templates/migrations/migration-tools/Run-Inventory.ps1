@@ -72,3 +72,6 @@ if ($copied) {
 else {
     Write-Warning "No inventory.csv/json found under '$workDir'; check the platform package output."
 }
+
+# Repositories and their sizes, from the source (read-only).
+& (Join-Path $PSScriptRoot 'Run-RepoInventory.ps1')

@@ -54,7 +54,11 @@ if ($clone) {
     }
     if (-not (Test-Path $moduleFile)) { throw 'Automation tools is unavailable locally. Select a clone or install the module.' }
 }
-$bootstrapModule = Import-Module $moduleFile -Force -PassThru
+# A long-lived shell can still hold copies from earlier runs (the clone, the
+# gallery, .system), and -PassThru then returns several modules, so `&` below
+# receives an array. Unload them first and keep exactly the one imported here.
+Get-Module -Name $module | Remove-Module -Force -ErrorAction SilentlyContinue
+$bootstrapModule = @(Import-Module $moduleFile -Force -PassThru) | Select-Object -First 1
 if (-not $bootstrapModule.ExportedCommands.ContainsKey('Invoke-AutomationWorkspaceInit')) { throw "Automation tools at '$moduleFile' predates the thin init entry point. Update it first." }
 & $bootstrapModule.ExportedCommands['Invoke-AutomationWorkspaceInit'] -WorkspaceRoot $root -InitScriptPath $PSCommandPath @PSBoundParameters
 
