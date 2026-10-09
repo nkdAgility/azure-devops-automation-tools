@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Runs this migration end-to-end in order: repositories, then pipelines,
-    then artifact feeds, then work items.
+    Runs this migration end-to-end in order: source inventory (Migration
+    Platform), repositories, then pipelines, then artifact feeds, then work items.
 
 .DESCRIPTION
     Fail-fast orchestrator: each step must succeed before the next runs. Pass
@@ -64,7 +64,7 @@ $pipelineSteps = @(
 $workItemsConfig = 'configuration-workitems.json'
 
 $stepNumber = 0
-$totalSteps = $pipelineSteps.Count + 3
+$totalSteps = $pipelineSteps.Count + 4
 
 function Invoke-DevOpsMigration {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -101,6 +101,9 @@ function Invoke-RunScript {
 try {
     $runArgs = @{}
     if ($WhatIfPreference) { $runArgs['WhatIf'] = $true }
+
+    # 0. Source inventory, always first. Read-only, so it runs under -WhatIf too.
+    Invoke-RunScript -Label 'Inventory (Run-Inventory.ps1)' -ScriptName 'Run-Inventory.ps1'
 
     # 1. Repositories.
     Invoke-RunScript -Label 'Repositories (Run-Migrate-Repos.ps1)' -ScriptName 'Run-Migrate-Repos.ps1' -Arguments $runArgs

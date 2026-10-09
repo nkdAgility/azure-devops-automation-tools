@@ -13,8 +13,10 @@
    simply omitted). `devopsmigration.exe` cannot use Entra: its `configuration-*.json`
    `AccessToken` fields stay empty and are bound from the `MigrationTools__...__AccessToken`
    variables that `Set-AutomationSecrets` supplies from `..\..\secrets\secrets.json`.
-2. `.\Sync.ps1 -WhatIf` to preview everything, then `.\Sync.ps1` to run: repos -> pipelines ->
-   artifacts -> work items. Re-running is safe (idempotent engines skip what already moved).
+2. `.\Sync.ps1 -WhatIf` to preview everything, then `.\Sync.ps1` to run: inventory -> repos ->
+   pipelines -> artifacts -> work items. The inventory step (`Run-Inventory.ps1`, Migration
+   Platform, `platform-config.json` in Inventory mode) always runs first, even under -WhatIf,
+   and copies `inventory.csv`/`inventory.json` into `output\` - commit them. Re-running is safe (idempotent engines skip what already moved).
 3. `.\Run-Migrate-Artifacts.ps1 -Inventory` for a read-only inventory CSV before committing to
    package migration.
 4. Commit the summary CSVs written to `output\` as engagement evidence.
