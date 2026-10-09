@@ -60,9 +60,9 @@ $outDir = Join-Path $PSScriptRoot 'output'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $copied = 0
 foreach ($name in 'inventory.csv', 'inventory.json') {
-    $source = Join-Path $workDir $name
-    if (Test-Path -LiteralPath $source) {
-        Copy-Item -LiteralPath $source -Destination (Join-Path $outDir $name) -Force
+    $inventoryFile = Join-Path $workDir $name
+    if (Test-Path -LiteralPath $inventoryFile) {
+        Copy-Item -LiteralPath $inventoryFile -Destination (Join-Path $outDir $name) -Force
         $copied++
     }
 }
