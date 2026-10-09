@@ -154,6 +154,9 @@ $summaryName = if ($requestedRepo) { 'repomigration-' + [Uri]::EscapeDataString(
 $summaryPath = Join-Path (Join-Path $PSScriptRoot 'output') $summaryName
 function Write-RepoSummaryCsv {
     param([object[]]$Rows, [string]$CsvPath = $summaryPath)
+    # A preview must not replace the committed summary with would-do rows, and under
+    # -WhatIf Export-Csv never writes the temp file the Move below expects.
+    if ($WhatIfPreference) { return }
     $rowsToWrite = @($Rows | Where-Object { $_ -and $_.PSObject.Properties.Name -contains 'Repository' })
     $csvDir = Split-Path -Parent $csvPath
     if (-not (Test-Path -LiteralPath $csvDir)) {
