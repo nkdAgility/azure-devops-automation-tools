@@ -251,7 +251,7 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `New-ExportSnapshot` | Creates a dated `exports/<source>/<yyyyMMdd>/{xml,json}/` pair for pristine server exports |
 | `Set-MigrationContext` | Sets session defaults (collection, project, tool paths) via `$Global:PSDefaultParameterValues` |
 | `Get-MigrationContext` / `Clear-MigrationContext` | Read it back / undo it |
-| `Set-AutomationSecrets` | Exports PATs from `secrets/secrets.json` as `AZDO_PAT_<ORG>` plus any explicit `EnvVars` names. `-NoClobber` leaves variables already set |
+| `Set-AutomationSecrets` | Exports PATs from `secrets/secrets.json` as `AZDO_PAT_<ORG>` plus any explicit `EnvVars` names, and per-project PATs (`Projects`) as `AZDO_PAT_<ORG>__<PROJECT>`. `-Project` makes a selected project's PAT stand in for its organisation's token. `-NoClobber` leaves variables already set |
 | `Get-Organisation` | Organisation entries from `organisations.json` with PATs merged in from secrets |
 | `Get-AzureDevOpsAuthHeader` | Basic-auth header hashtable from a PAT |
 | `Get-AzureDevOpsAccessToken` | Entra access token for a collection — usable anywhere a PAT is (REST Bearer, git http.extraheader). Cached, renewed near expiry. Entra-first callers try this and fall back to a PAT only when it throws |

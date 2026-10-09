@@ -34,7 +34,21 @@ $here = $PSScriptRoot
 # as Entra fallbacks for the Run-Migrate-*.ps1 configs, plus the
 # MigrationTools__...__AccessToken names that devopsmigration.exe binds over its
 # JSON configs (devopsmigration.exe cannot use Entra, so those stay PAT-fed).
-Set-AutomationSecrets | Out-Null
+# The source and target projects named in the configs select any per-project PATs
+# in secrets.json, so a customer that issues one PAT per project needs no edits here.
+$secretProjects = @(
+    foreach ($config in @('configuration-workitems.json', 'configuration-pipelines.json')) {
+        $configPath = Join-Path $here $config
+        if (-not (Test-Path -LiteralPath $configPath)) { continue }
+        $endpoints = (Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).MigrationTools.Endpoints
+        foreach ($endpoint in $endpoints.PSObject.Properties) {
+            foreach ($property in $endpoint.Value.PSObject.Properties) {
+                if ($property.Name -eq 'Project' -and $property.Value) { [string]$property.Value }
+            }
+        }
+    }
+) | Select-Object -Unique
+Set-AutomationSecrets -Project $secretProjects | Out-Null
 
 # Resolve devopsmigration.exe from PATH so a missing tool fails fast with an
 # actionable message instead of a cryptic execution error mid-run.

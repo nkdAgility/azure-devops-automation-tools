@@ -14,6 +14,9 @@ function Resolve-CollectionPat {
          segment for dev.azure.com/<org> style URLs or the subdomain for
          <org>.visualstudio.com style URLs.
 
+    When Set-AutomationSecrets -Project has selected a project the entry holds a
+    per-project PAT for, that PAT is returned in place of the organisation's own.
+
     Returns $null - never throws - when nothing matches. Cached per collection for the
     session. Never log the returned value.
     #>
@@ -43,14 +46,22 @@ function Resolve-CollectionPat {
     $pat = $null
     if ($script:Workspace -and $script:Workspace.SecretsPath) {
         $secrets = @(Get-AutomationSecrets -SecretsPath $script:Workspace.SecretsPath)
-        $match = $secrets | Where-Object {
-            $_.AccessToken -and (
-                (& $normalise $_.Url) -eq (& $normalise $Collection) -or
-                ($_.Org -and $orgName -and $_.Org -ieq $orgName) -or
-                ($_.Org -and (& $normalise $Collection).EndsWith('/' + $_.Org.ToLowerInvariant()))
-            )
+        $selectedProjects = @($script:ActiveSecretProjects | Where-Object { $_ })
+        $candidates = foreach ($entry in $secrets) {
+            $projectPat = $null
+            if ($entry.PSObject.Properties['Projects'] -and $entry.Projects) {
+                $selected = @($selectedProjects | Where-Object { $entry.Projects.Contains($_) }) | Select-Object -First 1
+                if ($selected) { $projectPat = $entry.Projects[$selected] }
+            }
+            $entryPat = if ($projectPat) { $projectPat } else { $entry.AccessToken }
+            if ($entryPat) { [pscustomobject]@{ Entry = $entry; Pat = $entryPat } }
+        }
+        $match = $candidates | Where-Object {
+            (& $normalise $_.Entry.Url) -eq (& $normalise $Collection) -or
+            ($_.Entry.Org -and $orgName -and $_.Entry.Org -ieq $orgName) -or
+            ($_.Entry.Org -and (& $normalise $Collection).EndsWith('/' + $_.Entry.Org.ToLowerInvariant()))
         } | Select-Object -First 1
-        if ($match) { $pat = $match.AccessToken }
+        if ($match) { $pat = $match.Pat }
     }
 
     if (-not $pat -and $orgName) {

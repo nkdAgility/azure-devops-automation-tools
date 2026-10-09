@@ -4,8 +4,9 @@ function Get-AutomationSecrets {
     Loads organisation secrets from a secrets.json file, normalised and cached.
 
     .DESCRIPTION
-    Returns one object per organisation entry with Org, Url, AccessToken, EnvVars and
-    SignInAs properties.
+    Returns one object per organisation entry with Org, Url, AccessToken, EnvVars,
+    SignInAs and Projects properties. Projects is an ordered map of project name to PAT,
+    empty unless the entry carries per-project tokens.
     Accepts both the canonical PascalCase shape (Organisations / Org / Url / AccessToken /
     EnvVars / SignInAs) and camelCase or legacy variants (organisations / org / url / token /
     envVars / EnvVar / signInAs).
@@ -72,6 +73,29 @@ function Get-AutomationSecrets {
         if ($isPlaceholder -or [string]::IsNullOrWhiteSpace($token)) {
             $token = $null
         }
+        # Per-project PATs, for customers who issue one token per source project rather
+        # than one per organisation. Accepts a map ({ "Project": "<pat>" }) or a list of
+        # { Project, AccessToken } objects. Placeholders are dropped, never exported.
+        $projects = [ordered]@{}
+        # Read the property directly: returning it through $prop would unroll a
+        # one-element list into a bare object that looks like a map.
+        $rawProjects = ($entry.PSObject.Properties | Where-Object { $_.Name -in @('Projects', 'projects') } | Select-Object -First 1).Value
+        if ($rawProjects -is [System.Management.Automation.PSCustomObject]) {
+            $pairs = @($rawProjects.PSObject.Properties | ForEach-Object { , @($_.Name, $_.Value) })
+        }
+        else {
+            $pairs = @(@($rawProjects) | Where-Object { $_ } | ForEach-Object {
+                    , @((& $prop $_ @('Project', 'project', 'Name', 'name')), (& $prop $_ @('AccessToken', 'accessToken', 'Token', 'token')))
+                })
+        }
+        foreach ($pair in $pairs) {
+            $projectName = [string]$pair[0]
+            $projectToken = [string]$pair[1]
+            if ([string]::IsNullOrWhiteSpace($projectName) -or [string]::IsNullOrWhiteSpace($projectToken)) { continue }
+            if ($projectToken -like '<*>' -or $projectToken -eq 'REPLACE_WITH_PAT') { continue }
+            $projects[$projectName] = $projectToken
+        }
+
         $envVars = @(& $prop $entry @('EnvVars', 'envVars')) + @(& $prop $entry @('EnvVar', 'envVar'))
         $entries += [pscustomobject]@{
             Org           = & $prop $entry @('Org', 'org', 'Name', 'name')
@@ -81,6 +105,7 @@ function Get-AutomationSecrets {
             IsPlaceholder = $isPlaceholder
             EnvVars       = @($envVars | Where-Object { $_ })
             SignInAs    = & $prop $entry @('SignInAs', 'signInAs', 'Account', 'account', 'Upn', 'upn')
+            Projects      = $projects
         }
     }
 

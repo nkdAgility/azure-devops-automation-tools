@@ -2,7 +2,7 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Public\Common\Set-AutomationSecrets.ps1')
-    function Get-DerivedPatEnvVarName { param([string]$Org) "AZDO_PAT_$($Org.ToUpperInvariant())" }
+    . (Join-Path $PSScriptRoot '..\system\NKDAgility.AzureDevOps.AutomationTools\Private\Get-DerivedPatEnvVarName.ps1')
     function Write-FixStep { param([string]$Message) }
     function Get-AutomationSecrets {
         param([string]$SecretsPath, [switch]$Refresh)
@@ -19,7 +19,8 @@ BeforeAll {
         'MigrationTools__Endpoints__Source__AccessToken',
         'MigrationTools__Endpoints__Source__Authentication__AccessToken',
         'MigrationTools__Endpoints__Target__AccessToken',
-        'MigrationTools__Endpoints__Target__Authentication__AccessToken'
+        'MigrationTools__Endpoints__Target__Authentication__AccessToken',
+        'AZDO_PAT_SOURCE__PROJECT_A', 'AZDO_PAT_SOURCE__PROJECT_B'
     )
 }
 
@@ -44,7 +45,7 @@ Describe 'Set-AutomationSecrets endpoint bindings' {
 
     It 'refreshes source PAT and target Entra credentials in all three formats' {
         Set-AutomationSecrets -SecretsPath $TestDrive -WarningAction Stop | Out-Null
-        foreach ($name in $script:Names) {
+        foreach ($name in @($script:Names | Where-Object { $_ -notmatch '__PROJECT_' })) {
             $expected = if ($name -match 'SOURCE|Source') { 'source-pat' } else { 'mock-entra-token' }
             [Environment]::GetEnvironmentVariable($name) | Should -Be $expected
         }
@@ -91,6 +92,35 @@ Describe 'Set-AutomationSecrets endpoint bindings' {
         foreach ($name in $script:Names) {
             [Environment]::GetEnvironmentVariable($name) | Should -BeNullOrEmpty
         }
+    }
+
+    It 'exports every per-project PAT under its derived name' {
+        $script:TestEntries[0] | Add-Member -NotePropertyName Projects -NotePropertyValue ([ordered]@{ 'Project-A' = 'pat-a'; 'Project.B' = 'pat-b' })
+        Set-AutomationSecrets -SecretsPath $TestDrive | Out-Null
+        [Environment]::GetEnvironmentVariable('AZDO_PAT_SOURCE__PROJECT_A') | Should -Be 'pat-a'
+        [Environment]::GetEnvironmentVariable('AZDO_PAT_SOURCE__PROJECT_B') | Should -Be 'pat-b'
+        [Environment]::GetEnvironmentVariable('MigrationTools__Endpoints__Source__AccessToken') | Should -Be 'source-pat'
+    }
+
+    It 'binds a selected project PAT to every organisation-level name' {
+        $script:TestEntries[0] | Add-Member -NotePropertyName Projects -NotePropertyValue ([ordered]@{ 'Project-A' = 'pat-a'; 'Project.B' = 'pat-b' })
+        Set-AutomationSecrets -SecretsPath $TestDrive -Project 'project.b', 'UnrelatedTarget' | Out-Null
+        foreach ($name in @($script:Names | Where-Object { $_ -cmatch 'SOURCE$|Source' })) {
+            [Environment]::GetEnvironmentVariable($name) | Should -Be 'pat-b'
+        }
+        [Environment]::GetEnvironmentVariable('MigrationTools__Endpoints__Target__AccessToken') | Should -Be 'mock-entra-token'
+    }
+
+    It 'uses a selected project PAT when the organisation has no token of its own' {
+        $script:TestEntries[0].AccessToken = $null
+        $script:TestEntries[0] | Add-Member -NotePropertyName Projects -NotePropertyValue ([ordered]@{ 'Project-A' = 'pat-a' })
+        Set-AutomationSecrets -SecretsPath $TestDrive -Project 'Project-A' -WarningAction Stop | Out-Null
+        [Environment]::GetEnvironmentVariable('MigrationTools__Endpoints__Source__Authentication__AccessToken') | Should -Be 'pat-a'
+    }
+
+    It 'refuses two selected projects in one organisation' {
+        $script:TestEntries[0] | Add-Member -NotePropertyName Projects -NotePropertyValue ([ordered]@{ 'Project-A' = 'pat-a'; 'Project.B' = 'pat-b' })
+        { Set-AutomationSecrets -SecretsPath $TestDrive -Project 'Project-A', 'Project.B' | Out-Null } | Should -Throw '*more than one selected project*'
     }
 
     It 'clears stale bindings when interactive init has no secrets file' {

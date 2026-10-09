@@ -14,6 +14,11 @@ function Set-AutomationSecrets {
         JSON configs leave AccessToken empty and bind names such as
         MigrationTools__Endpoints__Source__Authentication__AccessToken from the environment.
 
+    An entry may also carry per-project PATs (Projects), for customers who issue one token
+    per project. Each is exported as AZDO_PAT_<ORG>__<PROJECT>. When -Project names one of
+    them, that PAT replaces the organisation's own token on every name above, so the
+    devopsmigration.exe endpoint bindings carry the project's token.
+
     For Azure DevOps Services entries without a PAT, obtains an Entra token. Existing
     process values are refreshed unless -NoClobber is explicitly requested. Both flat
     and nested endpoint bindings are populated when either is configured. Only variable
@@ -34,8 +39,16 @@ function Set-AutomationSecrets {
     .EXAMPLE
     Set-AutomationSecrets
 
+    .PARAMETER Project
+    Project names whose per-project PATs should stand in for their organisation's token.
+    Names that match no entry are ignored, so a runbook can pass both its source and
+    target projects. Two selected projects in one organisation is an error.
+
     .EXAMPLE
     Set-AutomationSecrets -NoClobber
+
+    .EXAMPLE
+    Set-AutomationSecrets -Project 'Charmilles', 'UM-Charmilles'
     #>
     [CmdletBinding()]
     param(
@@ -46,8 +59,15 @@ function Set-AutomationSecrets {
 
         [switch]$NoClobber,
 
-        [switch]$ClearMissing
+        [switch]$ClearMissing,
+
+        [string[]]$Project
     )
+
+    # Selecting projects changes which PAT an organisation resolves to, so a collection
+    # PAT cached under the previous selection must not survive it.
+    $script:ActiveSecretProjects = @($Project | Where-Object { $_ })
+    $script:CollectionPatCache = @{}
 
     if (-not $SecretsPath) {
         if (-not $script:Workspace) {
@@ -92,6 +112,34 @@ function Set-AutomationSecrets {
 
         $credential = $entry.AccessToken
         $method = 'PAT'
+        $entryProjects = if ($entry.PSObject.Properties['Projects'] -and $entry.Projects) { $entry.Projects } else { @{} }
+
+        # Every per-project PAT is also exported under its own predictable name, so a
+        # repo or artifact config can name it directly whatever project is selected.
+        foreach ($projectName in @($entryProjects.Keys)) {
+            $projectVar = Get-DerivedPatEnvVarName -Org $entry.Org -Project $projectName
+            if ($NoClobber -and -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($projectVar))) {
+                Write-FixStep "$($entry.Org): $projectVar kept (existing value)"
+                continue
+            }
+            Set-Item -Path ("Env:{0}" -f $projectVar) -Value $entryProjects[$projectName]
+            if ($Scope -ne 'Process') {
+                [System.Environment]::SetEnvironmentVariable($projectVar, $entryProjects[$projectName], $scopeEnum)
+            }
+            if (-not $setNames.Contains($projectVar)) { $setNames.Add($projectVar) }
+            Write-FixStep "$($entry.Org): $projectVar loaded (PAT, project $projectName)"
+        }
+
+        # A selected project's PAT stands in for the organisation's own token on every
+        # organisation-level name, including the devopsmigration.exe endpoint bindings.
+        $selected = @($script:ActiveSecretProjects | Where-Object { $entryProjects.Contains($_) } | Select-Object -Unique)
+        if ($selected.Count -gt 1) {
+            throw "Org '$($entry.Org)' has PATs for more than one selected project ($($selected -join ', ')); select one project per organisation."
+        }
+        if ($selected.Count -eq 1) {
+            $credential = $entryProjects[$selected[0]]
+            $method = "PAT, project $($selected[0])"
+        }
         if ($NoClobber) {
             $existingValues = @($names | ForEach-Object { [Environment]::GetEnvironmentVariable($_) } |
                     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
