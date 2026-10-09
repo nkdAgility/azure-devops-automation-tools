@@ -131,7 +131,35 @@
     force-updated to the source, and every commit that only existed on the target is
     listed first so there is a record of exactly what was overwritten.
 
-    Do not use it against a target anyone actually commits to.
+    Do not use it against a target anyone actually commits to - use
+    -DivergedBranchAction Rebase for that.
+
+    Kept for existing configs; equivalent to -DivergedBranchAction Force.
+
+.PARAMETER DivergedBranchAction
+    What a sync does with a target branch that has commits the source does not.
+
+      Skip    (default) report it and leave the branch alone.
+      Force   overwrite it with the source, listing the discarded commits first.
+              Same as -ForceDivergedBranches; see that parameter.
+      Rebase  keep the target's own commits, replayed on top of the source tip.
+
+    Rebase is for a target people already commit to while syncs continue: a diverged
+    branch is brought up to date by replaying the commits that exist only on the target on top of
+    the source tip, then pushing the result. Nothing on the target is discarded.
+
+    Seen on this engagement: the customer committed to master in the target between
+    syncs, and -ForceDivergedBranches overwrote that work on the next run.
+
+    The replay runs in the bare mirror with 'git merge-tree --write-tree' and
+    'git commit-tree' - no working tree, no LFS smudge - and keeps each commit's
+    author, committer, dates and message. The commit ids change, so the people working
+    on the target must re-sync their local clones ('git pull --rebase') after each run.
+    A commit whose change conflicts with the source, or a merge commit among the
+    target-only commits, fails that branch with the reason and pushes nothing for it.
+    The push uses --force-with-lease against the tip that was read, so a commit pushed
+    to the target during the run is never overwritten; the branch fails instead and the
+    next run picks it up.
 
 .PARAMETER SkipWikiLinkRewrite
     Skip rewriting Azure DevOps work item URLs inside the wiki. By default, when
@@ -242,11 +270,23 @@ param(
 
     [switch]$SkipWikiLinkRewrite,
 
-    [switch]$ForceDivergedBranches
+    [switch]$ForceDivergedBranches,
+
+    [ValidateSet('Skip', 'Force', 'Rebase')]
+    [string]$DivergedBranchAction
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# -ForceDivergedBranches predates -DivergedBranchAction and is kept as its 'Force'.
+if ($ForceDivergedBranches) {
+    if ($DivergedBranchAction -and $DivergedBranchAction -ne 'Force') {
+        throw "-ForceDivergedBranches conflicts with -DivergedBranchAction $DivergedBranchAction; use -DivergedBranchAction alone."
+    }
+    $DivergedBranchAction = 'Force'
+}
+if (-not $DivergedBranchAction) { $DivergedBranchAction = 'Skip' }
 
 if (-not $TargetProject) { $TargetProject = $SourceProject }
 
@@ -1317,6 +1357,76 @@ function Measure-PushPayload {
     catch { return -1 }
 }
 
+function Invoke-ReplayCommits {
+    <# Replays the target-only commits of a diverged branch onto the source tip, in the
+       bare mirror, and returns the new tip. Throws - having written no ref - on a
+       conflict or a merge commit, so the caller pushes nothing for that branch.
+
+       Plumbing, not 'git rebase': a bare mirror has no working tree, and checking one
+       out would smudge every LFS object. Each commit is a three-way merge of its own
+       change (parent -> commit) onto the new base, written with commit-tree under the
+       original author and committer, so only the parent - and therefore the id -
+       changes. 'git replay' does the same but is marked experimental and has changed
+       its default ref handling between git versions. #>
+    param([string]$Branch, [string]$MergeBase, [string]$TargetSha, [string]$Onto)
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    $merges = @(& git rev-list --merges "$MergeBase..$TargetSha")
+    if ($merges.Count -gt 0) {
+        throw ("cannot replay: {0} merge commit(s) among the target-only commits (first {1}); reconcile this branch by hand" -f
+            $merges.Count, $merges[0].Substring(0, 8))
+    }
+
+    $head = $Onto
+    foreach ($sha in @(& git rev-list --reverse "$MergeBase..$TargetSha")) {
+        # --write-tree prints the tree id, then on conflict the conflicted files; exit 1 is a conflict.
+        $merge = @(& git merge-tree --write-tree --name-only --no-messages --merge-base "$sha^" $head $sha)
+        if ($LASTEXITCODE -eq 1) {
+            $files = @($merge | Select-Object -Skip 1 | Where-Object { $_ }) -join ', '
+            throw ("cannot replay commit {0}: it conflicts with the source in {1}" -f $sha.Substring(0, 8), $files)
+        }
+        if ($LASTEXITCODE -ne 0) { throw "git merge-tree failed for commit $sha (exit $LASTEXITCODE)" }
+        $tree = $merge[0]
+
+        # Same author, committer, dates and message - only the parent differs.
+        $meta = @(& git log -1 --format='%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd' --date=raw $sha) -join '' -split "`0"
+        $saved = @{}
+        $names = 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE'
+        try {
+            for ($i = 0; $i -lt $names.Count; $i++) {
+                $saved[$names[$i]] = [Environment]::GetEnvironmentVariable($names[$i])
+                [Environment]::SetEnvironmentVariable($names[$i], $meta[$i])
+            }
+            # The message goes through a UTF-8 file, read as UTF-8: otherwise PowerShell
+            # decodes git's output with the console code page and mangles non-ASCII.
+            $msgFile = [System.IO.Path]::GetTempFileName()
+            $encodingBefore = [Console]::OutputEncoding
+            try {
+                [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                $msg = @(& git log -1 --format=%B $sha) -join "`n"
+                [System.IO.File]::WriteAllText($msgFile, $msg.TrimEnd() + "`n", [System.Text.UTF8Encoding]::new($false))
+                $new = & git commit-tree $tree -p $head -F $msgFile
+                if ($LASTEXITCODE -ne 0 -or -not $new) { throw "git commit-tree failed for commit $sha" }
+            }
+            finally {
+                [Console]::OutputEncoding = $encodingBefore
+                Remove-Item -LiteralPath $msgFile -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            # Remove-Item, not SetEnvironmentVariable($n, $null): PowerShell passes $null to
+            # a .NET string parameter as '', which leaves an EMPTY identity set and fails
+            # every later commit in this process with 'empty ident name'.
+            foreach ($n in $names) {
+                if ($null -eq $saved[$n]) { Remove-Item -LiteralPath "Env:$n" -ErrorAction SilentlyContinue }
+                else { Set-Item -LiteralPath "Env:$n" -Value $saved[$n] }
+            }
+        }
+        $head = "$new".Trim()
+    }
+    return $head
+}
+
 function Push-BranchSegmented {
     <# Pushes one branch's history to the target in commit-count segments so no single
        push exceeds the Azure DevOps limit.
@@ -1335,6 +1445,11 @@ function Push-BranchSegmented {
 
     $forcePush = $false
     $from = $targetSha
+    # What lands on the target branch: the source tip, or under Rebase the replayed tip.
+    $tip = $Branch
+    # Under Rebase every push is leased against the tip it expects to replace, so a
+    # commit pushed to the target during the run fails the branch instead of vanishing.
+    $lease = $null
 
     if ($targetSha) {
         if ($targetSha -eq $localSha) {
@@ -1344,35 +1459,61 @@ function Push-BranchSegmented {
 
         & git merge-base --is-ancestor $targetSha $Branch 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            # Diverged. Not because anyone edited the target - because the branch was
-            # REWRITTEN at the source after an earlier run copied it, leaving the target
-            # holding commits the source has since discarded.
-            if (-not $ForceDivergedBranches) {
-                Write-Warning "      [$Branch] target has commits this mirror does not; left alone (use -ForceDivergedBranches to overwrite)."
-                return
-            }
-
-            # Everything about to be discarded is recorded BEFORE it goes, so the run
-            # can say exactly what was overwritten rather than 'some branches were forced'.
+            # Diverged: the target holds commits the source does not. Either the branch
+            # was REWRITTEN at the source after an earlier run copied it, or somebody
+            # committed to the target - the sync cannot tell which, so the action is
+            # configured, never guessed.
             $mergeBase = (& git merge-base $targetSha $Branch 2>$null)
-            $orphans = @(& git rev-list "$mergeBase..$targetSha" 2>$null)
-            $script:ForcedBranches.Add([pscustomobject]@{
-                    Branch        = $Branch
-                    TargetWas     = $targetSha
-                    NowMatches    = $localSha
-                    OrphanCommits = $orphans.Count
-                    OrphanSample  = (@($orphans | Select-Object -First 5) -join ' ')
-                })
-            Write-Warning ("      [{0}] diverged - overwriting; {1} commit(s) exist only on the target and will be discarded." -f $Branch, $orphans.Count)
+            $targetOnly = @(& git rev-list "$mergeBase..$targetSha" 2>$null)
+
+            switch ($DivergedBranchAction) {
+                'Skip' {
+                    Write-Warning ("      [{0}] target has {1} commit(s) this mirror does not; left alone (-DivergedBranchAction Rebase keeps them, Force discards them)." -f $Branch, $targetOnly.Count)
+                    return
+                }
+                'Rebase' {
+                    # Throws on a conflict or merge commit, before anything is pushed.
+                    $tip = Invoke-ReplayCommits -Branch $Branch -MergeBase $mergeBase -TargetSha $targetSha -Onto $localSha
+                    $script:RebasedBranches.Add([pscustomobject]@{
+                            Branch         = $Branch
+                            TargetWas      = $targetSha
+                            SourceTip      = $localSha
+                            NewTip         = $tip
+                            ReplayedCommits = $targetOnly.Count
+                        })
+                    Write-Host ("      [{0}] diverged - replaying {1} target-only commit(s) onto the source tip" -f $Branch, $targetOnly.Count) -ForegroundColor Yellow
+                    $lease = $targetSha
+                }
+                'Force' {
+                    # Everything about to be discarded is recorded BEFORE it goes, so the run
+                    # can say exactly what was overwritten rather than 'some branches were forced'.
+                    $script:ForcedBranches.Add([pscustomobject]@{
+                            Branch        = $Branch
+                            TargetWas     = $targetSha
+                            NowMatches    = $localSha
+                            OrphanCommits = $targetOnly.Count
+                            OrphanSample  = (@($targetOnly | Select-Object -First 5) -join ' ')
+                        })
+                    Write-Warning ("      [{0}] diverged - overwriting; {1} commit(s) exist only on the target and will be discarded." -f $Branch, $targetOnly.Count)
+                    $forcePush = $true
+                }
+            }
 
             # From the common ancestor, because the target's tip is not in this history.
             $from = $mergeBase
-            $forcePush = $true
         }
     }
 
+    # The force flag for one push. Not $args - that is an automatic variable holding a
+    # function's unbound arguments.
+    $pushFlags = {
+        if ($lease) { @("--force-with-lease=refs/heads/${Branch}:$lease") }
+        elseif ($forcePush) { @('--force') }
+        else { @() }
+    }
+
     # Oldest first, and only what the target is missing.
-    $range = if ($from) { "$from..$Branch" } else { $Branch }
+    $range = if ($from) { "$from..$tip" } else { $tip }
     $commits = @(& git rev-list --reverse --first-parent $range)
     if ($LASTEXITCODE -ne 0) { throw "git rev-list failed for branch '$Branch'" }
     $total = $commits.Count
@@ -1389,14 +1530,14 @@ function Push-BranchSegmented {
     # 0.8 of the limit leaves room for the packing overhead a push adds over the on-disk
     # sizes measured here.
     $limitBytes = [int64]($MaxPushSizeGB * 1GB * 0.8)
-    $payload = Measure-PushPayload -Branch $Branch -TargetRemote $TargetRemote
+    $payload = Measure-PushPayload -Branch $tip -TargetRemote $TargetRemote
     $effectiveBatch = $BatchSize
 
     if ($payload -ge 0) {
         $mb = [math]::Round($payload / 1MB, 1)
         if ($payload -le $limitBytes) {
-            $tipOnly = "$Branch`:refs/heads/$Branch"
-            $oneShot = @('push') + $(if ($forcePush) { @('--force') } else { @() }) + @($TargetRemote, $tipOnly)
+            $tipOnly = "$tip`:refs/heads/$Branch"
+            $oneShot = @('push') + (& $pushFlags) + @($TargetRemote, $tipOnly)
             Write-Host ("      [{0}] {1} MB to send; one push ({2} commit(s))" -f $Branch, $mb, $total) -ForegroundColor DarkGray
             Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $oneShot
             return
@@ -1418,17 +1559,17 @@ function Push-BranchSegmented {
         $segment++
         $refspec = "$sha`:refs/heads/$Branch"
         Write-Host ("      [{0}] segment {1}: pushing through commit {2} ({3}/{4})" -f $Branch, $segment, $sha.Substring(0, 8), ($i + 1), $total) -ForegroundColor DarkCyan
-        # A diverged branch needs --force on every segment, not only the last: the first
-        # one already fails as a non-fast-forward against the target's discarded tip.
-        # Not $args - that is an automatic variable holding a function's unbound arguments.
-        $segmentArgs = @('push') + $(if ($forcePush) { @('--force') } else { @() }) + @($TargetRemote, $refspec)
+        # A diverged branch needs --force (or the lease) on every segment, not only the
+        # last: the first one already fails as a non-fast-forward against the old tip.
+        $segmentArgs = @('push') + (& $pushFlags) + @($TargetRemote, $refspec)
         Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $segmentArgs
+        if ($lease) { $lease = $sha }
     }
 
     # Final push to advance the branch to its actual tip.
-    $tipRefspec = "$Branch`:refs/heads/$Branch"
+    $tipRefspec = "$tip`:refs/heads/$Branch"
     Write-Host "      [$Branch] final: pushing branch tip" -ForegroundColor DarkCyan
-    $tipArgs = @('push') + $(if ($forcePush) { @('--force') } else { @() }) + @($TargetRemote, $tipRefspec)
+    $tipArgs = @('push') + (& $pushFlags) + @($TargetRemote, $tipRefspec)
     Invoke-Git -ExtraHeader $script:TargetHeader -GitArgs $tipArgs
 }
 
@@ -1501,6 +1642,14 @@ function Push-Segmented {
             foreach ($forced in $script:ForcedBranches) {
                 Write-Host ("      {0}  ({1} commit(s) discarded, was {2})" -f
                     $forced.Branch, $forced.OrphanCommits, $forced.TargetWas.Substring(0, 8)) -ForegroundColor Yellow
+            }
+        }
+        if ($script:RebasedBranches.Count -gt 0) {
+            Write-Host ''
+            Write-Host ("    {0} branch(es) had their target-only commits replayed onto the source - local clones need 'git pull --rebase':" -f $script:RebasedBranches.Count) -ForegroundColor Yellow
+            foreach ($rebased in $script:RebasedBranches) {
+                Write-Host ("      {0}  ({1} commit(s) replayed, was {2}, now {3})" -f
+                    $rebased.Branch, $rebased.ReplayedCommits, $rebased.TargetWas.Substring(0, 8), $rebased.NewTip.Substring(0, 8)) -ForegroundColor Yellow
             }
         }
 
@@ -1624,7 +1773,13 @@ function Migrate-Repo {
         Push-Segmented -CloneDir $cloneDir -TargetRemote 'target' -BatchSize $CommitBatchSize
     }
     else {
-        Push-Mirror -CloneDir $cloneDir -TargetRemote 'target'
+        try { Push-Mirror -CloneDir $cloneDir -TargetRemote 'target' }
+        catch {
+            # A diverged branch rejects the whole mirror push; the per-branch path is the
+            # one that applies -DivergedBranchAction, so a re-sync must reach it.
+            Write-Host "    mirror push rejected ($($_.Exception.Message)); falling back to per-branch" -ForegroundColor DarkYellow
+            Push-Segmented -CloneDir $cloneDir -TargetRemote 'target' -BatchSize $CommitBatchSize
+        }
     }
 
     # Verify rather than assume. Comparing the mirror's refs against the target's costs
@@ -1760,6 +1915,7 @@ $script:TargetProjectId = $null
 # Branches force-updated because they had diverged, recorded so the run can say exactly
 # what was discarded rather than only that something was overwritten.
 $script:ForcedBranches = [System.Collections.Generic.List[object]]::new()
+$script:RebasedBranches = [System.Collections.Generic.List[object]]::new()
 Initialize-SourceAuth
 Initialize-TargetAuth
 
