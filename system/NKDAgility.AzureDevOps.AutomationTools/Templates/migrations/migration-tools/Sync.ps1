@@ -80,9 +80,19 @@ function Invoke-DevOpsMigration {
     if (-not $PSCmdlet.ShouldProcess($ConfigFile, 'devopsmigration.exe execute')) {
         return
     }
-    & $devopsMigration.Source execute --config $configPath
+    # devopsmigration.exe can stop on a fatal validation error (e.g. missing area or
+    # iteration paths) and still exit 0, so also fail on any [ERR] line it logs.
+    $errorLines = [System.Collections.Generic.List[string]]::new()
+    & $devopsMigration.Source execute --config $configPath 2>&1 | ForEach-Object {
+        $line = "$_"
+        if ($line -match '\sERR\]\s') { $errorLines.Add($line) }
+        Write-Host $line
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "devopsmigration.exe failed (exit $LASTEXITCODE) for config '$ConfigFile'."
+    }
+    if ($errorLines.Count) {
+        throw "devopsmigration.exe logged $($errorLines.Count) error(s) for config '$ConfigFile'; first: $($errorLines[0])"
     }
 }
 
