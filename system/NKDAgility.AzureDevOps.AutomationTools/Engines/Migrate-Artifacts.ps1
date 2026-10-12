@@ -104,6 +104,13 @@
     be restored on the target by configuring the same upstream sources. Use
     this switch to migrate cached upstream versions as well.
 
+.PARAMETER SkipViews
+    Do not recreate the source feed's views (@Release, @Prerelease, custom) on
+    the target, and do not promote package versions into them. By default views
+    are created by name, visibility is aligned, and every migrated version -
+    including ones already in the target from earlier runs - is promoted into
+    the views it belonged to in the source. Promotion is additive only.
+
 .PARAMETER CsvPath
     Optional path to write the summary as a CSV file (one row per feed and
     protocol, with package/version counts and total bytes). The parent
@@ -170,6 +177,8 @@ param(
     [string]$ContributorsRole = 'collaborator',
 
     [switch]$IncludeUpstream,
+
+    [switch]$SkipViews,
 
     [string]$CsvPath
 )
@@ -1087,6 +1096,116 @@ function Remove-MismatchedGroupPermissions {
     $removed
 }
 
+#region Feed views ------------------------------------------------------------
+
+# Feed views (@Release, @Prerelease, custom ones) are not carried by package
+# publishing: every version pushed to the target lands in @Local only. Views are
+# recreated by name, then each version is promoted into the views it belonged to
+# in the source. The implicit @Local view is managed by the service and skipped.
+
+function Get-FeedViews {
+    param([string]$OrgUrl, [string]$Project, [string]$FeedId, [hashtable]$Headers)
+    $url = (Get-FeedsBaseUrl -OrgUrl $OrgUrl -Project $Project) +
+        "/feeds/$FeedId/views?api-version=7.1-preview.1"
+    @((Invoke-AdoApi -Uri $url -Headers $Headers).value |
+        Where-Object { "$($_.type)".ToLowerInvariant() -ne 'implicit' })
+}
+
+function Get-VersionViewNames {
+    # View names a package version is promoted to, without the implicit @Local.
+    param($Version)
+    if (-not ($Version.PSObject.Properties['views'] -and $Version.views)) { return @() }
+    @($Version.views |
+        Where-Object { "$($_.type)".ToLowerInvariant() -ne 'implicit' } |
+        ForEach-Object { $_.name })
+}
+
+function Sync-TargetFeedViews {
+    # Creates the source feed's views missing on the target (matched by name,
+    # case-insensitive) and aligns visibility on existing ones. Idempotent.
+    param($SourceFeed, $TargetFeed)
+
+    $sourceViews = Get-FeedViews -OrgUrl $SourceOrg -Project $SourceProject -FeedId $SourceFeed.id -Headers $script:SourceHeaders
+    if ($sourceViews.Count -eq 0) { return }
+
+    $targetViews = @()
+    if ($TargetFeed -and $TargetFeed.PSObject.Properties['id']) {
+        $targetViews = Get-FeedViews -OrgUrl $TargetOrg -Project $TargetProject -FeedId $TargetFeed.id -Headers $script:TargetHeaders
+    }
+    $base = if ($TargetFeed -and $TargetFeed.PSObject.Properties['id']) {
+        (Get-FeedsBaseUrl -OrgUrl $TargetOrg -Project $TargetProject) + "/feeds/$($TargetFeed.id)/views"
+    }
+
+    foreach ($sv in $sourceViews) {
+        $tv = $targetViews | Where-Object { $_.name -ieq $sv.name } | Select-Object -First 1
+        if (-not $tv) {
+            if (-not $PSCmdlet.ShouldProcess("$($SourceFeed.name)@$($sv.name)", 'Create feed view')) { continue }
+            Write-Host "    Creating view '@$($sv.name)' ($($sv.visibility))." -ForegroundColor Green
+            $body = @{ name = $sv.name; type = 'release'; visibility = $sv.visibility }
+            Invoke-AdoApi -Uri "${base}?api-version=7.1-preview.1" -Headers $script:TargetHeaders -Method Post -Body $body | Out-Null
+        }
+        elseif ($sv.visibility -and "$($tv.visibility)" -ne "$($sv.visibility)") {
+            if (-not $PSCmdlet.ShouldProcess("$($SourceFeed.name)@$($sv.name)", "Set view visibility to $($sv.visibility)")) { continue }
+            Write-Host "    Setting view '@$($sv.name)' visibility to $($sv.visibility)." -ForegroundColor Green
+            Invoke-AdoApi -Uri "$base/$($tv.id)?api-version=7.1-preview.1" -Headers $script:TargetHeaders `
+                -Method Patch -Body @{ visibility = $sv.visibility } | Out-Null
+        }
+    }
+}
+
+function Get-VersionPromoteUrl {
+    # The per-protocol package version endpoint that accepts a views PATCH.
+    param([string]$FeedId, [string]$Protocol, [string]$Name, [string]$Version)
+    $base = (Get-PackagingBaseUrl -OrgUrl $TargetOrg -Project $TargetProject) + "/feeds/$FeedId"
+    $enc = { param([string]$s) [uri]::EscapeDataString($s) }
+    $path = switch ($Protocol) {
+        'nuget' { "nuget/packages/$(& $enc $Name)/versions/$(& $enc $Version)" }
+        'npm' {
+            if ($Name -match '^@([^/]+)/(.+)$') {
+                "npm/packages/@$(& $enc $Matches[1])/$(& $enc $Matches[2])/versions/$(& $enc $Version)"
+            }
+            else { "npm/packages/$(& $enc $Name)/versions/$(& $enc $Version)" }
+        }
+        'pypi'  { "pypi/packages/$(& $enc $Name)/versions/$(& $enc $Version)" }
+        'upack' { "upack/packages/$(& $enc $Name)/versions/$(& $enc $Version)" }
+        'maven' {
+            $parts = $Name -split ':'
+            if ($parts.Count -lt 2) { return $null }
+            "maven/groups/$(& $enc $parts[0])/artifacts/$(& $enc $parts[1])/versions/$(& $enc $Version)"
+        }
+        default { return $null }
+    }
+    "$base/${path}?api-version=7.1-preview.1"
+}
+
+function Sync-VersionViews {
+    # Promotes a target package version into every view it was in on the source
+    # and is not yet in on the target. Promotion is additive; nothing is demoted.
+    param($TargetFeed, [string]$Protocol, $Package, $Version, [string[]]$TargetViews = @())
+
+    $wanted = @(Get-VersionViewNames -Version $Version)
+    $missing = @($wanted | Where-Object { $TargetViews -notcontains $_ })
+    if ($missing.Count -eq 0) { return }
+
+    $label = "$($Package.name) $($Version.version) [$Protocol]"
+    $url = Get-VersionPromoteUrl -FeedId $TargetFeed.id -Protocol $Protocol -Name $Package.name -Version $Version.version
+    if (-not $url) { return }
+
+    foreach ($view in $missing) {
+        if (-not $PSCmdlet.ShouldProcess($label, "Promote to @$view")) { continue }
+        $body = @{ views = @{ op = 'add'; path = '/views/-'; value = $view } }
+        try {
+            Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders -Method Patch -Body $body | Out-Null
+            Write-Host "      Promoted $label to @$view" -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "      Could not promote $label to @$view : $($_.Exception.Message)"
+        }
+    }
+}
+
+#endregion Feed views ---------------------------------------------------------
+
 #endregion Feed operations ----------------------------------------------------
 
 #region Package enumeration ---------------------------------------------------
@@ -1115,6 +1234,8 @@ function Get-TargetVersionLookup {
     # an empty set for a brand-new feed. Enumeration uses the feeds host.
     param([string]$FeedId)
 
+    # The value is the version's current view names, so view promotion can skip
+    # what is already in place.
     $lookup = @{}
     if (-not $FeedId) { return $lookup }
     $base = Get-FeedsBaseUrl -OrgUrl $TargetOrg -Project $TargetProject
@@ -1128,7 +1249,7 @@ function Get-TargetVersionLookup {
             if (-not ($pkg.PSObject.Properties['versions'] -and $pkg.versions)) { continue }
             foreach ($v in $pkg.versions) {
                 $key = ("{0}|{1}" -f $pkg.name, $v.version).ToLowerInvariant()
-                $lookup[$key] = $true
+                $lookup[$key] = @(Get-VersionViewNames -Version $v)
             }
         }
         $skip += $top
@@ -1664,6 +1785,9 @@ function Migrate-Feed {
     }
     if (-not $targetFeed -and -not $WhatIfPreference) { return }
 
+    if (-not $SkipViews) { Sync-TargetFeedViews -SourceFeed $Feed -TargetFeed $targetFeed }
+    $canPromote = -not $SkipViews -and $targetFeed -and $targetFeed.PSObject.Properties['id']
+
     # Feed-only sync: the feed, its upstream sources and permissions have been
     # created/synced by New-TargetFeed above; skip all package movement.
     if ($SkipArtifacts) {
@@ -1722,6 +1846,10 @@ function Migrate-Feed {
                 Write-Host "    Skipped (already in target) $label" -ForegroundColor DarkGray
                 $pkgVersions++
                 $pkgBytes += Get-VersionSizeBytes -Feed $Feed -Package $pkg -Version $v -Protocol $protocol
+                if ($canPromote) {
+                    $key = ("{0}|{1}" -f $pkg.name, $v.version).ToLowerInvariant()
+                    Sync-VersionViews -TargetFeed $targetFeed -Protocol $protocol -Package $pkg -Version $v -TargetViews $existing[$key]
+                }
                 continue
             }
             if (-not $PSCmdlet.ShouldProcess($label, "Migrate to $($Feed.name)")) {
@@ -1742,6 +1870,9 @@ function Migrate-Feed {
                 Write-Host "    Migrated $label" -ForegroundColor Green
                 $pkgVersions++
                 $pkgBytes += $script:LastPackageBytes
+                if ($canPromote) {
+                    Sync-VersionViews -TargetFeed $targetFeed -Protocol $protocol -Package $pkg -Version $v
+                }
             }
             catch {
                 Write-Warning "    FAILED $label : $($_.Exception.Message)"
