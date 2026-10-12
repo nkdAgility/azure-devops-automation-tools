@@ -35,12 +35,16 @@ function Invoke-AzureDevOpsApi {
         # discards) or, on some endpoints, a continuationToken property on the body; both
         # are honoured. Only list endpoints page, so callers that want a whole collection
         # (e.g. every project in an organisation) opt in here.
-        [switch]$FollowContinuation
+        [switch]$FollowContinuation,
+
+        # Work item create/update needs 'application/json-patch+json'; everything else
+        # takes the JSON default.
+        [string]$ContentType = 'application/json'
     )
 
     $arguments = @{
         Method      = $Method
-        ContentType = 'application/json'
+        ContentType = $ContentType
         ErrorAction = 'Stop'
     }
     # Auth precedence: an explicit PAT, then an explicit -UseDefaultCredentials, then
