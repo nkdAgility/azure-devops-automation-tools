@@ -28,7 +28,9 @@ function Copy-AutomationRunLogArtifact {
     if (Test-Path -LiteralPath $Path -PathType Container) {
         # Copy the folder's contents into $dest, so a re-copy refreshes rather than nests.
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
-        Copy-Item -Path (Join-Path $Path '*') -Destination $dest -Recurse -Force
+        # Literal enumeration: a tool log path can hold [ ] (WinGet package folders can),
+        # which -Path would read as a wildcard and match nothing.
+        Get-ChildItem -LiteralPath $Path -Force | Copy-Item -Destination $dest -Recurse -Force
     }
     else {
         Copy-Item -LiteralPath $Path -Destination $dest -Force

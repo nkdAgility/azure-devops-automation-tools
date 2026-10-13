@@ -37,6 +37,9 @@ function Enable-AutomationRunLog {
             $raw = Get-Content -LiteralPath $full -Raw
             $nl = if ($raw -match "`r`n") { "`r`n" } else { "`n" }
             $text = $raw -replace "`r`n", "`n"
+            # The line matches below end in a newline; give a file whose last line is
+            # init.ps1 one, so it is wired rather than skipped.
+            if (-not $text.EndsWith("`n")) { $text += "`n" }
 
             if ($text -match 'Start-AutomationRunLog') {
                 Write-Host "SKIP  $name - already wired" -ForegroundColor DarkGray

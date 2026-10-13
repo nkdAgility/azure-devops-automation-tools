@@ -54,9 +54,25 @@ function Start-AutomationRunLog {
     }
 
     $runLogDir = Join-Path $EngagementPath 'output\runs'
-    New-Item -ItemType Directory -Path $runLogDir -Force | Out-Null
-    $path = Join-Path $runLogDir ('{0}-{1:yyyyMMdd-HHmmss}.log' -f $Name, (Get-Date))
-    Start-Transcript -LiteralPath $path -IncludeInvocationHeader | Out-Null
+    New-Item -ItemType Directory -Path $runLogDir -Force -ErrorAction Stop | Out-Null
+    # Never overwrite an earlier run: a second start within the same second (a quick
+    # retry, a concurrent run) gets -2, -3, ... -NoClobber settles a race between two
+    # processes that both found a name free. -ErrorAction Stop because a failed start
+    # must not leave the variables below claiming a log that is not being written.
+    $stamp = '{0:yyyyMMdd-HHmmss}' -f (Get-Date)
+    for ($attempt = 1; ; $attempt++) {
+        $leaf = if ($attempt -eq 1) { "$Name-$stamp.log" } else { "$Name-$stamp-$attempt.log" }
+        $path = Join-Path $runLogDir $leaf
+        if (Test-Path -LiteralPath $path) { continue }
+        try {
+            Start-Transcript -LiteralPath $path -IncludeInvocationHeader -NoClobber -ErrorAction Stop | Out-Null
+            break
+        }
+        catch {
+            # Taken between the check and the start: try the next name. Anything else is real.
+            if ($attempt -ge 50 -or -not (Test-Path -LiteralPath $path)) { throw }
+        }
+    }
     $env:NKDA_RUNLOG = $path
     $env:NKDA_RUNLOG_DEPTH = '1'
     $env:NKDA_RUNLOG_PID = [string]$PID

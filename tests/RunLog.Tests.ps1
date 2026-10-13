@@ -79,7 +79,49 @@ Describe 'Start-AutomationRunLog / Stop-AutomationRunLog' {
 
         $logs = @(Get-ChildItem $script:Runs -Filter *.log)
         $logs.Count | Should -Be 1
-        (Get-Content $logs[0].FullName -Raw) | Should -Match 'after-child'
+        $text = Get-Content $logs[0].FullName -Raw
+        $text | Should -Match 'child-line'    # the child's own output landed in the caller's log
+        $text | Should -Match 'after-child'   # and the child did not stop it
+        # The child joined rather than starting a log of its own.
+        @(Get-ChildItem $script:Runs -Filter 'Run-Child-*.log').Count | Should -Be 0
+    }
+
+    It 'never overwrites an earlier run that started in the same second, or a concurrent one' {
+        $probe = Join-Path $script:Engagement 'rapid.ps1'
+        New-Item -ItemType Directory $script:Engagement -Force | Out-Null
+        @"
+Import-Module '$script:Manifest' -Force
+foreach (`$i in 1..3) {
+    Start-AutomationRunLog -Name 'Rapid' -EngagementPath '$script:Engagement'
+    Write-Host "run-`$i"
+    Stop-AutomationRunLog
+}
+"@ | Set-Content $probe
+        # Two processes at once, each starting three runs back to back.
+        foreach ($name in 'NKDA_RUNLOG', 'NKDA_RUNLOG_DEPTH', 'NKDA_RUNLOG_PID') { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
+        $procs = 1..2 | ForEach-Object { Start-Process pwsh -ArgumentList '-NoProfile', '-NonInteractive', '-File', $probe -WindowStyle Hidden -PassThru }
+        $procs | Wait-Process
+
+        $logs = @(Get-ChildItem $script:Runs -Filter 'Rapid-*.log')
+        $logs.Count | Should -Be 6
+        foreach ($log in $logs) { (Get-Content $log.FullName -Raw) | Should -Match 'run-\d' }
+    }
+
+    It 'throws and claims no log when the transcript cannot start' {
+        # output\runs exists as a FILE, so neither the folder nor the transcript can be made.
+        New-Item -ItemType Directory (Join-Path $script:Engagement 'output') -Force | Out-Null
+        'not a folder' | Set-Content (Join-Path $script:Engagement 'output\runs')
+        $probe = Join-Path $script:Engagement 'blocked.ps1'
+        @"
+Import-Module '$script:Manifest' -Force
+try { Start-AutomationRunLog -Name 'Blocked' -EngagementPath '$script:Engagement'; Write-Output 'started' }
+catch { Write-Output 'threw' }
+Write-Output "env-after: [`$env:NKDA_RUNLOG]"
+"@ | Set-Content $probe
+        $result = Invoke-Child $probe
+        $result.Output | Should -Match 'threw'
+        $result.Output | Should -Not -Match 'started'
+        $result.Output | Should -Match 'env-after: \[\]'
     }
 
     It 'closes the log in finally when the runbook throws, and keeps what ran' {
@@ -177,6 +219,19 @@ Copy-AutomationRunLogArtifact -Path 'C:\does\not\exist'
         # A second copy of the same folder refreshes it rather than nesting a copy inside.
         Test-Path (Join-Path $artifacts 'devopsmigration-configuration-workitems\tool-logs') | Should -BeFalse
         Test-Path (Join-Path $artifacts 'single.txt') | Should -BeTrue
+    }
+
+    It 'copies a folder whose path holds wildcard characters' {
+        $engagement = Join-Path $TestDrive 'brackets\migrations\03-Brackets'
+        $toolLogs = Join-Path $TestDrive 'WinGet[x64]\Logs'
+        New-Item -ItemType Directory -Path $toolLogs -Force | Out-Null
+        'bracketed' | Set-Content -LiteralPath (Join-Path $toolLogs 'migration.log')
+
+        $runbook = New-TestRunbook $engagement 'Sync' "Copy-AutomationRunLogArtifact -Path '$toolLogs' -As 'devopsmigration'"
+        (Invoke-Child $runbook).ExitCode | Should -Be 0
+
+        $log = @(Get-ChildItem (Join-Path $engagement 'output\runs') -Filter *.log)[0]
+        Test-Path -LiteralPath (Join-Path $log.DirectoryName "$($log.BaseName)\devopsmigration\migration.log") | Should -BeTrue
     }
 
     It 'does nothing when no run log is active' {
@@ -333,6 +388,21 @@ finally { Stop-RunLog }
         $text | Should -Not -Match 'Start-RunLog\.ps1|\bStop-RunLog\b|\bCopy-RunLogArtifact\b'
         # The local script ran before init.ps1; the module function has to run after it.
         $text.IndexOf('Start-AutomationRunLog') | Should -BeGreaterThan $text.IndexOf('init.ps1"')
+        $errors = $null
+        [void][Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+        $errors | Should -BeNullOrEmpty
+    }
+
+    It 'wires a runbook whose init.ps1 line is the last line, with no newline' {
+        $folder = Join-Path $TestDrive 'enable\migrations\06-Eof'
+        New-Item -ItemType Directory $folder -Force | Out-Null
+        $path = Join-Path $folder 'Run-Eof.ps1'
+        Set-Content -LiteralPath $path -Value "param()`n. `"`$PSScriptRoot\..\..\init.ps1`"" -NoNewline
+
+        Enable-AutomationRunLog -Path $path
+        $text = Get-Content $path -Raw
+        $text | Should -Match "init\.ps1`"\r?\n# Record"
+        $text | Should -Match 'finally \{ Stop-AutomationRunLog \}'
         $errors = $null
         [void][Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
         $errors | Should -BeNullOrEmpty
