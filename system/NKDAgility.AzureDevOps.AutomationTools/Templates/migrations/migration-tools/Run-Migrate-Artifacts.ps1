@@ -26,6 +26,13 @@
 .PARAMETER SkipArtifacts
     Only create/sync the feeds (upstream sources and permissions) without
     downloading or publishing any packages.
+
+.PARAMETER IncludeUpstream
+    Also migrate package versions the source feed saved from an upstream
+    (another feed or a public registry such as nuget.org). Off by default.
+    Versions saved from ANOTHER Azure DevOps feed are lost without it: the
+    target gets no upstream to that feed. Can also be set in the config as
+    "IncludeUpstream": true.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -34,6 +41,8 @@ param(
     [switch]$Inventory,
 
     [switch]$SkipArtifacts,
+
+    [switch]$IncludeUpstream,
 
     [string]$CsvPath = (Join-Path $PSScriptRoot 'output\artifacts-inventory.csv')
 )
@@ -93,7 +102,7 @@ function Expand-EnvPlaceholder {
 $fallbackTokenParams = @('SourcePat', 'TargetPat')
 
 # Switch parameters on Migrate-Artifacts.ps1: only include when set to $true.
-$switchParams = @('KeepDownloads')
+$switchParams = @('KeepDownloads', 'IncludeUpstream')
 
 function ConvertTo-MigrateParams {
     param([System.Collections.IDictionary]$Settings)
@@ -174,6 +183,7 @@ foreach ($run in $runs) {
     $params = ConvertTo-MigrateParams -Settings $settings
     if ($Inventory) { $params['Inventory'] = [switch]::Present }
     if ($SkipArtifacts) { $params['SkipArtifacts'] = [switch]::Present }
+    if ($IncludeUpstream) { $params['IncludeUpstream'] = [switch]::Present }
     # A feed-only sync has no package summary to write, so don't hand the CSV
     # to the engine (it would otherwise overwrite the inventory report).
     if ($CsvPath -and -not $SkipArtifacts) { $params['CsvPath'] = $CsvPath }
