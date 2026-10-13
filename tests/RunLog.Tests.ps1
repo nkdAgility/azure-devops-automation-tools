@@ -291,9 +291,10 @@ Write-Host 'body'
         $path = Join-Path $folder 'Sync.ps1'
         @'
 param()
-. "$PSScriptRoot\..\..\init.ps1"
 . "$PSScriptRoot\Start-RunLog.ps1" -Name 'Sync'
 try {
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\..\..\init.ps1"
 Copy-RunLogArtifact -Path $x -As 'y'
 }
 finally { Stop-RunLog }
@@ -304,6 +305,11 @@ finally { Stop-RunLog }
         $text | Should -Match 'Copy-AutomationRunLogArtifact -Path'
         $text | Should -Match 'finally \{ Stop-AutomationRunLog \}'
         $text | Should -Not -Match 'Start-RunLog\.ps1|\bStop-RunLog\b|\bCopy-RunLogArtifact\b'
+        # The local script ran before init.ps1; the module function has to run after it.
+        $text.IndexOf('Start-AutomationRunLog') | Should -BeGreaterThan $text.IndexOf('init.ps1"')
+        $errors = $null
+        [void][Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+        $errors | Should -BeNullOrEmpty
     }
 
     It 'leaves selection-by-selection runbooks to be wired by hand' {

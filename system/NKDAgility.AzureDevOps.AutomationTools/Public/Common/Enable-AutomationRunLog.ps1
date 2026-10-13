@@ -48,12 +48,14 @@ function Enable-AutomationRunLog {
                 $new = [regex]::Replace($text, $localPattern, 'Start-AutomationRunLog -Name $1')
                 $new = $new -replace '\bStop-RunLog\b', 'Stop-AutomationRunLog' -replace '\bCopy-RunLogArtifact\b', 'Copy-AutomationRunLogArtifact'
                 $action = 'convert Start-RunLog.ps1 to the module functions'
-                # The local script was dot-sourced before init.ps1 loaded the module; the
-                # module function must run after it.
-                $init = [regex]::Match($new, '(?m)^\.\s+"\$(here|PSScriptRoot)\\\.\.\\\.\.\\init\.ps1"\s*$')
-                $start = [regex]::Match($new, '(?m)^Start-AutomationRunLog .*$')
+                # The local script was usually dot-sourced before init.ps1 loaded the
+                # module; the module function must run after it, so move the line down.
+                $start = [regex]::Match($new, '(?m)^Start-AutomationRunLog .*\n')
+                $init = [regex]::Match($new, '(?m)^[ \t]*\.\s+"\$(here|PSScriptRoot)\\\.\.\\\.\.\\init\.ps1"[^\n]*\n')
                 if ($init.Success -and $start.Index -lt $init.Index) {
-                    Write-Warning "$name dot-sources init.ps1 after starting its run log; move Start-AutomationRunLog below the init.ps1 line by hand."
+                    $line = $start.Value
+                    $new = $new.Insert($init.Index + $init.Length, $line).Remove($start.Index, $line.Length)
+                    $action += ', after init.ps1'
                 }
             }
             elseif ($text -match '(?i)selection-by-selection') {
