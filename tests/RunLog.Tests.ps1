@@ -99,7 +99,7 @@ foreach (`$i in 1..3) {
 "@ | Set-Content $probe
         # Two processes at once, each starting three runs back to back.
         foreach ($name in 'NKDA_RUNLOG', 'NKDA_RUNLOG_DEPTH', 'NKDA_RUNLOG_PID') { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
-        $procs = 1..2 | ForEach-Object { Start-Process pwsh -ArgumentList '-NoProfile', '-NonInteractive', '-File', $probe -WindowStyle Hidden -PassThru }
+        $procs = 1..2 | ForEach-Object { Start-Process pwsh -ArgumentList '-NoProfile', '-NonInteractive', '-File', "`"$probe`"" -WindowStyle Hidden -PassThru }
         $procs | Wait-Process
 
         $logs = @(Get-ChildItem $script:Runs -Filter 'Rapid-*.log')
@@ -184,7 +184,7 @@ function Invoke-EngineGit { & git -C $repo --version; & git -C $repo marker-in-f
 Invoke-EngineGit
 '@
         foreach ($name in 'NKDA_RUNLOG', 'NKDA_RUNLOG_DEPTH', 'NKDA_RUNLOG_PID') { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
-        Start-Process pwsh -ArgumentList '-NoProfile', '-NonInteractive', '-File', $runbook -WindowStyle Hidden -Wait
+        Start-Process pwsh -ArgumentList '-NoProfile', '-NonInteractive', '-File', "`"$runbook`"" -WindowStyle Hidden -Wait
 
         $log = @(Get-ChildItem (Join-Path $engagement 'output\runs') -Filter *.log)[0]
         $text = Get-Content $log.FullName -Raw

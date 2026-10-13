@@ -95,6 +95,8 @@ function Invoke-DevOpsMigration {
             if ($line -match '(?:Logpath|Check the logs for errors):\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
             Write-Host $line
         }
+        # Read now: the finally below runs before the check, and must not be able to change it.
+        $toolExit = $LASTEXITCODE
     }
     finally {
         # devopsmigration.exe writes its own logs beside its exe (inside the WinGet package
@@ -105,8 +107,8 @@ function Invoke-DevOpsMigration {
             Copy-AutomationRunLogArtifact -Path $toolLogDir -As ('devopsmigration-' + [IO.Path]::GetFileNameWithoutExtension($ConfigFile))
         }
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "devopsmigration.exe failed (exit $LASTEXITCODE) for config '$ConfigFile'."
+    if ($toolExit -ne 0) {
+        throw "devopsmigration.exe failed (exit $toolExit) for config '$ConfigFile'."
     }
     if ($errorLines.Count) {
         throw "devopsmigration.exe logged $($errorLines.Count) error(s) for config '$ConfigFile'; first: $($errorLines[0])"
