@@ -49,7 +49,7 @@ if ($PSCmdlet.ShouldProcess($configPath, 'migration execute')) {
     try {
         & $migration.Source execute --config $configPath 2>&1 | ForEach-Object {
             $line = "$_"
-            if ($line -match 'Check the logs for errors:\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
+            if ($line -match '(?:Logpath|Check the logs for errors):\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
             Write-Host $line
         }
     }

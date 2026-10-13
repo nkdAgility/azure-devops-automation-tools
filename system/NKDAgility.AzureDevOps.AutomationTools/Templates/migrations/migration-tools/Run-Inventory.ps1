@@ -59,7 +59,7 @@ $toolLogDir = $null
 try {
     & $platform.Source queue --config $ConfigPath --follow 2>&1 | ForEach-Object {
         $line = "$_"
-        if ($line -match 'Check the logs for errors:\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
+        if ($line -match '(?:Logpath|Check the logs for errors):\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
         Write-Host $line
     }
 }

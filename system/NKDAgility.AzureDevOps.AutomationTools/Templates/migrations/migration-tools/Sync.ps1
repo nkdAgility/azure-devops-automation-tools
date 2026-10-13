@@ -92,13 +92,15 @@ function Invoke-DevOpsMigration {
         & $devopsMigration.Source execute --config $configPath 2>&1 | ForEach-Object {
             $line = "$_"
             if ($line -match '\sERR\]\s') { $errorLines.Add($line) }
-            if ($line -match 'Check the logs for errors:\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
+            if ($line -match '(?:Logpath|Check the logs for errors):\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
             Write-Host $line
         }
     }
     finally {
         # devopsmigration.exe writes its own logs beside its exe (inside the WinGet package
         # folder; migration-tools issue #3216), so keep a copy with this run's console log.
+        # It names the folder in a 'Logpath:' line at startup on every run; 'Check the logs
+        # for errors:' appears only on some exits (not on a validation failure).
         if ($toolLogDir) {
             Copy-AutomationRunLogArtifact -Path $toolLogDir -As ('devopsmigration-' + [IO.Path]::GetFileNameWithoutExtension($ConfigFile))
         }

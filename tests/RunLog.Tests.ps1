@@ -328,6 +328,9 @@ Describe 'Runbook templates are wired for run logs' {
             $text = Get-Content $file.FullName -Raw
             if ($text -match '\.Source (execute|queue)') {
                 $text | Should -Match 'Copy-AutomationRunLogArtifact' -Because $file.FullName
+                # 'Logpath:' is printed at startup on every run; 'Check the logs for errors:' is
+                # not printed on a validation failure, which is the run whose logs matter most.
+                $text | Should -Match ([regex]::Escape("(?:Logpath|Check the logs for errors):")) -Because $file.FullName
             }
         }
     }
