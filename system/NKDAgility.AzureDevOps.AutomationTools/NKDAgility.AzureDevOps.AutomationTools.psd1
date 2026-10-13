@@ -13,6 +13,10 @@
         'Set-MigrationContext'
         'Clear-MigrationContext'
         'Invoke-FixStep'
+        'Start-AutomationRunLog'
+        'Stop-AutomationRunLog'
+        'Copy-AutomationRunLogArtifact'
+        'Enable-AutomationRunLog'
         'Write-FixSection'
         # Common - logging
         'Initialize-AutomationLogging'

@@ -29,6 +29,10 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 
 $here = $PSScriptRoot
 . "$here\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Sync'
+try {
 
 # Load PATs from secrets\secrets.json into the environment: $ENV:AZDO_PAT_<ORG>
 # as Entra fallbacks for the Run-Migrate-*.ps1 configs, plus the
@@ -83,13 +87,28 @@ function Invoke-DevOpsMigration {
     # devopsmigration.exe can stop on a fatal validation error (e.g. missing area or
     # iteration paths) and still exit 0, so also fail on any [ERR] line it logs.
     $errorLines = [System.Collections.Generic.List[string]]::new()
-    & $devopsMigration.Source execute --config $configPath 2>&1 | ForEach-Object {
-        $line = "$_"
-        if ($line -match '\sERR\]\s') { $errorLines.Add($line) }
-        Write-Host $line
+    $toolLogDir = $null
+    try {
+        & $devopsMigration.Source execute --config $configPath 2>&1 | ForEach-Object {
+            $line = "$_"
+            if ($line -match '\sERR\]\s') { $errorLines.Add($line) }
+            if ($line -match '(?:Logpath|Check the logs for errors):\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
+            Write-Host $line
+        }
+        # Read now: the finally below runs before the check, and must not be able to change it.
+        $toolExit = $LASTEXITCODE
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "devopsmigration.exe failed (exit $LASTEXITCODE) for config '$ConfigFile'."
+    finally {
+        # devopsmigration.exe writes its own logs beside its exe (inside the WinGet package
+        # folder; migration-tools issue #3216), so keep a copy with this run's console log.
+        # It names the folder in a 'Logpath:' line at startup on every run; 'Check the logs
+        # for errors:' appears only on some exits (not on a validation failure).
+        if ($toolLogDir) {
+            Copy-AutomationRunLogArtifact -Path $toolLogDir -As ('devopsmigration-' + [IO.Path]::GetFileNameWithoutExtension($ConfigFile))
+        }
+    }
+    if ($toolExit -ne 0) {
+        throw "devopsmigration.exe failed (exit $toolExit) for config '$ConfigFile'."
     }
     if ($errorLines.Count) {
         throw "devopsmigration.exe logged $($errorLines.Count) error(s) for config '$ConfigFile'; first: $($errorLines[0])"
@@ -137,3 +156,5 @@ catch {
     Write-Host ("==> Sync FAILED at step {0}/{1}: {2}" -f $stepNumber, $totalSteps, $_.Exception.Message) -ForegroundColor Red
     throw
 }
+}
+finally { Stop-AutomationRunLog }

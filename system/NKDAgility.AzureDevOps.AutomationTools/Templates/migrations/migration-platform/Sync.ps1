@@ -21,6 +21,10 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 
 $here = $PSScriptRoot
 . "$here\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Sync'
+try {
 
 # Load PATs from secrets\secrets.json into the environment ($ENV:AZDO_PAT_<ORG>
 # and any explicit EnvVars names the platform binds).
@@ -39,8 +43,22 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 
 Write-Host "==> migration execute --config $configPath" -ForegroundColor Cyan
 if ($PSCmdlet.ShouldProcess($configPath, 'migration execute')) {
-    & $migration.Source execute --config $configPath
+    # Read each line to find the tool's own log folder, and keep a copy of it with this
+    # run's console log.
+    $toolLogDir = $null
+    try {
+        & $migration.Source execute --config $configPath 2>&1 | ForEach-Object {
+            $line = "$_"
+            if ($line -match '(?:Logpath|Check the logs for errors):\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
+            Write-Host $line
+        }
+    }
+    finally {
+        if ($toolLogDir) { Copy-AutomationRunLogArtifact -Path $toolLogDir -As 'migration-platform' }
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "migration execute failed (exit $LASTEXITCODE) for config '$configPath'."
     }
 }
+}
+finally { Stop-AutomationRunLog }

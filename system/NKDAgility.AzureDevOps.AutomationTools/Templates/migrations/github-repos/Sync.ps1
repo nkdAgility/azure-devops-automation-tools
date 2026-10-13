@@ -34,6 +34,10 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 
 $here = $PSScriptRoot
 . "$here\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Sync'
+try {
 
 # Load tokens from secrets\secrets.json into the environment: $ENV:AZDO_PAT_<ORG>
 # and $ENV:GITHUB_TOKEN for the github-repos-config.json placeholders.
@@ -74,3 +78,5 @@ catch {
     Write-Host ("==> Sync FAILED at step {0}/{1}: {2}" -f $stepNumber, $totalSteps, $_.Exception.Message) -ForegroundColor Red
     throw
 }
+}
+finally { Stop-AutomationRunLog }

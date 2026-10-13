@@ -13,6 +13,44 @@ Set-MigrationContext -Collection 'http://tfs:8080/tfs/DefaultCollection/' -Migra
 
 `Set-MigrationContext` stores session defaults and applies them via `$Global:PSDefaultParameterValues`, so subsequent calls don't need to repeat `-Collection` etc. `-Project` is only defaulted on commands where it is mandatory, so commands with an optional `-Project` (e.g. `Find-WitGlobalWorkflowRuleScope`) keep collection scope unless told otherwise. `Clear-MigrationContext` undoes it.
 
+## Run logs
+
+Every runbook records its whole console, and that run history is committed with the engagement.
+
+```powershell
+. "$PSScriptRoot\..\..\init.ps1"
+Start-AutomationRunLog -Name 'Sync'
+try {
+    # runbook body
+}
+finally { Stop-AutomationRunLog }
+```
+
+- **Where.** `Start-AutomationRunLog` starts `Start-Transcript -IncludeInvocationHeader` at `<engagement>\output\runs\<Name>-<yyyyMMdd-HHmmss>.log`. The engagement folder is the calling script's folder; pass `-EngagementPath` when calling from anywhere else. It must come after `init.ps1`, which loads the module.
+- **Failed runs are kept.** `Stop-AutomationRunLog` sits in `finally`, so a run that throws still closes its log with everything up to the failure.
+- **Nesting.** A runbook called by another (`Sync.ps1` → `Run-Migrate-Repos.ps1`) writes into its caller's log instead of starting its own. The handoff is in environment variables (`NKDA_RUNLOG`, `NKDA_RUNLOG_DEPTH`, `NKDA_RUNLOG_PID`), not module state, because each runbook re-imports the module through `init.ps1`; it also reaches child `pwsh` processes. Only the outermost `Stop-AutomationRunLog` in the process that started the log stops it. Variables left by a process that no longer exists are discarded and a fresh log starts.
+- **Tool logs.** `Copy-AutomationRunLogArtifact -Path <file or folder> [-As <name>]` copies something that belongs to the run into `<log-basename>\<name>\` next to the log, and does nothing when no log is active or the path is missing. The migration-tools `Sync.ps1` uses it for devopsmigration.exe, which writes its log folder beside its own exe (inside the WinGet package folder; [migration-tools #3216](https://github.com/nkdAgility/azure-devops-migration-tools/issues/3216)) and names it in a `Logpath: <path>` line at startup on every run (and in `Check the logs for errors: <path>` on some exits, though not on a validation failure); the template reads either, so the tool's logs are kept for failed runs too.
+- **Native output is recorded.** On PowerShell 7 (verified on 7.6), a transcript records a native exe's stdout and stderr, whether the call is at statement level or inside an engine function, so git, az, npm, mvn and dotnet output reaches the log without wrapping. `tests/RunLog.Tests.ps1` runs git under a transcript in a real console to keep that true. What a log cannot show: output an engine sends to a file (`2>$stderrFile`) or captures into a variable, and git's live progress meter, which git prints only to an interactive terminal. The templates still pipe devopsmigration.exe and devopsmigrationdev through `ForEach-Object`, because they read each line, for `[ERR]` and for the `Logpath:` / `Check the logs for errors:` path.
+- **Selection-by-selection runbooks** (the data-import scratchbook and cleanup) start the log in their setup block, guarded by `if (-not $env:NKDA_RUNLOG)` so re-running setup does not nest, and close it in a final section. The log covers the working session.
+- **Secrets.** A transcript is committed, so nothing may print a token. `init.ps1`, `Set-AutomationSecrets`, `Get-AzureDevOpsAccessToken` and the engines report variable names and auth *modes*, never values; `tests/RunLog.Tests.ps1` pushes a fake token through `init.ps1` and `Set-AutomationSecrets -Verbose` and asserts it never reaches a transcript. Keep it that way in new code and runbooks: never `Write-Host` a header, an `Organisation` object with PATs merged in, or an environment variable's value.
+- **Git.** The customer `.gitignore` ignores only the repo-level `/output/` and carries `!/migrations/*/output/runs/`, so run logs are committed. Commit them after each run.
+
+### Adopting run logs in an existing engagement
+
+Templates are seeds: `New-Migration` copies them once and never again, so existing engagements do not pick this up from a module update. After `init.ps1` has loaded a module that includes these functions:
+
+1. Preview, then wire the engagement's runbooks with the helper. It inserts `Start-AutomationRunLog` + `try {` after the `init.ps1` line and appends `finally { Stop-AutomationRunLog }`, or converts an engagement-local `Start-RunLog.ps1` / `Stop-RunLog` / `Copy-RunLogArtifact` to the module functions. It skips runbooks already wired, runbooks with no `init.ps1` line and selection-by-selection runbooks, and refuses a change that would not parse.
+
+   ```powershell
+   Get-ChildItem .\migrations\03-Example\*.ps1 | Enable-AutomationRunLog -WhatIf
+   Get-ChildItem .\migrations\03-Example\*.ps1 | Enable-AutomationRunLog
+   ```
+
+2. In a migration-tools `Sync.ps1`, copy the `$toolLogDir` capture and `Copy-AutomationRunLogArtifact` call from the template's `Invoke-DevOpsMigration` by hand. Route any direct native tool call through the host as above.
+3. Wire selection-by-selection runbooks by hand from the data-import templates.
+4. Check the workspace `.gitignore` (a seed too): it must not ignore `migrations/*/output/` — add `!/migrations/*/output/runs/` under `/output/`.
+5. Delete the engagement-local `Start-RunLog.ps1` once nothing dot-sources it, review the diff, and commit.
+
 ## Repository migration runbooks
 
 The `MigrationTools` repository runbook reads its `migrate-repos-config.json` and runs every entry in `Runs` by default. Pass `-Repo <source repository name>` to run exactly one configured entry. Matching is exact and case-insensitive; no match or duplicate matches stop before the migration engine runs. `-WhatIf` previews the selected run. A selected run writes `output/repomigration-<repo>.csv` so it does not replace the full-run `output/repomigration.csv`. The runbook calls `init.ps1` on every invocation to sync and load the configured engines.

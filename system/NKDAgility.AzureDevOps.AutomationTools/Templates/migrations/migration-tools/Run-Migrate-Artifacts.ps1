@@ -61,6 +61,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Run-Migrate-Artifacts'
+try {
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
@@ -201,3 +205,5 @@ foreach ($run in $runs) {
     Write-Host ("==> [{0}/{1}] Invoking Migrate-Artifacts.ps1 for source project '{2}'" -f $runIndex, $runCount, $label) -ForegroundColor Cyan
     & $migrateScript @params
 }
+}
+finally { Stop-AutomationRunLog }

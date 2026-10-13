@@ -31,6 +31,10 @@ Set-StrictMode -Version Latest
 $WhatIfPreference = $false
 
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Run-RepoInventory'
+try {
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
@@ -101,9 +105,13 @@ Write-Host ("Repositories: {0}  Total: {1} GB  Empty: {2}  Disabled: {3}  Migrat
         $rows.Count, $totalGB, @($rows | Where-Object SizeMB -eq 0).Count, $disabled.Count, $migrated.Count) -ForegroundColor Green
 foreach ($band in @(@('> 1 GB', 1024, [double]::MaxValue), @('100 MB - 1 GB', 100, 1024), @('10 - 100 MB', 10, 100), @('<= 10 MB', -1, 10))) {
     $set = @($rows | Where-Object { $_.SizeMB -gt $band[1] -and $_.SizeMB -le $band[2] })
-    Write-Host ("  {0,-14} {1,4} repos {2,8:N1} GB" -f $band[0], $set.Count, (($set | Measure-Object SizeMB -Sum).Sum / 1024))
+    # An empty band gives Measure-Object nothing to return, and .Sum on that throws under strict mode.
+    $bandGB = if ($set.Count) { ($set | Measure-Object SizeMB -Sum).Sum / 1024 } else { 0 }
+    Write-Host ("  {0,-14} {1,4} repos {2,8:N1} GB" -f $band[0], $set.Count, $bandGB)
 }
 foreach ($gitRepo in $disabled) {
     Write-Warning "Disabled in source, will NOT migrate: $($gitRepo.Repository) ($($gitRepo.SizeMB) MB). Re-enable it or record the decision to leave it behind."
 }
 Write-Host "==> Wrote $outPath - commit it." -ForegroundColor Green
+}
+finally { Stop-AutomationRunLog }

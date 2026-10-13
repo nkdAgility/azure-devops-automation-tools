@@ -2,6 +2,10 @@
 /output/
 *.checkpoint.json
 
+# Run logs are committed engagement history (Start-AutomationRunLog). Only the
+# repo-level /output/ above is ignored; never ignore an engagement's output/runs/.
+!/migrations/*/output/runs/
+
 # Secrets - never commit
 /secrets/*
 !/secrets/secrets.example.json

@@ -10,6 +10,10 @@
 # 0. Setup - run this block first.
 # ===========================================================================
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this working session's console to output\runs\ (committed engagement history).
+# Guarded so re-running this setup block does not open a second log; run the last
+# section to close it.
+if (-not $env:NKDA_RUNLOG) { Start-AutomationRunLog -Name 'DataImport-Cleanup' -EngagementPath $PSScriptRoot }
 
 # Stop on the first error: a failed fix aborts the rest of the selection
 # instead of carrying on against the live collection.
@@ -56,3 +60,9 @@ Set-MigrationContext -Collection $collection -CheckpointPath $checkpointPath
 # } -Verify {
 #     -not (Get-WorkItemLinkType -Collection $collection -ReferenceName 'Custom.Affects')
 # }
+
+# ===========================================================================
+# Last. Close the run log - run when this working session is done. Exiting the
+# PowerShell session also ends the transcript.
+# ===========================================================================
+Stop-AutomationRunLog

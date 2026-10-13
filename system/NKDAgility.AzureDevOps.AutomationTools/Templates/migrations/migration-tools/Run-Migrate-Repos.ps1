@@ -34,6 +34,10 @@ Set-StrictMode -Version Latest
 # init.ps1 also declares -Repo; dot-sourcing it clears this runbook parameter.
 $requestedRepo = $Repo
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Run-Migrate-Repos'
+try {
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
@@ -251,3 +255,5 @@ else {
     Write-Host ("Wrote summary CSV: {0}" -f $csvPath) -ForegroundColor Green
 }
 Write-Host '===================================================' -ForegroundColor Cyan
+}
+finally { Stop-AutomationRunLog }
