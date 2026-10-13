@@ -126,6 +126,32 @@ Stop-AutomationRunLog
     }
 }
 
+Describe 'Native tool output in run logs' {
+    # Engines call git (and az, npm, mvn, dotnet) directly, unwrapped. This holds that their
+    # stdout and stderr reach the transcript. It must run in a real console: with redirected
+    # handles, as Invoke-Child uses, the transcript sees something different from a runbook.
+    It 'records git stdout and stderr, at statement level and inside a function' -Skip:(-not $IsWindows -or -not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $engagement = Join-Path $TestDrive 'native\migrations\04-Native'
+        $runbook = New-TestRunbook $engagement 'Run-Native' @'
+$repo = Join-Path $PSScriptRoot 'repo'
+New-Item -ItemType Directory $repo -Force | Out-Null
+& git -C $repo init -q
+function Invoke-EngineGit { & git -C $repo --version; & git -C $repo marker-in-function }
+& git -C $repo --version
+& git -C $repo marker-at-statement
+Invoke-EngineGit
+'@
+        foreach ($name in 'NKDA_RUNLOG', 'NKDA_RUNLOG_DEPTH', 'NKDA_RUNLOG_PID') { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
+        Start-Process pwsh -ArgumentList '-NoProfile', '-NonInteractive', '-File', $runbook -WindowStyle Hidden -Wait
+
+        $log = @(Get-ChildItem (Join-Path $engagement 'output\runs') -Filter *.log)[0]
+        $text = Get-Content $log.FullName -Raw
+        ([regex]::Matches($text, 'git version \d')).Count | Should -Be 2
+        $text | Should -Match "'marker-at-statement' is not a git command"
+        $text | Should -Match "'marker-in-function' is not a git command"
+    }
+}
+
 Describe 'Copy-AutomationRunLogArtifact' {
     It 'copies a folder and a file next to the log, into a folder named for the log' {
         $engagement = Join-Path $TestDrive 'copy\migrations\02-Copy'

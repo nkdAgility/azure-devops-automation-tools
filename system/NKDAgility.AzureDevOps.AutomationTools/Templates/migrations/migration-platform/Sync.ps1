@@ -43,8 +43,8 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 
 Write-Host "==> migration execute --config $configPath" -ForegroundColor Cyan
 if ($PSCmdlet.ShouldProcess($configPath, 'migration execute')) {
-    # Through the host, so the run log records it (direct native output bypasses the
-    # transcript), and keep a copy of the tool's own log folder when it names one.
+    # Read each line to find the tool's own log folder, and keep a copy of it with this
+    # run's console log.
     $toolLogDir = $null
     try {
         & $migration.Source execute --config $configPath 2>&1 | ForEach-Object {

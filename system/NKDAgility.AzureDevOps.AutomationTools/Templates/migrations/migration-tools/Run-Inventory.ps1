@@ -53,8 +53,8 @@ if (-not $platform) {
 }
 
 Write-Host "==> devopsmigrationdev queue --config $ConfigPath --follow" -ForegroundColor Cyan
-# Through the host, not straight to the console, so the run log records it; native
-# output written directly to the console never reaches the transcript.
+# Read each line to find the platform's own log folder, and keep a copy of it with this
+# run's console log.
 $toolLogDir = $null
 try {
     & $platform.Source queue --config $ConfigPath --follow 2>&1 | ForEach-Object {
