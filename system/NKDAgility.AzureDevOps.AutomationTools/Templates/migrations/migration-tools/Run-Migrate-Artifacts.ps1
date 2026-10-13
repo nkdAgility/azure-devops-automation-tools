@@ -33,6 +33,12 @@
     Versions saved from ANOTHER Azure DevOps feed are lost without it: the
     target gets no upstream to that feed. Can also be set in the config as
     "IncludeUpstream": true.
+
+.PARAMETER IncludePromotedUpstream
+    Migrate only the upstream-saved versions that were promoted to a view
+    (@Release, @Prerelease, custom) in the source; leave the rest to the
+    target's upstreams. Narrower than -IncludeUpstream. Can also be set in the
+    config as "IncludePromotedUpstream": true.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -43,6 +49,8 @@ param(
     [switch]$SkipArtifacts,
 
     [switch]$IncludeUpstream,
+
+    [switch]$IncludePromotedUpstream,
 
     [string]$CsvPath = (Join-Path $PSScriptRoot 'output\artifacts-inventory.csv')
 )
@@ -102,7 +110,7 @@ function Expand-EnvPlaceholder {
 $fallbackTokenParams = @('SourcePat', 'TargetPat')
 
 # Switch parameters on Migrate-Artifacts.ps1: only include when set to $true.
-$switchParams = @('KeepDownloads', 'IncludeUpstream')
+$switchParams = @('KeepDownloads', 'IncludeUpstream', 'IncludePromotedUpstream')
 
 function ConvertTo-MigrateParams {
     param([System.Collections.IDictionary]$Settings)
@@ -184,6 +192,7 @@ foreach ($run in $runs) {
     if ($Inventory) { $params['Inventory'] = [switch]::Present }
     if ($SkipArtifacts) { $params['SkipArtifacts'] = [switch]::Present }
     if ($IncludeUpstream) { $params['IncludeUpstream'] = [switch]::Present }
+    if ($IncludePromotedUpstream) { $params['IncludePromotedUpstream'] = [switch]::Present }
     # A feed-only sync has no package summary to write, so don't hand the CSV
     # to the engine (it would otherwise overwrite the inventory report).
     if ($CsvPath -and -not $SkipArtifacts) { $params['CsvPath'] = $CsvPath }

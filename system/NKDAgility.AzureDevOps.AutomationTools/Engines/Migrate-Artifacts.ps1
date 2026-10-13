@@ -104,6 +104,15 @@
     be restored on the target by configuring the same upstream sources. Use
     this switch to migrate cached upstream versions as well.
 
+.PARAMETER IncludePromotedUpstream
+    Include only those upstream-cached versions that were promoted to a view
+    (@Release, @Prerelease or a custom view) in the source. A promoted version
+    is one the team chose to depend on, and it is often saved from another
+    Azure DevOps feed that will not exist after cut-over, so it cannot be
+    restored through an upstream on the target. Unpromoted upstream versions
+    are left to the target's own upstreams. Ignored when -IncludeUpstream is
+    supplied, which already includes every upstream version.
+
 .PARAMETER SkipViews
     Do not recreate the source feed's views (@Release, @Prerelease, custom) on
     the target, and do not promote package versions into them. By default views
@@ -177,6 +186,8 @@ param(
     [string]$ContributorsRole = 'collaborator',
 
     [switch]$IncludeUpstream,
+
+    [switch]$IncludePromotedUpstream,
 
     [switch]$SkipViews,
 
@@ -1273,9 +1284,13 @@ function Test-LocalVersion {
 
 function Select-MigratableVersions {
     # Applies the upstream filter unless -IncludeUpstream was supplied.
+    # -IncludePromotedUpstream keeps upstream versions that sit in a view.
     param($Versions)
     if ($IncludeUpstream) { return @($Versions) }
-    @($Versions | Where-Object { Test-LocalVersion $_ })
+    @($Versions | Where-Object {
+            (Test-LocalVersion $_) -or
+            ($IncludePromotedUpstream -and @(Get-VersionViewNames -Version $_).Count -gt 0)
+        })
 }
 
 function Get-VersionSizeBytes {
