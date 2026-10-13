@@ -401,6 +401,14 @@ foreach ($capability in $capabilities) {
 # env guard stops a bad template turning the handover into a loop. The switches
 # have already been persisted, so the handover does not need to repeat them.
 if ($selfUpdated -and -not $env:AZDO_INIT_RELOADED) {
+    # An init.ps1 that sets AZDO_INIT_HANDOVER re-runs the new file itself once this
+    # returns. It has to: run from in here, the new file's bootstrap would try to unload
+    # this module while its code is still executing, fail to, and its one-module check
+    # would throw. Older init.ps1 copies do not set it and get the in-module handover.
+    if ($env:AZDO_INIT_HANDOVER) {
+        $env:AZDO_INIT_RELOAD = '1'
+        return
+    }
     $env:AZDO_INIT_RELOADED = '1'
     try { . $InitScriptPath -NoSync:$NoSync }
     finally { Remove-Item Env:\AZDO_INIT_RELOADED -ErrorAction SilentlyContinue }

@@ -205,7 +205,10 @@ Describe 'Migrate-Repos engine shape' {
             Where-Object { $_.Name.VariablePath.UserPath -eq 'ForceDivergedBranches' }
         $p | Should -Not -BeNullOrEmpty
         $p.StaticType.Name | Should -BeExactly 'SwitchParameter'
-        $script:Text | Should -Match 'use -ForceDivergedBranches to overwrite'
+        # Skip is the default, and the skip names both ways out (c8e1eb1 replaced the
+        # older 'use -ForceDivergedBranches to overwrite' wording).
+        $script:Text | Should -Match "if \(-not \`$DivergedBranchAction\) \{ \`$DivergedBranchAction = 'Skip' \}"
+        $script:Text | Should -Match 'left alone \(-DivergedBranchAction Rebase keeps them, Force discards them\)'
     }
 
     It 'records what a forced branch discarded, before discarding it' {
@@ -226,8 +229,11 @@ Describe 'Migrate-Repos engine shape' {
         $fn = Get-EngineFunctionSource -Name 'Push-BranchSegmented'
         $pushBuilds = [regex]::Matches($fn, "@\('push'\)[^\r\n]*")
         $pushBuilds.Count | Should -BeGreaterThan 1
+        # The flag is chosen once, in $pushFlags (--force for Force, --force-with-lease for
+        # Rebase), and every push construction must splice it in.
+        $fn | Should -Match "elseif \(\`$forcePush\) \{ @\('--force'\) \}"
         foreach ($build in $pushBuilds) {
-            $build.Value | Should -Match "if \(\`$forcePush\) \{ @\('--force'\) \}" -Because "every push path must honour it: $($build.Value)"
+            $build.Value | Should -Match "@\('push'\) \+ \(& \`$pushFlags\)" -Because "every push path must honour it: $($build.Value)"
         }
     }
 

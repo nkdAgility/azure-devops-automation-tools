@@ -60,8 +60,9 @@ if ($clone) {
 Get-Module -Name $module | Remove-Module -Force -ErrorAction SilentlyContinue
 $bootstrapModule = @(Import-Module $moduleFile -Force -PassThru) | Select-Object -First 1
 if (-not $bootstrapModule.ExportedCommands.ContainsKey('Invoke-AutomationWorkspaceInit')) { throw "Automation tools at '$moduleFile' predates the thin init entry point. Update it first." }
-& $bootstrapModule.ExportedCommands['Invoke-AutomationWorkspaceInit'] -WorkspaceRoot $root -InitScriptPath $PSCommandPath @PSBoundParameters
-
+$env:AZDO_INIT_HANDOVER = '1'; try { & $bootstrapModule.ExportedCommands['Invoke-AutomationWorkspaceInit'] -WorkspaceRoot $root -InitScriptPath $PSCommandPath @PSBoundParameters } finally { Remove-Item Env:\AZDO_INIT_HANDOVER -ErrorAction SilentlyContinue }
+# This file was just refreshed: hand over to the new copy, from here and not from inside the module.
+if ($env:AZDO_INIT_RELOAD) { Remove-Item Env:\AZDO_INIT_RELOAD; $env:AZDO_INIT_RELOADED = '1'; try { . $PSCommandPath -NoSync:$NoSync } finally { Remove-Item Env:\AZDO_INIT_RELOADED -ErrorAction SilentlyContinue }; return }
 # Initialisation imports the workspace's recorded .system copy. The bootstrap
 # module and any copies from earlier runs must not remain alongside it.
 $runtimeManifest = Join-Path $root (Join-Path '.system' (Join-Path $module "$module.psd1"))
