@@ -34,6 +34,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Run-Export-RepoInventory'
+try {
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
@@ -122,3 +126,5 @@ Write-Host 'Next steps:' -ForegroundColor Cyan
 Write-Host "  1. Commit $(Split-Path -Leaf $inventoryPath) - it is the engagement's approval record." -ForegroundColor Gray
 Write-Host '  2. Have the customer mark rows Approved = yes (and adjust TargetName where wanted).' -ForegroundColor Gray
 Write-Host '  3. Commit their edits, then run .\Sync.ps1 -WhatIf to preview the migration.' -ForegroundColor Gray
+}
+finally { Stop-AutomationRunLog }

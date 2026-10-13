@@ -154,6 +154,7 @@ Invoke-Pester -Path .\tests
 - `Module.Tests.ps1` — manifest hygiene (every `Public/` file exported and vice versa), every `.ps1` parses, and structural guards that the toolkit holds no customer data: no `data/` folder, no `config.json`, `/data/` gitignored with no exception, and no script dot-sourcing includes relative to the current directory.
 - `WorkItemLink.Tests.ps1` — the REST link-inventory commands against a stubbed transport. The stub replaces the private `Invoke-AzureDevOpsApi` in the module's own scope (define it with `function script:` inside `& $module { }`, or it lands in a child scope and vanishes), so link type filtering, WIQL parsing, enrichment, comment matching and file output are all exercised without touching a collection.
 - `EngineAuth.Tests.ps1` — structural (AST) guards on the engines' ambient-first authentication contract: PAT parameters stay optional, every `Initialize-*Auth` tries `Get-AzureDevOpsAccessToken` before its PAT fallback and throws when neither is available, credentials are re-resolved mid-run, and the binder templates expand token placeholders leniently.
+- `RunLog.Tests.ps1` — run logs in child `pwsh` processes: one log for nested runbooks, closed in `finally` on throw, artifact copies, every template wired, and a fake token pushed through `init.ps1` + `Set-AutomationSecrets` never reaching a transcript.
 
 Anything that talks to a collection is stubbed — the suite needs no PAT, no server and no network. Keep it that way so CI can run it.
 
@@ -256,6 +257,10 @@ above). Engines are scripts, not commands — invoke them by path from `ModuleBa
 | `Get-AzureDevOpsAuthHeader` | Basic-auth header hashtable from a PAT |
 | `Get-AzureDevOpsAccessToken` | Entra access token for a collection — usable anywhere a PAT is (REST Bearer, git http.extraheader). Cached, renewed near expiry. Entra-first callers try this and fall back to a PAT only when it throws |
 | `Invoke-FixStep` | Runs a named runbook step once — optional `-Verify` scriptblock, checkpoint JSON, SKIPs on re-run, `-Force` overrides |
+| `Start-AutomationRunLog` | Records a runbook's whole console to `<engagement>\output\runs\<Name>-<yyyyMMdd-HHmmss>.log` (committed history). Call after `init.ps1`; a nested runbook joins its caller's log via `NKDA_RUNLOG*` env vars. See the module README's *Run logs* |
+| `Stop-AutomationRunLog` | Ends it, in the runbook's `finally` so failed runs are kept; only the outermost call in the owning process stops the transcript |
+| `Copy-AutomationRunLogArtifact` | Copies a file or folder that belongs to the run (devopsmigration.exe's log folder) into `<log-basename>\<As>` beside the log |
+| `Enable-AutomationRunLog` | Upgrade helper: wires run logging into existing seed runbooks (or converts an engagement-local `Start-RunLog.ps1`). `-WhatIf` first |
 | `Write-FixSection` | Console banner marking which runbook section is running |
 | `Initialize-AutomationLogging` | Starts the PoShLog file sink under `output/log` |
 | `Write-InfoLog` / `Write-DebugLog` / `Write-ErrorLog` | Log at a level. **Never log secrets** |

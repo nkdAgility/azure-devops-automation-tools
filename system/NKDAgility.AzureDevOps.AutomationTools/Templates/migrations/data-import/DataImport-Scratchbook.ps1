@@ -9,6 +9,10 @@
 # 0. Setup - run this block first.
 # ===========================================================================
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this working session's console to output\runs\ (committed engagement history).
+# Guarded so re-running this setup block does not open a second log; run the last
+# section to close it.
+if (-not $env:NKDA_RUNLOG) { Start-AutomationRunLog -Name 'DataImport-Scratchbook' -EngagementPath $PSScriptRoot }
 $ErrorActionPreference = 'Stop'
 
 # --- Environment-specific values -------------------------------------------
@@ -39,3 +43,9 @@ Get-DataImportValidationSummary -Path $outputPath
 # ===========================================================================
 # Invoke-DataImportValidate -TenantDomainName $tenantDomainName -Region $region
 # & $migratorPath Import /importFile:"$PSScriptRoot\import.json" /validateOnly
+
+# ===========================================================================
+# Last. Close the run log - run when this working session is done. Exiting the
+# PowerShell session also ends the transcript.
+# ===========================================================================
+Stop-AutomationRunLog

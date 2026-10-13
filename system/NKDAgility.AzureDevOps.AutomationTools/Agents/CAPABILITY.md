@@ -32,6 +32,13 @@ yours to edit; the template never overwrites them again.
   owning migration's `fix-work/`.
 - **Preserve the customer's customisations.** Change the minimum needed to pass
   validation; never wholesale-replace a customised definition with the out-of-box one.
+- **Every runbook records its console.** Runbooks call `Start-AutomationRunLog -Name <Runbook>`
+  right after `init.ps1` and `Stop-AutomationRunLog` in a `finally`; logs land in
+  `migrations/NN-<Name>/output/runs/` and are committed. A new runbook follows the same
+  shape, pipes native tool output through the host (`2>&1 | ForEach-Object { Write-Host "$_" }`)
+  so the transcript sees it, and keeps tool log folders with `Copy-AutomationRunLogArtifact`.
+  An older engagement is wired with `Enable-AutomationRunLog` (preview with `-WhatIf`). The
+  module README's *Run logs* section has the details.
 
 ### The Data Import fix loop
 

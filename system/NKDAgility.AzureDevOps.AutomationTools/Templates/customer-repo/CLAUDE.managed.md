@@ -51,3 +51,11 @@ Update both guides when a change affects both the shared feature and a customer 
 
 Inventory and summary CSVs under `migrations/*/output/` are engagement evidence — commit
 them. Logs and scratch stay in the repo-level gitignored `output/`.
+
+Run logs under `migrations/*/output/runs/` are committed engagement history. Every runbook
+calls `Start-AutomationRunLog` after `init.ps1` and `Stop-AutomationRunLog` in a `finally`,
+so each run — failed ones included — leaves `<Runbook>-<yyyyMMdd-HHmmss>.log` (its whole
+console) plus, in a same-named folder, the tool logs `Copy-AutomationRunLogArtifact` copied
+in (devopsmigration.exe's log folder, for example). A runbook called by another writes into
+its caller's log. Commit them after each run. Never print a token to the console: the
+transcript would commit it.

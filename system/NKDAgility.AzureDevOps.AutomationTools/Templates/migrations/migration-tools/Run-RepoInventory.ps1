@@ -31,6 +31,10 @@ Set-StrictMode -Version Latest
 $WhatIfPreference = $false
 
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Run-RepoInventory'
+try {
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
@@ -107,3 +111,5 @@ foreach ($gitRepo in $disabled) {
     Write-Warning "Disabled in source, will NOT migrate: $($gitRepo.Repository) ($($gitRepo.SizeMB) MB). Re-enable it or record the decision to leave it behind."
 }
 Write-Host "==> Wrote $outPath - commit it." -ForegroundColor Green
+}
+finally { Stop-AutomationRunLog }

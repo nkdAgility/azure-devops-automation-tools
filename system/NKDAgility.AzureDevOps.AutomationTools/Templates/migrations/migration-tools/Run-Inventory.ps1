@@ -34,6 +34,10 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 }
 
 . "$PSScriptRoot\..\..\init.ps1"
+# Record this run's whole console to output\runs\ (committed engagement history).
+# Called from another runbook, it writes into the caller's log instead.
+Start-AutomationRunLog -Name 'Run-Inventory'
+try {
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Configuration file not found: $ConfigPath"
@@ -49,7 +53,19 @@ if (-not $platform) {
 }
 
 Write-Host "==> devopsmigrationdev queue --config $ConfigPath --follow" -ForegroundColor Cyan
-& $platform.Source queue --config $ConfigPath --follow
+# Through the host, not straight to the console, so the run log records it; native
+# output written directly to the console never reaches the transcript.
+$toolLogDir = $null
+try {
+    & $platform.Source queue --config $ConfigPath --follow 2>&1 | ForEach-Object {
+        $line = "$_"
+        if ($line -match 'Check the logs for errors:\s*(.+?)\s*$') { $toolLogDir = $Matches[1] }
+        Write-Host $line
+    }
+}
+finally {
+    if ($toolLogDir) { Copy-AutomationRunLogArtifact -Path $toolLogDir -As 'devopsmigrationdev-inventory' }
+}
 if ($LASTEXITCODE -ne 0) {
     throw "Migration Platform inventory failed (exit $LASTEXITCODE) for config '$ConfigPath'."
 }
@@ -75,3 +91,5 @@ else {
 
 # Repositories and their sizes, from the source (read-only).
 & (Join-Path $PSScriptRoot 'Run-RepoInventory.ps1')
+}
+finally { Stop-AutomationRunLog }
