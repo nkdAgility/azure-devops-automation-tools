@@ -154,6 +154,7 @@ Invoke-Pester -Path .\tests
 - `WorkItemLink.Tests.ps1` — the REST link-inventory commands against a stubbed transport. The stub replaces the private `Invoke-AzureDevOpsApi` in the module's own scope (define it with `function script:` inside `& $module { }`, or it lands in a child scope and vanishes), so link type filtering, WIQL parsing, enrichment, comment matching and file output are all exercised without touching a collection.
 - `EngineAuth.Tests.ps1` — structural (AST) guards on the engines' ambient-first authentication contract: PAT parameters stay optional, every `Initialize-*Auth` tries `Get-AzureDevOpsAccessToken` before its PAT fallback and throws when neither is available, credentials are re-resolved mid-run, and the binder templates expand token placeholders leniently.
 - `RunLog.Tests.ps1` — run logs in child `pwsh` processes: one log for nested runbooks, closed in `finally` on throw, artifact copies, every template wired, and a fake token pushed through `init.ps1` + `Set-AutomationSecrets` never reaching a transcript.
+- `BinderSharedConfig.Tests.ps1` — `Run-Migrate-Repos.ps1` and `Run-Migrate-Artifacts.ps1` share `migrate-repos-config.json`, so each binder's `ConvertTo-MigrateParams` must drop keys its engine does not accept (filtered against `(Get-Command $migrateScript).Parameters.Keys`) instead of splatting them and failing.
 
 Anything that talks to a collection is stubbed — the suite needs no PAT, no server and no network. Keep it that way so CI can run it.
 

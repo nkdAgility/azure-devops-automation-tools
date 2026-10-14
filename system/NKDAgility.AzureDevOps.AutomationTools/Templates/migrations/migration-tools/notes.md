@@ -13,6 +13,11 @@
    simply omitted). `devopsmigration.exe` cannot use Entra: its `configuration-*.json`
    `AccessToken` fields stay empty and are bound from the `MigrationTools__...__AccessToken`
    variables that `Set-AutomationSecrets` supplies from `..\..\secrets\secrets.json`.
+   `migrate-repos-config.json` is shared by `Run-Migrate-Repos.ps1` and
+   `Run-Migrate-Artifacts.ps1`: each passes its engine only the settings that engine accepts
+   and silently ignores the rest, so artifacts-only keys (`IncludeUpstream`,
+   `IncludePromotedUpstream`, …) can sit beside repo keys. A misspelt key is ignored too -
+   check the engine's parameter names if a setting seems to have no effect.
 2. `.\Sync.ps1 -WhatIf` to preview everything, then `.\Sync.ps1` to run: inventory -> repos ->
    pipelines -> artifacts -> work items. The inventory step (`Run-Inventory.ps1`, Migration
    Platform, `platform-config.json` in Inventory mode) always runs first, even under -WhatIf,
