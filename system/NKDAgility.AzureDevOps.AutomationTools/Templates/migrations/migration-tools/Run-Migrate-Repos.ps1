@@ -19,11 +19,21 @@
 .PARAMETER Repo
     Run only the configured repository whose RepoName matches this value.
     The match is exact and case-insensitive.
+
+.PARAMETER SettingsOnly
+    Copy repository settings (default branch, repository options) and branch
+    policies onto repositories already in the target, without cloning or
+    pushing. Writes output\repo-settings.csv instead of repomigration.csv.
+
+.PARAMETER SkipRepoSettings
+    Do not copy repository settings; branch policies are still copied.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'migrate-repos-config.json'),
-    [ValidateNotNullOrEmpty()][string]$Repo
+    [ValidateNotNullOrEmpty()][string]$Repo,
+    [switch]$SettingsOnly,
+    [switch]$SkipRepoSettings
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,7 +95,7 @@ function Expand-EnvPlaceholder {
 $fallbackTokenParams = @('SourcePat', 'TargetPat')
 
 # Switch parameters on Migrate-Repos.ps1: only include when set to $true.
-$switchParams = @('ForceSegmented', 'KeepClones', 'SkipLfs')
+$switchParams = @('ForceSegmented', 'KeepClones', 'SkipLfs', 'SettingsOnly', 'SkipRepoSettings')
 
 # Builds a parameter hashtable from config properties: null/empty values are
 # skipped so the engine keeps its own defaults, switches are only included when
@@ -154,7 +164,8 @@ if (-not $sharedWorkPath) {
 $runIndex = 0
 $runCount = @($runs).Count
 $summaries = @()
-$summaryName = if ($requestedRepo) { 'repomigration-' + [Uri]::EscapeDataString($requestedRepo) + '.csv' } else { 'repomigration.csv' }
+$summaryStem = if ($SettingsOnly) { 'repo-settings' } else { 'repomigration' }
+$summaryName = if ($requestedRepo) { "$summaryStem-" + [Uri]::EscapeDataString($requestedRepo) + '.csv' } else { "$summaryStem.csv" }
 $summaryPath = Join-Path (Join-Path $PSScriptRoot 'output') $summaryName
 function Write-RepoSummaryCsv {
     param([object[]]$Rows, [string]$CsvPath = $summaryPath)
@@ -169,7 +180,7 @@ function Write-RepoSummaryCsv {
     $tempPath = Join-Path $csvDir ('.repomigration-' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
         if (-not $rowsToWrite) {
-            Set-Content -LiteralPath $tempPath -Encoding UTF8 -Value '"project","repo","target_repo","size_mb","status","policy_status","policy_copied","policy_existing","policy_skipped","policy_failed","policy_details"'
+            Set-Content -LiteralPath $tempPath -Encoding UTF8 -Value '"project","repo","target_repo","size_mb","status","policy_status","policy_copied","policy_existing","policy_skipped","policy_failed","policy_details","settings_changed","settings_failed","settings_details"'
         }
         else {
             $rowsToWrite |
@@ -186,6 +197,9 @@ function Write-RepoSummaryCsv {
                     @{ Name = 'policy_skipped';   Expression = { $_.PolicySkipped } }
                     @{ Name = 'policy_failed';    Expression = { $_.PolicyFailed } }
                     @{ Name = 'policy_details';   Expression = { $_.PolicyDetails } }
+                    @{ Name = 'settings_changed'; Expression = { if ($_.PSObject.Properties['SettingsChanged']) { $_.SettingsChanged } else { 0 } } }
+                    @{ Name = 'settings_failed';  Expression = { if ($_.PSObject.Properties['SettingsFailed']) { $_.SettingsFailed } else { 0 } } }
+                    @{ Name = 'settings_details'; Expression = { if ($_.PSObject.Properties['SettingsDetails']) { $_.SettingsDetails } else { '' } } }
                 ) |
                 Export-Csv -LiteralPath $tempPath -NoTypeInformation -Encoding UTF8
         }
@@ -211,6 +225,8 @@ foreach ($run in $runs) {
     }
 
     $params = ConvertTo-MigrateParams -Settings $settings
+    if ($SettingsOnly) { $params['SettingsOnly'] = [switch]::Present }
+    if ($SkipRepoSettings) { $params['SkipRepoSettings'] = [switch]::Present }
 
     $label = if ($settings['SourceProject']) { $settings['SourceProject'] } else { '(default)' }
     Write-Host ("==> [{0}/{1}] Invoking Migrate-Repos.ps1 for source project '{2}'" -f $runIndex, $runCount, $label) -ForegroundColor Cyan

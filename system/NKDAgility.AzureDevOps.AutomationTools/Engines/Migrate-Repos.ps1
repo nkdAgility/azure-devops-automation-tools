@@ -173,6 +173,36 @@
     work items) are left unchanged so a later re-run can fix them. Use this
     switch to migrate the wiki verbatim without touching its links.
 
+.PARAMETER SettingsOnly
+    Sync repository settings and branch policies onto repositories that already
+    exist in the target, without cloning or pushing anything. Use it to bring
+    settings across after the code has migrated. Repositories missing from the
+    target are reported and skipped.
+
+.PARAMETER SkipRepoSettings
+    Do not copy repository settings (default branch and the repository options
+    below). Branch policies are still copied.
+
+    By default, after each repository is pushed:
+      * the default branch is set to the source's default branch, when that
+        branch exists on the target - otherwise Azure DevOps keeps whichever
+        branch arrived first;
+      * these repository options are set to their source values: ForksEnabled,
+        WitTransitionsSticky, RepoCreatedBranchesManagePermissionsEnabled,
+        StrictVoteMode, InheritPullRequestCreationMode,
+        RepoPullRequestAsDraftByDefault, RepoPullRequestAutoCompleteByDefault,
+        PullRequestCompletionCommitIncludePRId;
+      * commit mention linking and resolution, off for the push, end at their
+        SOURCE values rather than at the target's pre-push state.
+    The options use the same undocumented endpoint as the commit mention toggles
+    (see NOTES), and every write is verified by re-reading.
+
+    Policies: every source policy type is copied except those that reference
+    something the target cannot share - required reviewers (identities) and
+    status checks are skipped with a reason. Build validation policies are
+    copied when a pipeline with the same name exists in the target project.
+    Project-wide policies (no repository in their scope) are copied once per run.
+
     Fallback PATs: in a customer workspace, run Set-AutomationSecrets (from the
     NKDAgility.AzureDevOps.AutomationTools module) first and reference tokens
     as $ENV:AZDO_PAT_<ORG> in the per-migration config. Entra is tried first
@@ -273,7 +303,11 @@ param(
     [switch]$ForceDivergedBranches,
 
     [ValidateSet('Skip', 'Force', 'Rebase')]
-    [string]$DivergedBranchAction
+    [string]$DivergedBranchAction,
+
+    [switch]$SettingsOnly,
+
+    [switch]$SkipRepoSettings
 )
 
 $ErrorActionPreference = 'Stop'
@@ -521,36 +555,101 @@ function Get-RepoPolicies {
     @($response)
 }
 
+# Build validation is the one policy type whose reference is mapped: its pipeline
+# is matched by name in the target project.
+function Get-BuildPolicyTypeId { '0609b952-1397-4640-95ec-e00a01b2c241' }
+
+function Get-BuildDefinitionNames {
+    param([string]$OrgUrl, [string]$Project, [hashtable]$Headers)
+    $base = Get-CollectionBase -OrgUrl $OrgUrl
+    $url = "$base/$([uri]::EscapeDataString($Project))/_apis/build/definitions?`$top=5000&api-version=7.1"
+    $map = @{}
+    foreach ($d in @((Invoke-AdoApi -Uri $url -Headers $Headers).value)) { $map[[string]$d.id] = [string]$d.name }
+    $map
+}
+
+function Resolve-TargetBuildDefinitionId {
+    # Source pipeline id -> target pipeline id, matched by pipeline name. Built once
+    # per run; $null when the pipeline has not been migrated (or was renamed).
+    param([string]$SourceId)
+    if (-not (Get-Variable -Name BuildDefinitionMap -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
+        $src = Get-BuildDefinitionNames -OrgUrl $SourceOrg -Project $SourceProject -Headers $script:SourceHeaders
+        $tgt = Get-BuildDefinitionNames -OrgUrl $TargetOrg -Project $TargetProject -Headers $script:TargetHeaders
+        $byName = @{}
+        foreach ($id in $tgt.Keys) { $byName[$tgt[$id].ToLowerInvariant()] = [int]$id }
+        $script:BuildDefinitionMap = @{}
+        foreach ($id in $src.Keys) {
+            $script:BuildDefinitionMap[$id] = [pscustomobject]@{ Name = $src[$id]; TargetId = $byName[$src[$id].ToLowerInvariant()] }
+        }
+    }
+    $script:BuildDefinitionMap[$SourceId]
+}
+
+function Get-ProjectPolicies {
+    param([string]$OrgUrl, [string]$Project, [hashtable]$Headers)
+    $base = Get-CollectionBase -OrgUrl $OrgUrl
+    $url = "$base/$([uri]::EscapeDataString($Project))/_apis/policy/configurations?`$top=5000&api-version=7.1"
+    @((Invoke-AdoApi -Uri $url -Headers $Headers).value)
+}
+
+function Test-ProjectWidePolicy {
+    # True when no scope entry names a repository.
+    param($Policy)
+    if (-not $Policy.settings -or -not $Policy.settings.PSObject.Properties['scope']) { return $false }
+    $scopes = @($Policy.settings.scope)
+    if ($scopes.Count -eq 0) { return $false }
+    foreach ($scope in $scopes) {
+        if ($scope.PSObject.Properties['repositoryId'] -and $scope.repositoryId) { return $false }
+    }
+    $true
+}
+
 function Get-RepoPolicySkipReason {
-    param($Policy, [string]$SourceRepoId, [string]$TargetRepoId)
+    # -ProjectScope evaluates a policy for the once-per-run project-wide pass instead
+    # of for one repository.
+    param($Policy, [string]$SourceRepoId, [string]$TargetRepoId, [switch]$ProjectScope)
     if ($Policy.isDeleted) { return 'deleted at source' }
     if ($Policy.isEnterpriseManaged) { return 'enterprise-managed policy' }
-    # These documented types have no cross-project build or identity reference.
-    # Everything else needs an explicit mapping and is left for manual setup.
-    $simpleTypes = @(
-        'fa4e907d-c16b-4a4c-9dfa-4906e5d171dd', # minimum approval count
-        'fa4e907d-c16b-4a4c-9dfa-4916e5d171ab', # merge strategy
-        '40e92b44-2fe1-4dd6-b3d8-74a9c21d0c6e'  # work item linking
-    )
-    if ([string]$Policy.type.id -notin $simpleTypes) { return 'unsupported policy type' }
+    # Types whose settings point at things the target cannot share as-is. Every
+    # other type is copied verbatim.
+    $unmappable = @{
+        'fd2167ab-b0be-447a-8ec8-39368250530e' = 'required reviewers reference source identities'
+        'cbdc66da-9728-4af8-aada-9a5a32e4a226' = 'status checks reference source status producers'
+    }
+    $typeId = ([string]$Policy.type.id).ToLowerInvariant()
+    if ($unmappable.ContainsKey($typeId)) { return $unmappable[$typeId] }
     if (-not $Policy.settings -or -not $Policy.settings.scope) { return 'missing repository scope' }
     foreach ($scope in @($Policy.settings.scope)) {
-        if (-not $scope.repositoryId) { return 'project-wide scope' }
-        if ([string]$scope.repositoryId -ine $SourceRepoId) { return 'scope includes another repository' }
+        $repoId = if ($scope.PSObject.Properties['repositoryId']) { [string]$scope.repositoryId } else { '' }
+        if ($ProjectScope) {
+            if ($repoId) { return 'repository scope' }
+        }
+        else {
+            if (-not $repoId) { return 'project-wide scope (copied once per run)' }
+            if ($repoId -ine $SourceRepoId) { return 'scope includes another repository' }
+        }
+    }
+    if ($typeId -eq (Get-BuildPolicyTypeId)) {
+        $map = Resolve-TargetBuildDefinitionId -SourceId ([string]$Policy.settings.buildDefinitionId)
+        if (-not $map) { return "build pipeline $($Policy.settings.buildDefinitionId) not found at source" }
+        if (-not $map.TargetId) { return "no target pipeline named '$($map.Name)'" }
     }
     $null
 }
 
 function ConvertTo-TargetRepoPolicy {
-    param($Policy, [string]$SourceRepoId, [string]$TargetRepoId)
-    if (Get-RepoPolicySkipReason -Policy $Policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId) { return $null }
+    param($Policy, [string]$SourceRepoId, [string]$TargetRepoId, [switch]$ProjectScope)
+    if (Get-RepoPolicySkipReason -Policy $Policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId -ProjectScope:$ProjectScope) { return $null }
 
     $settings = $Policy.settings | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
     foreach ($scope in @($settings.scope)) {
-        $scope.repositoryId = $TargetRepoId.ToLowerInvariant()
+        if (-not $ProjectScope) { $scope.repositoryId = $TargetRepoId.ToLowerInvariant() }
         if ($scope.Contains('matchKind') -and $scope.matchKind) {
             $scope.matchKind = ([string]$scope.matchKind).ToLowerInvariant()
         }
+    }
+    if (([string]$Policy.type.id).ToLowerInvariant() -eq (Get-BuildPolicyTypeId)) {
+        $settings.buildDefinitionId = (Resolve-TargetBuildDefinitionId -SourceId ([string]$Policy.settings.buildDefinitionId)).TargetId
     }
     @{ isEnabled = [bool]$Policy.isEnabled; isBlocking = [bool]$Policy.isBlocking;
        type = @{ id = [string]$Policy.type.id }; settings = $settings }
@@ -573,12 +672,24 @@ function ConvertTo-PolicyCanonicalJson {
 
 function Sync-RepoPolicies {
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param([string]$SourceRepoId, [string]$TargetRepoId, [string]$RepoName)
+    # -ProjectScope runs the once-per-run pass over project-wide policies (no
+    # repository in their scope); otherwise one repository's own policies.
+    param([string]$SourceRepoId, [string]$TargetRepoId, [string]$RepoName, [switch]$ProjectScope)
     $result = @{ Copied = 0; Existing = 0; Skipped = 0; Failed = 0;
         Details = [System.Collections.Generic.List[string]]::new() }
     try {
-        $sourcePolicies = @(Get-RepoPolicies -OrgUrl $SourceOrg -Project $SourceProject -RepoId $SourceRepoId -Headers $script:SourceHeaders)
-        $targetPolicies = @(Get-RepoPolicies -OrgUrl $TargetOrg -Project $TargetProject -RepoId $TargetRepoId -Headers $script:TargetHeaders)
+        if ($ProjectScope) {
+            $sourcePolicies = @(Get-ProjectPolicies -OrgUrl $SourceOrg -Project $SourceProject -Headers $script:SourceHeaders |
+                Where-Object { Test-ProjectWidePolicy $_ })
+            $targetPolicies = @(Get-ProjectPolicies -OrgUrl $TargetOrg -Project $TargetProject -Headers $script:TargetHeaders)
+        }
+        else {
+            # The repository listing also returns project-wide policies; those belong
+            # to the project pass, so they are neither copied nor counted here.
+            $sourcePolicies = @(Get-RepoPolicies -OrgUrl $SourceOrg -Project $SourceProject -RepoId $SourceRepoId -Headers $script:SourceHeaders |
+                Where-Object { -not (Test-ProjectWidePolicy $_) })
+            $targetPolicies = @(Get-RepoPolicies -OrgUrl $TargetOrg -Project $TargetProject -RepoId $TargetRepoId -Headers $script:TargetHeaders)
+        }
     }
     catch {
         Write-Warning ("    Could not list branch policies for '{0}': {1}" -f $RepoName, $_.Exception.Message)
@@ -591,8 +702,8 @@ function Sync-RepoPolicies {
     $projectSeg = [uri]::EscapeDataString($TargetProject)
     $createUrl = "$base/$projectSeg/_apis/policy/configurations?api-version=7.1"
     foreach ($policy in $sourcePolicies) {
-        $skipReason = Get-RepoPolicySkipReason -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId
-        $body = ConvertTo-TargetRepoPolicy -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId
+        $skipReason = Get-RepoPolicySkipReason -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId -ProjectScope:$ProjectScope
+        $body = ConvertTo-TargetRepoPolicy -Policy $policy -SourceRepoId $SourceRepoId -TargetRepoId $TargetRepoId -ProjectScope:$ProjectScope
         $label = "policy $($policy.id) ($($policy.type.displayName))"
         if (-not $body) {
             $result.Skipped++
@@ -667,14 +778,25 @@ function Sync-RepoPolicies {
 
 function Get-RepositoryOption {
     # All options for a repository, as an ordered hashtable of key -> value.
-    param([string]$RepoId)
+    # -Source reads the source repository (to copy its values); default is target.
+    param([string]$RepoId, [switch]$Source)
 
-    $base = Get-CollectionBase -OrgUrl $TargetOrg
-    if (-not $script:TargetProjectId) {
-        $script:TargetProjectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
+    if ($Source) {
+        $base = Get-CollectionBase -OrgUrl $SourceOrg
+        if (-not $script:SourceProjectId) {
+            $script:SourceProjectId = Get-ProjectId -OrgUrl $SourceOrg -Headers $script:SourceHeaders -Project $SourceProject
+        }
+        $url = "$base/$($script:SourceProjectId)/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId=$RepoId"
+        $response = Invoke-AdoApi -Uri $url -Headers $script:SourceHeaders
     }
-    $url = "$base/$($script:TargetProjectId)/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId=$RepoId"
-    $response = Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders
+    else {
+        $base = Get-CollectionBase -OrgUrl $TargetOrg
+        if (-not $script:TargetProjectId) {
+            $script:TargetProjectId = Get-ProjectId -OrgUrl $TargetOrg -Headers $script:TargetHeaders -Project $TargetProject
+        }
+        $url = "$base/$($script:TargetProjectId)/_api/_versioncontrol/RepositoryOptions?__v=5&repositoryId=$RepoId"
+        $response = Invoke-AdoApi -Uri $url -Headers $script:TargetHeaders
+    }
 
     $options = [ordered]@{}
     foreach ($entry in @($response.__wrappedArray)) {
@@ -767,11 +889,16 @@ function Restore-CommitMention {
     # Never throws: the migration has finished by this point, and failing here must
     # not turn a completed migration into a failed one - but it is warned about
     # loudly, because a repository left with mentions disabled is a live change.
-    param([string]$RepoId, [System.Collections.IDictionary]$Captured, [string]$RepoName)
+    # -Desired (the SOURCE repository's values) wins over -Captured when given, so a
+    # migrated repository ends with the source's mention settings rather than the
+    # defaults a new target repository was created with.
+    param([string]$RepoId, [System.Collections.IDictionary]$Captured, [string]$RepoName,
+        [System.Collections.IDictionary]$Desired)
 
     if (-not $Captured -or $Captured.Count -eq 0) { return }
     foreach ($key in $Captured.Keys) {
-        if (-not $Captured[$key]) { continue }   # it was off before; leave it off
+        $want = if ($Desired -and $Desired.Contains($key)) { [bool]$Desired[$key] } else { [bool]$Captured[$key] }
+        if (-not $want) { continue }   # it was off before (or is off at source); leave it off
         try {
             Set-RepositoryOption -RepoId $RepoId -Key $key -Value $true
         }
@@ -780,6 +907,116 @@ function Restore-CommitMention {
                 $key, $RepoName, $_.Exception.Message)
         }
     }
+}
+
+# Copied from the source repository after the push. The commit mention keys are
+# handled by Disable-/Restore-CommitMention around the push, and by -IncludeMentions
+# on a settings-only run. IsDisabled is deliberately not copied.
+$script:CopiedRepoOptionKeys = @(
+    'ForksEnabled', 'WitTransitionsSticky', 'RepoCreatedBranchesManagePermissionsEnabled',
+    'StrictVoteMode', 'InheritPullRequestCreationMode', 'RepoPullRequestAsDraftByDefault',
+    'RepoPullRequestAutoCompleteByDefault', 'PullRequestCompletionCommitIncludePRId'
+)
+
+function Select-CommitMentionOptions {
+    # The commit mention keys out of a full option set; $null when there is none.
+    param([System.Collections.IDictionary]$Options)
+    if (-not $Options) { return $null }
+    $selected = [ordered]@{}
+    foreach ($key in $script:CommitMentionKeys) {
+        if ($Options.Contains($key)) { $selected[$key] = [bool]$Options[$key] }
+    }
+    $selected
+}
+
+function Get-SourceRepoOptions {
+    # The source's options, or $null when they cannot be read (logged, not fatal:
+    # settings are best-effort, the push is what matters).
+    param([string]$RepoId, [string]$RepoName)
+    try { Get-RepositoryOption -RepoId $RepoId -Source }
+    catch {
+        Write-Warning ("    Could not read source repository options for '{0}': {1}" -f $RepoName, $_.Exception.Message)
+        $null
+    }
+}
+
+function Sync-RepoSettings {
+    <# Aligns the target repository's default branch and options with the source.
+       Idempotent: only differences are written, each under ShouldProcess, and every
+       option write is verified by Set-RepositoryOption. Never throws - a failure is
+       warned about and counted. Returns @{ Changed; Same; Failed; Details }. #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param($SourceRepo, [string]$TargetRepoId, [string]$RepoName,
+        [System.Collections.IDictionary]$SourceOptions, [switch]$IncludeMentions)
+
+    $result = @{ Changed = 0; Same = 0; Failed = 0; Details = [System.Collections.Generic.List[string]]::new() }
+    $base = Get-CollectionBase -OrgUrl $TargetOrg
+    $projectSeg = [uri]::EscapeDataString($TargetProject)
+
+    # Default branch. A mirror push leaves it at whichever branch arrived first.
+    $wantBranch = if ($SourceRepo.PSObject.Properties['defaultBranch']) { [string]$SourceRepo.defaultBranch } else { '' }
+    if ($wantBranch) {
+        try {
+            $target = Invoke-AdoApi -Uri "$base/$projectSeg/_apis/git/repositories/${TargetRepoId}?api-version=7.1" -Headers $script:TargetHeaders
+            $current = if ($target.PSObject.Properties['defaultBranch']) { [string]$target.defaultBranch } else { '' }
+            if ($current -ceq $wantBranch) { $result.Same++ }
+            else {
+                $filter = [uri]::EscapeDataString(($wantBranch -replace '^refs/', ''))
+                $refs = @((Invoke-AdoApi -Uri "$base/$projectSeg/_apis/git/repositories/$TargetRepoId/refs?filter=$filter&api-version=7.1" -Headers $script:TargetHeaders).value |
+                    Where-Object { $_.name -ceq $wantBranch })
+                if ($refs.Count -eq 0) {
+                    $result.Failed++
+                    $result.Details.Add("default branch: $wantBranch not on target (is $current)")
+                    Write-Warning "    Default branch '$wantBranch' does not exist on the target yet; left at '$current'."
+                }
+                elseif ($PSCmdlet.ShouldProcess($RepoName, "Set default branch $current -> $wantBranch")) {
+                    Invoke-AdoApi -Uri "$base/$projectSeg/_apis/git/repositories/${TargetRepoId}?api-version=7.1" -Headers $script:TargetHeaders `
+                        -Method Patch -Body @{ defaultBranch = $wantBranch } | Out-Null
+                    $result.Changed++
+                    $result.Details.Add("default branch: $current -> $wantBranch")
+                    Write-Host "    Default branch: $current -> $wantBranch" -ForegroundColor Green
+                }
+                else { $result.Details.Add("default branch: preview $current -> $wantBranch") }
+            }
+        }
+        catch {
+            $result.Failed++
+            $result.Details.Add('default branch: failed')
+            Write-Warning ("    Could not set the default branch of '{0}': {1}" -f $RepoName, $_.Exception.Message)
+        }
+    }
+
+    if (-not $SourceOptions) { return $result }
+    $keys = @($script:CopiedRepoOptionKeys)
+    if ($IncludeMentions) { $keys += $script:CommitMentionKeys }
+    try { $targetOptions = Get-RepositoryOption -RepoId $TargetRepoId }
+    catch {
+        $result.Failed++
+        $result.Details.Add('options: could not read target')
+        Write-Warning ("    Could not read target repository options for '{0}': {1}" -f $RepoName, $_.Exception.Message)
+        return $result
+    }
+    foreach ($key in $keys) {
+        if (-not $SourceOptions.Contains($key) -or -not $targetOptions.Contains($key)) { continue }
+        $want = [bool]$SourceOptions[$key]
+        if ([bool]$targetOptions[$key] -eq $want) { $result.Same++; continue }
+        if (-not $PSCmdlet.ShouldProcess($RepoName, "Set repository option $key = $want")) {
+            $result.Details.Add("${key}: preview -> $want")
+            continue
+        }
+        try {
+            Set-RepositoryOption -RepoId $TargetRepoId -Key $key -Value $want
+            $result.Changed++
+            $result.Details.Add("${key}: -> $want")
+        }
+        catch {
+            $result.Failed++
+            $result.Details.Add("${key}: failed")
+            Write-Warning ("    Could not set {0} on '{1}': {2}" -f $key, $RepoName, $_.Exception.Message)
+        }
+    }
+    Write-Host ("    Settings: {0} changed, {1} already matching, {2} failed." -f $result.Changed, $result.Same, $result.Failed) -ForegroundColor DarkGray
+    $result
 }
 
 #endregion Repository options -------------------------------------------------
@@ -1679,7 +1916,8 @@ function New-RepoSummary {
         [string]$Status,
         [string]$TargetName,
         [string]$PolicyStatus = 'NotRun',
-        $PolicyResult
+        $PolicyResult,
+        $SettingsResult
     )
     [pscustomobject]@{
         SourceProject    = $SourceProject
@@ -1696,6 +1934,9 @@ function New-RepoSummary {
         PolicyExisting   = if ($PolicyResult) { $PolicyResult.Existing } else { 0 }
         PolicySkipped    = if ($PolicyResult) { $PolicyResult.Skipped } else { 0 }
         PolicyFailed     = if ($PolicyResult) { $PolicyResult.Failed } else { 0 }
+        SettingsChanged  = if ($SettingsResult) { $SettingsResult.Changed } else { 0 }
+        SettingsFailed   = if ($SettingsResult) { $SettingsResult.Failed } else { 0 }
+        SettingsDetails  = if ($SettingsResult) { ($SettingsResult.Details -join '; ') } else { '' }
         PolicyDetails    = if ($PolicyResult) { @($PolicyResult.Details) -join '; ' } else { '' }
     }
 }
@@ -1721,6 +1962,27 @@ function Migrate-Repo {
 
     Write-Host ("    Reported size: {0} GB. Strategy: {1}." -f $sizeGB, $strategy) -ForegroundColor DarkGray
 
+    if ($SettingsOnly) {
+        # No clone, no push: only an existing target repository is touched.
+        $existingRepo = Get-TargetRepo -Name $targetName
+        if (-not $existingRepo) {
+            Write-Warning "    '$targetName' is not in the target; settings-only run skips it."
+            New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy 'settings' -Status 'Skipped (not in target)'
+            return
+        }
+        $settingsResult = $null
+        if (-not $SkipRepoSettings) {
+            $sourceOptions = Get-SourceRepoOptions -RepoId $Repo.id -RepoName $Repo.name
+            $settingsResult = Sync-RepoSettings -SourceRepo $Repo -TargetRepoId $existingRepo.id -RepoName $targetName `
+                -SourceOptions $sourceOptions -IncludeMentions
+        }
+        $policyResult = Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $existingRepo.id -RepoName $targetName
+        $settingsStatus = if ($WhatIfPreference) { 'WhatIf (settings preview)' } else { 'Settings synced' }
+        New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy 'settings' -Status $settingsStatus `
+            -PolicyStatus 'Completed' -PolicyResult $policyResult -SettingsResult $settingsResult
+        return
+    }
+
     $targetRepo = New-TargetRepo -Name $targetName
     if (-not $targetRepo -and -not $WhatIfPreference) {
         New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'Skipped (no target repo)'
@@ -1736,11 +1998,16 @@ function Migrate-Repo {
     if ($targetName -cne $Repo.name) { $action += " as '$targetName'" }
     if (-not $PSCmdlet.ShouldProcess($Repo.name, $action)) {
         $previewPolicies = $null
+        $previewSettings = $null
         if ($WhatIfPreference -and $targetRepo -and $Repo.id) {
             $previewPolicies = Sync-RepoPolicies -SourceRepoId $Repo.id -TargetRepoId $targetRepo.id -RepoName $targetName
+            if (-not $SkipRepoSettings) {
+                $previewSettings = Sync-RepoSettings -SourceRepo $Repo -TargetRepoId $targetRepo.id -RepoName $targetName `
+                    -SourceOptions (Get-SourceRepoOptions -RepoId $Repo.id -RepoName $Repo.name) -IncludeMentions
+            }
         }
         New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status 'WhatIf (preview)' `
-            -PolicyStatus 'Preview' -PolicyResult $previewPolicies
+            -PolicyStatus 'Preview' -PolicyResult $previewPolicies -SettingsResult $previewSettings
         return
     }
 
@@ -1753,6 +2020,8 @@ function Migrate-Repo {
     if (-not $targetRepoId) {
         throw "Could not resolve the target repository id for '$targetName'; refusing to push without disabling commit mention linking."
     }
+    # Read before the push so the finally can end on the SOURCE's mention values.
+    $sourceOptions = if ($SkipRepoSettings) { $null } else { Get-SourceRepoOptions -RepoId $Repo.id -RepoName $Repo.name }
     $mentionsBefore = Disable-CommitMention -RepoId $targetRepoId -RepoName $targetName
 
     try {
@@ -1814,15 +2083,23 @@ function Migrate-Repo {
         $status += ' (policies deferred)'
     }
 
+    $settingsResult = $null
+    if (-not $SkipRepoSettings) {
+        $settingsResult = Sync-RepoSettings -SourceRepo $Repo -TargetRepoId $targetRepoId -RepoName $targetName -SourceOptions $sourceOptions
+        if ($settingsResult.Failed) { $status += " (settings: $($settingsResult.Failed) failed)" }
+    }
+
     Write-Host "    Done: $label ${progress}".TrimEnd() -ForegroundColor Green
     New-RepoSummary -Name $Repo.name -TargetName $targetName -SizeBytes $sizeBytes -SizeGB $sizeGB -Strategy $strategy -Status $status `
-        -PolicyStatus $policyStatus -PolicyResult $policyResult
+        -PolicyStatus $policyStatus -PolicyResult $policyResult -SettingsResult $settingsResult
 
     }
     finally {
         # Restored however the push ended - success, failure, or Ctrl+C - so a run
-        # never leaves the repository with its settings altered.
-        Restore-CommitMention -RepoId $targetRepoId -Captured $mentionsBefore -RepoName $targetName
+        # never leaves the repository with its settings altered. With the source's
+        # options in hand, mentions end at the source's values instead.
+        Restore-CommitMention -RepoId $targetRepoId -Captured $mentionsBefore -RepoName $targetName `
+            -Desired (Select-CommitMentionOptions -Options $sourceOptions)
     }
 }
 
@@ -1911,6 +2188,7 @@ $script:TargetAuthMode = $null
 # so every repository failed with 'the variable cannot be retrieved because it has not
 # been set' before a single option could be read.
 $script:TargetProjectId = $null
+$script:SourceProjectId = $null
 
 # Branches force-updated because they had diverged, recorded so the run can say exactly
 # what was discarded rather than only that something was overwritten.
@@ -1931,8 +2209,8 @@ Write-Step "Working directory: $WorkPath"
 
 try {
     # Migrate the project wiki first so its content is in place before the
-    # (typically longer) repository transfers run.
-    if (-not $SkipWiki) {
+    # (typically longer) repository transfers run. A settings-only run pushes nothing.
+    if (-not $SkipWiki -and -not $SettingsOnly) {
         $wikis = @(Get-SourceWikis)
         if (-not $wikis) {
             Write-Warning 'No project wiki found in source; nothing to migrate (use -SkipWiki to suppress this warning).'
@@ -1982,6 +2260,22 @@ try {
                 -SizeGB $(if ($repo.PSObject.Properties.Name -contains 'size') { [math]::Round([int64]$repo.size / 1GB, 2) } else { 0 }) `
                 -Strategy 'n/a' `
                 -Status ("Failed: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    # Project-wide policies (no repository in their scope) belong to no single
+    # repository, so they are copied once, after the repositories. A single-repo run
+    # (-RepoName) leaves them alone: it must not change project-wide behaviour.
+    if (-not $RepoName) {
+        Write-Step 'Project-wide branch policies.'
+        try {
+            $projectPolicies = Sync-RepoPolicies -ProjectScope -RepoName "$TargetProject (project-wide)"
+            New-RepoSummary -Name '(project-wide policies)' -SizeBytes 0 -SizeGB 0 -Strategy 'policies' `
+                -Status $(if ($WhatIfPreference) { 'WhatIf (preview)' } else { 'Policies synced' }) `
+                -PolicyStatus 'Completed' -PolicyResult $projectPolicies
+        }
+        catch {
+            Write-Warning ("    Project-wide policies FAILED: {0}" -f $_.Exception.Message)
         }
     }
 

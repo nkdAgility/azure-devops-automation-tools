@@ -310,7 +310,13 @@ Describe 'Migrate-Repos engine shape' {
 Describe 'Repository branch policy transfer' {
     BeforeAll {
         . ([scriptblock]::Create((Get-EngineFunctionSource -Name @(
-                    'Get-RepoPolicies', 'Get-RepoPolicySkipReason', 'ConvertTo-TargetRepoPolicy', 'ConvertTo-PolicyCanonicalJson', 'Sync-RepoPolicies'))))
+                    'Get-RepoPolicies', 'Get-ProjectPolicies', 'Test-ProjectWidePolicy', 'Get-BuildPolicyTypeId',
+                    'Get-RepoPolicySkipReason', 'ConvertTo-TargetRepoPolicy', 'ConvertTo-PolicyCanonicalJson', 'Sync-RepoPolicies'))))
+        # Pipeline 11 'CI' exists in the target as 99; pipeline 12 'Gone' does not.
+        function Resolve-TargetBuildDefinitionId {
+            param([string]$SourceId)
+            @{ '11' = [pscustomobject]@{ Name = 'CI'; TargetId = 99 }; '12' = [pscustomobject]@{ Name = 'Gone'; TargetId = $null } }[$SourceId]
+        }
         $script:SourceOrg = 'https://dev.azure.com/source'
         $script:TargetOrg = 'https://dev.azure.com/target'
         $script:SourceProject = 'Source Project'
@@ -340,18 +346,47 @@ Describe 'Repository branch policy transfer' {
         $script:SourcePolicy.settings.scope[0].repositoryId | Should -BeExactly 'source-id'
     }
 
-    It 'skips policies with external dependencies or a project-wide scope' {
-        $script:SourcePolicy.type.id = '0609b952-1397-4640-95ec-e00a01b2c241'
+    It 'skips policies with identity references or a project-wide scope in the repository pass' {
+        $script:SourcePolicy.type.id = 'fd2167ab-b0be-447a-8ec8-39368250530e'
         Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
-            Should -BeExactly 'unsupported policy type'
+            Should -BeExactly 'required reviewers reference source identities'
         ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
             Should -BeNullOrEmpty
         $script:SourcePolicy.type.id = 'fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'
         $script:SourcePolicy.settings.scope[0].repositoryId = $null
         Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
-            Should -BeExactly 'project-wide scope'
+            Should -BeExactly 'project-wide scope (copied once per run)'
         ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
             Should -BeNullOrEmpty
+    }
+
+    It 'copies other policy types verbatim' {
+        $script:SourcePolicy.type.id = 'c6a1889d-b943-4856-b76f-9e46bb6b0df2'   # comment requirements
+        Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
+            Should -BeNullOrEmpty
+    }
+
+    It 'maps a build validation policy to the same-named target pipeline' {
+        $script:SourcePolicy.type.id = '0609b952-1397-4640-95ec-e00a01b2c241'
+        $script:SourcePolicy.settings | Add-Member buildDefinitionId 11
+        $body = ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id'
+        $body.settings.buildDefinitionId | Should -Be 99
+        $script:SourcePolicy.settings.buildDefinitionId | Should -Be 11
+        $script:SourcePolicy.settings.buildDefinitionId = 12
+        Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId 'source-id' -TargetRepoId 'target-id' |
+            Should -BeExactly "no target pipeline named 'Gone'"
+    }
+
+    It 'copies a project-wide policy in the project pass without inventing a repository' {
+        $script:SourcePolicy.settings.scope[0].repositoryId = $null
+        Test-ProjectWidePolicy $script:SourcePolicy | Should -BeTrue
+        Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId '' -TargetRepoId '' -ProjectScope | Should -BeNullOrEmpty
+        $body = ConvertTo-TargetRepoPolicy -Policy $script:SourcePolicy -SourceRepoId '' -TargetRepoId '' -ProjectScope
+        $body.settings.scope[0].repositoryId | Should -BeNullOrEmpty
+        $script:SourcePolicy.settings.scope[0].repositoryId = 'source-id'
+        Test-ProjectWidePolicy $script:SourcePolicy | Should -BeFalse
+        Get-RepoPolicySkipReason -Policy $script:SourcePolicy -SourceRepoId '' -TargetRepoId '' -ProjectScope |
+            Should -BeExactly 'repository scope'
     }
 
     It 'does not create an identical target policy on re-run' {
@@ -374,14 +409,14 @@ Describe 'Repository branch policy transfer' {
     It 'creates a supported policy and reports a skipped policy' {
         $complex = $script:SourcePolicy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
         $complex.id = 18
-        $complex.type.id = '0609b952-1397-4640-95ec-e00a01b2c241'
+        $complex.type.id = 'fd2167ab-b0be-447a-8ec8-39368250530e'
         Mock Get-RepoPolicies { if ($RepoId -eq 'source-id') { @($script:SourcePolicy, $complex) } else { @() } }
         Mock Invoke-AdoApi { [pscustomobject]@{ type = $script:SourcePolicy.type; settings = $Body.settings; isEnabled = $true; isBlocking = $true } }
         $result = Sync-RepoPolicies -SourceRepoId 'source-id' -TargetRepoId 'target-id' -RepoName 'repo' -WarningAction SilentlyContinue
         $result.Copied | Should -Be 1
         $result.Skipped | Should -Be 1
         $result.Details | Should -Contain 'policy 17 (Minimum approval count): copied'
-        $result.Details | Should -Contain 'policy 18 (Minimum approval count): skipped (unsupported policy type)'
+        $result.Details | Should -Contain 'policy 18 (Minimum approval count): skipped (required reviewers reference source identities)'
         Should -Invoke Invoke-AdoApi -Times 1
     }
 
@@ -661,3 +696,87 @@ Describe 'Push watchdog and verification' {
     }
 }
 
+
+Describe 'Repository settings transfer' {
+    BeforeAll {
+        . ([scriptblock]::Create((Get-EngineFunctionSource -Name @(
+                    'Restore-CommitMention', 'Select-CommitMentionOptions', 'Sync-RepoSettings'))))
+        $script:CommitMentionKeys = @('WitMentionsEnabled', 'WitResolutionMentionsEnabled')
+        $script:CopiedRepoOptionKeys = @('ForksEnabled', 'StrictVoteMode')
+        $script:TargetOrg = 'https://dev.azure.com/target'
+        $script:TargetProject = 'Target Project'
+        $script:TargetHeaders = @{}
+        function Get-CollectionBase { param([string]$OrgUrl) $OrgUrl }
+        function Invoke-AdoApi { param($Uri, $Headers, $Method, $Body) throw 'Invoke-AdoApi must be mocked' }
+        function Get-RepositoryOption { param([string]$RepoId, [switch]$Source) throw 'Get-RepositoryOption must be mocked' }
+        function Set-RepositoryOption { param($RepoId, $Key, $Value) }
+    }
+
+    It 'ends commit mentions at the SOURCE values, not the target defaults' {
+        Mock Set-RepositoryOption { }
+        $captured = [ordered]@{ WitMentionsEnabled = $true; WitResolutionMentionsEnabled = $true }
+        $desired = Select-CommitMentionOptions -Options ([ordered]@{ WitMentionsEnabled = $false; WitResolutionMentionsEnabled = $true; ForksEnabled = $true })
+        $desired.Keys | Should -Not -Contain 'ForksEnabled'
+        Restore-CommitMention -RepoId 'r' -Captured $captured -RepoName 'repo' -Desired $desired
+        Should -Invoke Set-RepositoryOption -Times 1 -ParameterFilter { $Key -eq 'WitResolutionMentionsEnabled' -and $Value -eq $true }
+        Should -Invoke Set-RepositoryOption -Times 0 -ParameterFilter { $Key -eq 'WitMentionsEnabled' }
+    }
+
+    It 'falls back to the captured values when the source options are unknown' {
+        Mock Set-RepositoryOption { }
+        Restore-CommitMention -RepoId 'r' -Captured ([ordered]@{ WitMentionsEnabled = $true; WitResolutionMentionsEnabled = $false }) -RepoName 'repo'
+        Should -Invoke Set-RepositoryOption -Times 1 -ParameterFilter { $Key -eq 'WitMentionsEnabled' -and $Value -eq $true }
+    }
+
+    It 'sets the default branch and differing options, and leaves matching ones alone' {
+        Mock Invoke-AdoApi {
+            if ($Method -eq 'Patch') { return $null }
+            if ($Uri -match '/refs\?') { return [pscustomobject]@{ value = @([pscustomobject]@{ name = 'refs/heads/main' }) } }
+            [pscustomobject]@{ defaultBranch = 'refs/heads/develop' }
+        }
+        Mock Get-RepositoryOption { [ordered]@{ ForksEnabled = $true; StrictVoteMode = $false; WitMentionsEnabled = $true } }
+        Mock Set-RepositoryOption { }
+        $source = [pscustomobject]@{ defaultBranch = 'refs/heads/main' }
+        $opts = [ordered]@{ ForksEnabled = $false; StrictVoteMode = $false; WitMentionsEnabled = $false }
+        $r = Sync-RepoSettings -SourceRepo $source -TargetRepoId 't' -RepoName 'repo' -SourceOptions $opts
+        $r.Changed | Should -Be 2
+        $r.Failed | Should -Be 0
+        Should -Invoke Invoke-AdoApi -Times 1 -ParameterFilter { $Method -eq 'Patch' -and $Body.defaultBranch -eq 'refs/heads/main' }
+        Should -Invoke Set-RepositoryOption -Times 1 -ParameterFilter { $Key -eq 'ForksEnabled' -and $Value -eq $false }
+        # Mentions are only touched on a settings-only run (-IncludeMentions).
+        Should -Invoke Set-RepositoryOption -Times 0 -ParameterFilter { $Key -eq 'WitMentionsEnabled' }
+    }
+
+    It 'includes commit mentions on a settings-only run' {
+        Mock Invoke-AdoApi { [pscustomobject]@{ defaultBranch = 'refs/heads/main' } }
+        Mock Get-RepositoryOption { [ordered]@{ WitMentionsEnabled = $true } }
+        Mock Set-RepositoryOption { }
+        $r = Sync-RepoSettings -SourceRepo ([pscustomobject]@{ defaultBranch = 'refs/heads/main' }) -TargetRepoId 't' -RepoName 'repo' `
+            -SourceOptions ([ordered]@{ WitMentionsEnabled = $false }) -IncludeMentions
+        $r.Changed | Should -Be 1
+        Should -Invoke Set-RepositoryOption -Times 1 -ParameterFilter { $Key -eq 'WitMentionsEnabled' -and $Value -eq $false }
+    }
+
+    It 'does not set a default branch the target does not have' {
+        Mock Invoke-AdoApi {
+            if ($Uri -match '/refs\?') { return [pscustomobject]@{ value = @() } }
+            [pscustomobject]@{ defaultBranch = 'refs/heads/develop' }
+        }
+        $r = Sync-RepoSettings -SourceRepo ([pscustomobject]@{ defaultBranch = 'refs/heads/main' }) -TargetRepoId 't' -RepoName 'repo' -WarningAction SilentlyContinue
+        $r.Failed | Should -Be 1
+        Should -Invoke Invoke-AdoApi -Times 0 -ParameterFilter { $Method -eq 'Patch' }
+    }
+
+    It 'writes nothing under -WhatIf' {
+        Mock Invoke-AdoApi {
+            if ($Uri -match '/refs\?') { return [pscustomobject]@{ value = @([pscustomobject]@{ name = 'refs/heads/main' }) } }
+            [pscustomobject]@{ defaultBranch = 'refs/heads/develop' }
+        }
+        Mock Get-RepositoryOption { [ordered]@{ ForksEnabled = $true } }
+        Mock Set-RepositoryOption { }
+        Sync-RepoSettings -SourceRepo ([pscustomobject]@{ defaultBranch = 'refs/heads/main' }) -TargetRepoId 't' -RepoName 'repo' `
+            -SourceOptions ([ordered]@{ ForksEnabled = $false }) -WhatIf | Out-Null
+        Should -Invoke Invoke-AdoApi -Times 0 -ParameterFilter { $Method -eq 'Patch' }
+        Should -Invoke Set-RepositoryOption -Times 0
+    }
+}
