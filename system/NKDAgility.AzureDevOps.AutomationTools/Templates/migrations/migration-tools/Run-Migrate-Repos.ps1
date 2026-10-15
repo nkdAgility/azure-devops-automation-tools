@@ -62,6 +62,9 @@ if (-not (Test-Path -LiteralPath $migrateScript)) {
     throw "Migrate-Repos.ps1 not found at: $migrateScript"
 }
 
+# Parameters the engine actually accepts.
+$validParams = (Get-Command -Name $migrateScript).Parameters.Keys
+
 Write-Host "==> Loading config: $ConfigPath" -ForegroundColor Cyan
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 
@@ -107,6 +110,10 @@ function ConvertTo-MigrateParams {
     foreach ($entry in $Settings.GetEnumerator()) {
         $name = $entry.Key
         $value = $entry.Value
+
+        # The config is shared with Run-Migrate-Artifacts.ps1 (e.g. IncludePromotedUpstream);
+        # drop anything the repo engine does not accept instead of failing.
+        if ($validParams -notcontains $name) { continue }
 
         if ($null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
             continue
