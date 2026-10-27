@@ -9,6 +9,16 @@ runbooks and export snapshots under source control. The tooling itself is not ke
 `capabilities.json` names the nkdAgility engines this workspace uses, and `init.ps1`
 copies each one into `.system/`.
 
+## engage-system is the first stop
+
+**Before asking Martin anything about this customer, read the engage-system repo**
+(`engage-system`, a sibling of this repo under `source\repos`). It is the record of every
+engagement: `engagements/<engagement>/knowledge/` holds the meetings, decisions, actions,
+conversations and people, and `filing/sources/` holds the raw transcripts and emails. Search
+it first, by project name, person, date or scope, for any migration, name, target, window or
+PAT request. Ask only for what is not there. Never ask Martin to repeat something
+engage-system already records.
+
 ## Layout
 
 | Path | Purpose |
