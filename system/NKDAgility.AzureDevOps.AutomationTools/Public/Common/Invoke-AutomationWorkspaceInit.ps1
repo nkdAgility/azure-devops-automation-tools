@@ -312,6 +312,14 @@ foreach ($capability in $capabilities) {
     }
 
     # 2. Materialise. Refuse to discard a hand-edit silently.
+    # Two runbooks started together (one per source project) both refresh .system\; one
+    # deleting the module while the other hashes it fails with "Could not find file".
+    # A machine-wide mutex per module path makes the second wait for the first.
+    $lockName = 'Global\nkda-system-' + ([BitConverter]::ToString(
+            [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($modulePath.ToLowerInvariant()))) -replace '-', '').Substring(0, 32)
+    $systemLock = [Threading.Mutex]::new($false, $lockName)
+    try {
+        try { $null = $systemLock.WaitOne() } catch [Threading.AbandonedMutexException] { }
     $recordPath = Join-Path $modulePath '.source.json'
     if ((Test-Path -LiteralPath $modulePath) -and (Test-Path -LiteralPath $recordPath)) {
         $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
@@ -345,6 +353,8 @@ foreach ($capability in $capabilities) {
     }
     # Read-only so an accidental save in the editor fails loudly instead of being lost.
     Get-ChildItem -LiteralPath $modulePath -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $true }
+    }
+    finally { $systemLock.ReleaseMutex(); $systemLock.Dispose() }
 
     # 3. Scaffold this capability's slice of the workspace. Every engine ships the same
     #    shape - Templates\customer-repo\** relative to the workspace root - so the
