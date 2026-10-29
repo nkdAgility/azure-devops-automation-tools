@@ -89,11 +89,12 @@ if ($WorkItemType) { $params.WorkItemType = $WorkItemType }
 
 $results = @(Sync-InheritedProcess @params)
 
-# Committed evidence of what was (or would be) changed.
+# Committed evidence of what was (or would be) changed. A local file, so it is written
+# under -WhatIf too - the preview CSV is the point of a -WhatIf run.
 $outDir = Join-Path $PSScriptRoot 'output'
-New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+New-Item -ItemType Directory -Path $outDir -Force -WhatIf:$false | Out-Null
 $csv = Join-Path $outDir ('align-target-process-{0}{1}.csv' -f [IO.Path]::GetFileNameWithoutExtension($Config), $(if ($WhatIfPreference) { '-whatif' } else { '' }))
-$results | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
+$results | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 Write-Host "==> Wrote $csv - commit it." -ForegroundColor Green
 }
 finally { Stop-AutomationRunLog }
