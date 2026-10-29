@@ -13,10 +13,17 @@
 .PARAMETER SkipArtifacts
     Forwarded to Run-Migrate-Artifacts.ps1: feed-only sync (feeds, upstreams,
     permissions) without moving packages.
+
+.PARAMETER Only
+    Run only these steps, in the usual order. For example `-Only WorkItems` at cut-over,
+    once repos, pipelines and artifacts have moved. Defaults to every step.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [switch]$SkipArtifacts,
+
+    [ValidateSet('Inventory', 'Repos', 'Pipelines', 'Artifacts', 'WorkItems')]
+    [string[]]$Only = @('Inventory', 'Repos', 'Pipelines', 'Artifacts', 'WorkItems'),
 
     # Source project to migrate. Migrations run ONE project at a time; required when the
     # repo/artifact config has runs for more than one.
@@ -38,10 +45,10 @@ $here = $PSScriptRoot
 Start-AutomationRunLog -Name 'Sync'
 try {
 
-# Load PATs from secrets\secrets.json into the environment: $ENV:AZDO_PAT_<ORG>
-# as Entra fallbacks for the Run-Migrate-*.ps1 configs, plus the
-# MigrationTools__...__AccessToken names that devopsmigration.exe binds over its
-# JSON configs (devopsmigration.exe cannot use Entra, so those stay PAT-fed).
+# Load credentials from secrets\secrets.json into the environment: $ENV:AZDO_PAT_<ORG>
+# for the Run-Migrate-*.ps1 configs, plus the MigrationTools__...__AccessToken names that
+# devopsmigration.exe binds over its JSON configs. For an Entra organisation (SignInAs, no
+# AccessToken) these hold an Entra token, which Azure DevOps accepts wherever a PAT goes.
 # The source and target projects named in the configs select any per-project PATs
 # in secrets.json, so a customer that issues one PAT per project needs no edits here.
 # Only one project per organisation can be selected at a time, so with several source
@@ -63,7 +70,7 @@ $pipelineSteps = @(
 $workItemsConfig = 'configuration-workitems.json'
 
 $stepNumber = 0
-$totalSteps = $pipelineSteps.Count + 4
+$totalSteps = @($Only | Where-Object { $_ -ne 'Pipelines' }).Count + $(if ($Only -contains 'Pipelines') { $pipelineSteps.Count } else { 0 })
 
 function Invoke-DevOpsMigration {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -132,24 +139,34 @@ try {
     if ($Project) { $runArgs['Project'] = $Project }
     if ($WhatIfPreference) { $runArgs['WhatIf'] = $true }
 
-    # 0. Source inventory, always first. Read-only, so it runs under -WhatIf too.
-    Invoke-RunScript -Label 'Inventory (Run-Inventory.ps1)' -ScriptName 'Run-Inventory.ps1'
+    # 0. Source inventory, first. Read-only, so it runs under -WhatIf too.
+    if ($Only -contains 'Inventory') {
+        Invoke-RunScript -Label 'Inventory (Run-Inventory.ps1)' -ScriptName 'Run-Inventory.ps1'
+    }
 
     # 1. Repositories.
-    Invoke-RunScript -Label 'Repositories (Run-Migrate-Repos.ps1)' -ScriptName 'Run-Migrate-Repos.ps1' -Arguments $runArgs
+    if ($Only -contains 'Repos') {
+        Invoke-RunScript -Label 'Repositories (Run-Migrate-Repos.ps1)' -ScriptName 'Run-Migrate-Repos.ps1' -Arguments $runArgs
+    }
 
     # 2. Pipelines via devopsmigration.exe.
-    foreach ($step in $pipelineSteps) {
-        Invoke-DevOpsMigration -Label $step.Label -ConfigFile $step.Config
+    if ($Only -contains 'Pipelines') {
+        foreach ($step in $pipelineSteps) {
+            Invoke-DevOpsMigration -Label $step.Label -ConfigFile $step.Config
+        }
     }
 
     # 3. Artifact feeds (and packages, unless -SkipArtifacts).
-    $artifactArgs = @{} + $runArgs
-    if ($SkipArtifacts) { $artifactArgs['SkipArtifacts'] = $true }
-    Invoke-RunScript -Label 'Artifacts (Run-Migrate-Artifacts.ps1)' -ScriptName 'Run-Migrate-Artifacts.ps1' -Arguments $artifactArgs
+    if ($Only -contains 'Artifacts') {
+        $artifactArgs = @{} + $runArgs
+        if ($SkipArtifacts) { $artifactArgs['SkipArtifacts'] = $true }
+        Invoke-RunScript -Label 'Artifacts (Run-Migrate-Artifacts.ps1)' -ScriptName 'Run-Migrate-Artifacts.ps1' -Arguments $artifactArgs
+    }
 
     # 4. Work items last, after repos, pipelines and artifacts.
-    Invoke-DevOpsMigration -Label 'Work items' -ConfigFile $workItemsConfig
+    if ($Only -contains 'WorkItems') {
+        Invoke-DevOpsMigration -Label 'Work items' -ConfigFile $workItemsConfig
+    }
 
     Write-Host '==> Sync complete.' -ForegroundColor Green
 }
