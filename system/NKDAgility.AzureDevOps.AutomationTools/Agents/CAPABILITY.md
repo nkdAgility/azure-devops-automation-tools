@@ -69,13 +69,24 @@ Authentication is **ambient identity first, stored token as fallback** — for t
 every other engine (`Migrate-Repos`, `Migrate-Artifacts`, `Update-WikiWorkItemLinks`,
 `Update-CommentAttachmentLinks`, `Set-WorkItemStartId`): Entra per Azure DevOps
 organisation (`Get-AzureDevOpsAccessToken` — an Entra token works anywhere a PAT does,
-REST and git alike, and is renewed per repository/feed/work-item batch across a long run),
-the signed-in gh CLI for GitHub (`Get-GitHubAccessToken`, then `GITHUB_TOKEN`). PATs/tokens
-in `secrets.json` are only used when ambient sign-in is unavailable — worth configuring for
-unattended runs and required for organisations that are not Entra-backed, where every REST
-command falls back to the secrets PAT for the collection automatically. The exception is
-`devopsmigration.exe`, which cannot use Entra: its `configuration-*.json` `AccessToken`
-env-var bindings stay PAT-fed by `Set-AutomationSecrets`.
+REST and git alike, and is renewed per repository, feed and package version, so a run of
+any length keeps a valid token), the signed-in gh CLI for GitHub (`Get-GitHubAccessToken`,
+then `GITHUB_TOKEN`). PATs/tokens in `secrets.json` are the fallback when ambient sign-in is
+unavailable — worth configuring for unattended runs and required for organisations that are
+not Entra-backed, where every REST command falls back to the secrets PAT automatically.
+
+**An organisation with a secrets PAT and no `SignInAs` is a PAT organisation:** REST uses the
+PAT and never attempts Entra, because a sign-in there would target a tenant the operator may
+hold no account in (a customer's source organisation, reached only through its token).
+
+Sign-in only acquires a credential, so it runs under `-WhatIf` too; a sign-in that fails is
+remembered for the session rather than retried on every call.
+
+The exception is `devopsmigration.exe`. `Set-AutomationSecrets` binds its
+`configuration-*.json` `AccessToken` env vars to the organisation's PAT, or to an Entra
+token when the organisation has no PAT. The tool reads that token once and cannot renew it,
+so an Entra-fed run fails with 401 after about an hour. **A long `devopsmigration.exe` run
+needs a PAT for that organisation.**
 
 **Which identity, per organisation.** A consultant holds one account per customer tenant,
 so the organisation names the one to use: `SignInAs` on its `secrets.json` entry (a UPN,

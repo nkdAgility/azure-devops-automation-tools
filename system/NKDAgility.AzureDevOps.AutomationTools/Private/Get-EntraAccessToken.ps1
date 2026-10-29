@@ -46,9 +46,19 @@ function Get-EntraAccessToken {
         if ($cached.ExpiresOn -gt (Get-Date).AddMinutes(5)) { return $cached.Token }
     }
 
+    # A sign-in that already failed this session is not retried on every call: a run makes
+    # hundreds of REST calls, and each one re-opening a browser (or, under -WhatIf, silently
+    # doing nothing and trying again) never ends. -Force retries.
+    if (-not $script:EntraSignInFailed) { $script:EntraSignInFailed = @{} }
+    if (-not $Force -and $script:EntraSignInFailed.ContainsKey($tenantId)) { throw $script:EntraSignInFailed[$tenantId] }
+
     # 499b84ac-1321-427f-aa17-267ca6975798 is the well-known Azure DevOps application ID.
     $adoResource = '499b84ac-1321-427f-aa17-267ca6975798'
 
+    # Signing in only acquires a credential; nothing is changed. Az's cmdlets honour
+    # -WhatIf, so under a preview they would silently skip the sign-in - each call is
+    # given -WhatIf:$false below.
+    try {
     # Which identity this organisation wants, when the engagement has said so.
     $account = Get-AzureDevOpsSignInAccount -Collection $Collection
 
@@ -81,7 +91,7 @@ function Get-EntraAccessToken {
                 Where-Object { & $isMatch $_ }) | Select-Object -First 1
         if ($existing) {
             try {
-                Set-AzContext -Context $existing -ErrorAction Stop | Out-Null
+                Set-AzContext -Context $existing -ErrorAction Stop -WhatIf:$false | Out-Null
                 $context = Get-AzContext -ErrorAction SilentlyContinue
             }
             catch { Write-Verbose "Could not select existing context: $($_.Exception.Message)" }
@@ -99,13 +109,13 @@ function Get-EntraAccessToken {
         # found in the cache', which names neither the real cause nor the fix. Turning
         # the broker off for THIS PROCESS ONLY (never the machine's saved config) makes
         # Az use the system browser, which works from a plain shell.
-        try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue | Out-Null }
+        try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue -WhatIf:$false | Out-Null }
         catch { Write-Verbose "Could not disable the WAM broker: $($_.Exception.Message)" }
 
         $connect = New-AzureDevOpsConnectArgs -TenantId $tenantId -Resource $adoResource -AccountId $account
 
         try {
-            Connect-AzAccount @connect | Out-Null
+            Connect-AzAccount @connect -WhatIf:$false | Out-Null
         }
         catch {
             # -AccountId asks Az to reuse a KNOWN account, so it tries the token cache
@@ -118,7 +128,7 @@ function Get-EntraAccessToken {
             if (-not $account) { throw }
             Write-FixStep "No cached account to reuse; opening a browser to sign in as $account ..."
             $connect.Remove('AccountId')
-            Connect-AzAccount @connect | Out-Null
+            Connect-AzAccount @connect -WhatIf:$false | Out-Null
         }
 
         # Without the -AccountId hint the browser offers an account picker, so confirm
@@ -143,10 +153,10 @@ function Get-EntraAccessToken {
     catch {
         if ($_.Exception.Message -notmatch 'interaction is required|AuthScope|interactive') { throw }
         Write-FixStep "Azure DevOps needs its own sign-in (conditional access); re-authenticating scoped to it ..."
-        try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue | Out-Null }
+        try { Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction SilentlyContinue -WhatIf:$false | Out-Null }
         catch { Write-Verbose "Could not disable the WAM broker: $($_.Exception.Message)" }
         $reconnect = New-AzureDevOpsConnectArgs -TenantId $tenantId -Resource $adoResource -AccountId $account
-        Connect-AzAccount @reconnect | Out-Null
+        Connect-AzAccount @reconnect -WhatIf:$false | Out-Null
         $token = Get-AzAccessToken -ResourceUrl $adoResource -TenantId $tenantId -ErrorAction Stop
     }
     # AsSecureString became the default in newer Az.Accounts versions.
@@ -154,6 +164,12 @@ function Get-EntraAccessToken {
         [System.Net.NetworkCredential]::new('', $token.Token).Password
     }
     else { $token.Token }
+
+    }
+    catch {
+        $script:EntraSignInFailed[$tenantId] = "Entra sign-in to tenant $tenantId for '$Collection' failed: $($_.Exception.Message)"
+        throw $script:EntraSignInFailed[$tenantId]
+    }
 
     $expiresOn = if ($token.ExpiresOn) { ([datetimeoffset]$token.ExpiresOn).LocalDateTime } else { (Get-Date).AddMinutes(45) }
     $script:EntraTokenCache[$tenantId] = @{ Token = $value; ExpiresOn = $expiresOn }

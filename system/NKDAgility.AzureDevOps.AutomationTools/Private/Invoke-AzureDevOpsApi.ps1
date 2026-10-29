@@ -60,6 +60,13 @@ function Invoke-AzureDevOpsApi {
     elseif ($UseDefaultCredentials) {
         $arguments.UseDefaultCredentials = $true
     }
+    elseif (-not (Get-AzureDevOpsSignInAccount -Collection $Collection) -and
+        ($secretsPat = Resolve-CollectionPat -Collection $Collection)) {
+        # The workspace holds a PAT for this organisation and names no account to sign in
+        # as: that is a PAT organisation (a source reached only through its token). Trying
+        # Entra there opens a sign-in to a tenant the operator may have no account in.
+        $arguments.Headers = Get-AzureDevOpsAuthHeader -Pat $secretsPat
+    }
     else {
         try {
             $arguments.Headers = @{ Authorization = 'Bearer ' + (Get-EntraAccessToken -Collection $Collection) }
