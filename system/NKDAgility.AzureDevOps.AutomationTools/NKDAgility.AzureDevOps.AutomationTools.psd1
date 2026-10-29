@@ -77,6 +77,7 @@
         # WorkItemTracking - REST
         'Get-WorkItemType'
         'Sync-InheritedProcess'
+        'Update-BuildTaskVersion'
         'Add-ReflectedWorkItemIdField'
         'Get-WorkItemLinkType'
         'Get-WorkItemLink'

@@ -22,7 +22,8 @@ function Sync-InheritedProcess {
          with their values), then the field is added to the type with the source's
          required flag and default.
       3. Picklist values the source has and the target picklist lacks: added. Values are
-         never removed.
+         never removed. Allowed values customised on one type's field (Activity limited
+         per type, even on a system field) are added to the target type's field too.
       4. States the source has and the target lacks: added with the source's category
          and colour, after the target's last state in that category. On a type this run
          created, the target's default states the source does not have are hidden.
@@ -177,6 +178,32 @@ function Sync-InheritedProcess {
         return 'whatif'
     }
 
+    # Allowed values set on a field for one type (an inherited process can do this even
+    # for a system field: Activity limited to 'Customer Request', 'Internal Request' on a
+    # Bug). They replace the field's own list on that type, so a target type without them
+    # rejects the source's values. Add the missing ones to the target type's field; never
+    # remove any. State and Reason are not settable this way (states are step 4).
+    $syncAllowedValues = { param($sourceTypePath, $targetTypePath, $ref, $typeName)
+        if ($ref -in 'System.State', 'System.Reason') { return }
+        $sourceTypeField = & $source "$sourceTypePath/fields/$([uri]::EscapeDataString($ref))?`$expand=allowedValues"
+        # Only values customised on the type ('inherited' or 'custom'). A 'system' list is
+        # the field's own (Integration Build's '<None>'): copying it would restrict a free
+        # text field in the target.
+        if (-not $sourceTypeField -or $sourceTypeField.customization -eq 'system') { return }
+        $sourceValues = @($sourceTypeField.allowedValues | Where-Object { $_ })
+        if (-not $sourceValues.Count) { return }
+        # Not yet on the target type under -WhatIf: nothing there to read.
+        $targetValues = @()
+        try { $targetValues = @((& $target "$targetTypePath/fields/$([uri]::EscapeDataString($ref))?`$expand=allowedValues").allowedValues | Where-Object { $_ }) } catch { $targetValues = @() }
+        $missing = @($sourceValues | Where-Object { $_ -notin $targetValues })
+        if (-not $missing.Count) { return }
+        & $record 'AddAllowedValues' $typeName $ref ($missing -join ', ')
+        if ($PSCmdlet.ShouldProcess("$typeName / $ref", "Add allowed value(s): $($missing -join ', ')")) {
+            $null = & $target "$targetTypePath/fields/$([uri]::EscapeDataString($ref))" 'Patch' @{ allowedValues = @($targetValues) + $missing }
+            Write-Host "    + allowed values on '$ref': $($missing -join ', ')" -ForegroundColor Green
+        }
+    }
+
     foreach ($sourceType in $sourceTypes) {
         $typeName = $sourceType.name
         Write-FixStep ("Work item type '{0}'" -f $typeName)
@@ -231,6 +258,7 @@ function Sync-InheritedProcess {
                 elseif ($sourceOrg -and $targetOrg -and $sourceOrg.isPicklist) {
                     & $record 'Report' $typeName $ref 'system field picklist: allowed values cannot be changed in an inherited process'
                 }
+                & $syncAllowedValues $sourceTypePath $targetTypePath $ref $typeName
                 continue
             }
 
@@ -258,6 +286,7 @@ function Sync-InheritedProcess {
                 $null = & $target "$targetTypePath/fields" 'Post' $body
                 Write-Host "    + field '$ref' added" -ForegroundColor Green
             }
+            & $syncAllowedValues $sourceTypePath $targetTypePath $ref $typeName
         }
 
         # 4. States.
