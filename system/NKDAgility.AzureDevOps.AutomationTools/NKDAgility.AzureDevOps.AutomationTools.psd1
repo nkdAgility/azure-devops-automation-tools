@@ -76,6 +76,7 @@
         'Remove-WitWorkItemLinkType'
         # WorkItemTracking - REST
         'Get-WorkItemType'
+        'Sync-InheritedProcess'
         'Add-ReflectedWorkItemIdField'
         'Get-WorkItemLinkType'
         'Get-WorkItemLink'
