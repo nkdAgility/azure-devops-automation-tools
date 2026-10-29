@@ -45,6 +45,10 @@ function Add-ReflectedWorkItemIdField {
     .PARAMETER Project
     Team project whose process should get the field.
 
+    .PARAMETER Process
+    Inherited process to change, by name, instead of naming a project. For a process no
+    project uses yet, so it can be prepared before a project is moved onto it.
+
     .PARAMETER WorkItemType
     Work item types to change, by display name. Omit for every type on the process, minus
     -ExcludeWorkItemType.
@@ -74,14 +78,18 @@ function Add-ReflectedWorkItemIdField {
     .EXAMPLE
     Add-ReflectedWorkItemIdField -Collection 'https://dev.azure.com/contoso' -Project 'Payments'
 
+    .EXAMPLE
+    Add-ReflectedWorkItemIdField -Collection 'https://dev.azure.com/contoso' -Process 'Payments-Scrum' -WhatIf
+
     .OUTPUTS
     One object per work item type: WorkItemType, Status (Added / AlreadyPresent / WouldAdd /
     Failed), Message.
     #>
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Project')]
     param(
         [Parameter(Mandatory)] [string]$Collection,
-        [Parameter(Mandatory)] [string]$Project,
+        [Parameter(Mandatory, ParameterSetName = 'Project')] [string]$Project,
+        [Parameter(Mandatory, ParameterSetName = 'Process')] [string]$Process,
         [string[]]$WorkItemType,
         [string[]]$ExcludeWorkItemType = @('Test Case', 'Test Plan', 'Test Suite'),
         [string]$ReferenceName = 'Custom.ReflectedWorkItemId',
@@ -101,10 +109,23 @@ function Add-ReflectedWorkItemIdField {
     elseif ($UseDefaultCredentials) { $auth.UseDefaultCredentials = $true }
     $processApi = '7.1-preview.2'
 
-    Write-FixSection "Adding '$ReferenceName' to '$Project' (inherited process)"
+    Write-FixSection "Adding '$ReferenceName' to $(if ($Process) { "process '$Process'" } else { "'$Project'" }) (inherited process)"
     Write-FixStep "Collection: $Collection"
 
-    # --- which process is this project on? -----------------------------------------------
+    # --- which process? Named directly, or the one the project is on ---------------------
+    # NOT $process for the process object: names are case-insensitive, so it would assign
+    # into the [string]$Process parameter. The object is $processInfo; the name is $processName.
+    $processName = $Process
+    if ($processName) {
+        $processes = Invoke-AzureDevOpsApi @auth -Collection $Collection -Path '_apis/work/processes' -ApiVersion $processApi
+        $processId = @($processes.value | Where-Object { $_.name -eq $processName } | ForEach-Object typeId)[0]
+        if (-not $processId) {
+            throw "Process '$processName' was not found in '$Collection'."
+        }
+        # Used only in messages and ShouldProcess targets below.
+        $Project = "process $processName"
+    }
+    else {
     # NOT $project: PowerShell variable names are case-insensitive, so that would assign into
     # the [string]$Project PARAMETER, silently coercing the response object to its string
     # representation - and .id on a string is empty, producing '_apis/projects//properties'.
@@ -114,22 +135,23 @@ function Add-ReflectedWorkItemIdField {
     if (-not $processId) {
         throw "Could not determine the process for project '$Project'. This command only supports collections on the inherited process model."
     }
+    }
 
     $processes = Invoke-AzureDevOpsApi @auth -Collection $Collection -Path '_apis/work/processes' -ApiVersion $processApi
-    $process = $processes.value | Where-Object { $_.typeId -eq $processId }
-    if (-not $process) {
+    $processInfo = $processes.value | Where-Object { $_.typeId -eq $processId }
+    if (-not $processInfo) {
         throw "Project '$Project' is on process '$processId', which this collection does not list under _apis/work/processes. That normally means the collection uses the XML process model - use Add-WitReflectedWorkItemIdField instead."
     }
-    if ($process.customizationType -eq 'system') {
+    if ($processInfo.customizationType -eq 'system') {
         throw @"
-Project '$Project' is on the SYSTEM process '$($process.name)', which cannot be customised.
+Project '$Project' is on the SYSTEM process '$($processInfo.name)', which cannot be customised.
 
-Create an inherited process from '$($process.name)', move '$Project' onto it, then re-run.
+Create an inherited process from '$($processInfo.name)', move '$Project' onto it, then re-run.
 Do that before migrating: moving a project between processes is trivial while it is empty
 and considerably less so once it holds work items.
 "@
     }
-    Write-FixStep "Process:    $($process.name) ($($process.customizationType), parent $($process.parentProcessTypeId))"
+    Write-FixStep "Process:    $($processInfo.name) ($($processInfo.customizationType), parent $($processInfo.parentProcessTypeId))"
 
     # --- phase 1: the field must exist on the collection ---------------------------------
     $fieldExists = $true
@@ -240,7 +262,8 @@ and considerably less so once it holds work items.
     }
 
     # --- verify against the project, not against the write calls -------------------------
-    if ($results.Status -contains 'Added') {
+    # Only a named project can be checked: a process on its own has no project field list.
+    if ($results.Status -contains 'Added' -and -not $processName) {
         $projectFields = (Invoke-AzureDevOpsApi @auth -Collection $Collection -Path "$([uri]::EscapeDataString($Project))/_apis/wit/fields" -ApiVersion '7.1').value
         if ($projectFields.referenceName -notcontains $ReferenceName) {
             throw "Verification failed: '$ReferenceName' is not visible in project '$Project' after the changes."
