@@ -189,6 +189,14 @@ function Sync-InheritedProcess {
             # System type reference names (Microsoft.VSTS.WorkItemTypes.*) are the same in
             # every organisation.
             $inherits = $sourceType.inherits
+            # Only when the target's parent process has that system type: an Agile User
+            # Story cannot derive inside a Scrum-based process (VS402805). Otherwise it is a
+            # plain custom type, and steps 2-4 give it the source type's fields and states.
+            if ($inherits -and -not @($targetTypes | Where-Object {
+                        $_.referenceName -eq $inherits -or ($_.PSObject.Properties['inherits'] -and $_.inherits -eq $inherits)
+                    }).Count) {
+                $inherits = $null
+            }
             $body = @{ name = $typeName; color = $sourceType.color; icon = $sourceType.icon; description = $sourceType.description; isDisabled = $false }
             if ($inherits) { $body.inheritsFrom = $inherits }
             & $record 'CreateType' $typeName $typeName $(if ($inherits) { "derived from $inherits" } else { 'custom type' })
