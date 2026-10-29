@@ -262,10 +262,13 @@ function Sync-InheritedProcess {
                 if ($existing.hidden) { & $record 'Report' $typeName "state '$($state.name)'" 'hidden in the target; un-hide it if work items use it' }
                 continue
             }
-            # After the target's last state in the same category (orders copied from the
-            # source can land in the wrong category and are refused, VS403085).
-            $sameCategory = @($targetStates | Where-Object stateCategory -eq $state.stateCategory)
-            $order = if ($sameCategory.Count) { 1 + ($sameCategory | Measure-Object order -Maximum).Maximum } else { $state.order }
+            # After the target's last state whose category comes at or before this one's
+            # (Proposed, InProgress, Resolved, Completed, Removed). Orders copied from the
+            # source, or a category the target has no state in yet, are refused (VS403085).
+            $categoryRank = @{ Proposed = 0; InProgress = 1; Resolved = 2; Completed = 3; Removed = 4 }
+            $rank = $categoryRank[[string]$state.stateCategory]
+            $before = @($targetStates | Where-Object { $categoryRank[[string]$_.stateCategory] -le $rank })
+            $order = if ($before.Count) { 1 + ($before | Measure-Object order -Maximum).Maximum } else { 1 }
             & $record 'AddState' $typeName $state.name "$($state.stateCategory), order $order"
             if ($PSCmdlet.ShouldProcess("$typeName / state '$($state.name)'", 'Add state')) {
                 $null = & $target "$targetTypePath/states" 'Post' @{ name = $state.name; color = $state.color; stateCategory = $state.stateCategory; order = $order }
