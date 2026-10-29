@@ -1891,6 +1891,11 @@ function Migrate-Feed {
             }
             New-Item -ItemType Directory -Path $feedDownload -Force | Out-Null
             $script:LastPackageBytes = [int64]0
+            # Renew near-expiry Entra tokens per version, not only per feed: one large feed
+            # (323 npm versions) outlives a token and every later publish fails with E401.
+            # A cache hit unless the token is close to expiry.
+            Initialize-SourceAuth
+            Initialize-TargetAuth
             try {
                 switch ($protocol) {
                     'nuget' { Migrate-NuGetPackage -Feed $Feed -Package $pkg -Version $v -Download $feedDownload -TargetSource $targetSource }
