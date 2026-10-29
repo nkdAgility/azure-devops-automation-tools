@@ -293,18 +293,22 @@ function Sync-InheritedProcess {
             }
         }
 
-        # 5. Backlog levels, for types this run created.
-        if ($createdType) {
+        # 5. Backlog levels: for a type created in the target (this run or an earlier,
+        # interrupted one), add any level the source type has and the target type lacks.
+        if ($createdType -or $targetType.customization -eq 'custom') {
+            $behaviorPath = "$targetRoot/workitemtypesbehaviors/$($targetType.referenceName)/behaviors"
+            $haveBehaviors = @((& $target $behaviorPath).value | ForEach-Object { $_.behavior.id })
             foreach ($behavior in @($sourceType.behaviors)) {
                 $sourceBehavior = $sourceBehaviors | Where-Object { $_.referenceName -eq $behavior.behavior.id } | Select-Object -First 1
                 $match = $targetBehaviors | Where-Object { $_.referenceName -eq $behavior.behavior.id -or ($sourceBehavior -and $_.name -eq $sourceBehavior.name) } | Select-Object -First 1
                 if (-not $match) { & $record 'Report' $typeName "backlog '$($behavior.behavior.id)'" 'no matching backlog level in the target'; continue }
+                if ($haveBehaviors -contains $match.referenceName) { continue }
                 # Never the default: the target backlog level already has its own default
                 # type (a Scrum PBI), and taking it over would change what its board creates.
                 & $record 'AddBehavior' $typeName $match.name ''
                 if ($PSCmdlet.ShouldProcess("$typeName / backlog '$($match.name)'", 'Add to backlog level')) {
                     # Backlog levels live under workitemtypesbehaviors, not workItemTypes (404).
-                    $null = & $target "$targetRoot/workitemtypesbehaviors/$($targetType.referenceName)/behaviors" 'Post' @{ behavior = @{ id = $match.referenceName }; isDefault = $false }
+                    $null = & $target $behaviorPath 'Post' @{ behavior = @{ id = $match.referenceName }; isDefault = $false }
                 }
             }
         }
