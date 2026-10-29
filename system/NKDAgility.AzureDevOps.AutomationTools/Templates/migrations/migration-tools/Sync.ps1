@@ -41,8 +41,8 @@ try {
 # The source and target projects named in the configs select any per-project PATs
 # in secrets.json, so a customer that issues one PAT per project needs no edits here.
 # Only one project per organisation can be selected at a time, so with several source
-# projects (each with its own PAT) selecting them all here throws. Select one set up front
-# only when that is unambiguous; Invoke-DevOpsMigration re-selects per config anyway.
+# projects (each with its own PAT) selecting them all here throws. Load them without a
+# selection here; Invoke-DevOpsMigration selects each config's projects as it runs.
 Set-AutomationSecrets | Out-Null
 
 # Resolve devopsmigration.exe from PATH so a missing tool fails fast with an
