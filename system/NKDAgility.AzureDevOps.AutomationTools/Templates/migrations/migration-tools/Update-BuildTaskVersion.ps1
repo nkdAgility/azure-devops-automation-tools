@@ -51,9 +51,11 @@ $matched = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'configuration-pip
 if ($matched.Count -ne 1) {
     throw "Expected exactly one configuration-pipelines*.json with Source.Project '$Project' in $PSScriptRoot; found $($matched.Count)."
 }
-$source = (Get-Content -LiteralPath $matched[0].FullName -Raw | ConvertFrom-Json).MigrationTools.Endpoints.Source
+# Not $source: init.ps1 is dot-sourced and its [ValidateSet] -Source parameter lives in
+# this scope, so assigning an endpoint to $source fails validation.
+$sourceEndpoint = (Get-Content -LiteralPath $matched[0].FullName -Raw | ConvertFrom-Json).MigrationTools.Endpoints.Source
 # Work item configs name it Collection, pipeline configs Organisation.
-$collection = "$(if ($source.PSObject.Properties['Collection']) { $source.Collection } else { $source.Organisation })".TrimEnd('/')
+$collection = "$(if ($sourceEndpoint.PSObject.Properties['Collection']) { $sourceEndpoint.Collection } else { $sourceEndpoint.Organisation })".TrimEnd('/')
 if (-not $collection) { throw "$($matched[0].Name) names no Source Collection or Organisation." }
 Write-Host "==> $Project in $collection (from $($matched[0].Name)): task $TaskId -> $ToMajor.*" -ForegroundColor Cyan
 
