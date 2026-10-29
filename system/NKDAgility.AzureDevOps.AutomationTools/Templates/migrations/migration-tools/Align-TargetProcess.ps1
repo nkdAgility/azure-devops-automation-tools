@@ -2,21 +2,24 @@
 .SYNOPSIS
     Adds to the target project's process what the source project's work items need
     (work item types, fields, picklist values, states, backlog levels), using the
-    source and target named in a work item configuration in this folder.
+    source and target named in this folder's work item configuration for -Project.
 
 .DESCRIPTION
     Writes to the TARGET organisation's process. Run with -WhatIf first, always.
 
     Thin wrapper over Sync-InheritedProcess (module): nothing about any project is
     written here. The organisations and projects come from the work item config's
-    Source and Target endpoints, so one script serves every config in the folder.
+    Source and Target endpoints. It runs for ONE source project per invocation, never
+    more: -Project picks the single configuration-workitems*.json whose Source.Project
+    matches, and the run stops if there is not exactly one.
 
     It only adds. It refuses a target process other projects share unless
     -AllowSharedProcess is given, and stops with instructions when the target project
     is on a system process (Agile, Scrum, CMMI, Basic), which cannot be customised.
 
-.PARAMETER Config
-    Work item configuration file in this folder, e.g. configuration-workitems.json.
+.PARAMETER Project
+    The source project to align for. Exactly one work item config in this folder must
+    name it as Source.Project.
 
 .PARAMETER WorkItemType
     Optional. Only these source work item types.
@@ -25,12 +28,12 @@
     Write to a target process that other projects also use.
 
 .EXAMPLE
-    .\migrations\NN-Name\Align-TargetProcess.ps1 -Config configuration-workitems.json -WhatIf
+    .\migrations\NN-Name\Align-TargetProcess.ps1 -Project <SourceProject> -WhatIf
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory)]
-    [string]$Config,
+    [string]$Project,
 
     [string[]]$WorkItemType,
 
@@ -45,9 +48,16 @@ Set-StrictMode -Version Latest
 Start-AutomationRunLog -Name 'Align-TargetProcess'
 try {
 
-$configPath = Join-Path $PSScriptRoot $Config
-if (-not (Test-Path -LiteralPath $configPath)) { throw "Configuration file not found: $configPath" }
-$endpoints = (Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).MigrationTools.Endpoints
+# One source project per run: find the one work item config for it.
+$matched = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'configuration-workitems*.json' | Where-Object {
+        (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).MigrationTools.Endpoints.Source.Project -eq $Project
+    })
+if ($matched.Count -ne 1) {
+    throw "Expected exactly one configuration-workitems*.json with Source.Project '$Project' in $PSScriptRoot; found $($matched.Count)."
+}
+$Config = $matched[0].Name
+$endpoints = (Get-Content -LiteralPath $matched[0].FullName -Raw | ConvertFrom-Json).MigrationTools.Endpoints
+Write-Host "==> $Project -> $($endpoints.Target.Project) (from $Config)" -ForegroundColor Cyan
 
 # Load the PATs, selecting this config's projects so any per-project PAT is used.
 Set-AutomationSecrets -Project @($endpoints.Source.Project, $endpoints.Target.Project) | Out-Null
