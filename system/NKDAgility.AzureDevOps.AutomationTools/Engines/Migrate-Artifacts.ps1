@@ -1553,7 +1553,21 @@ function Migrate-NpmPackage {
         $publishArgs += @('--tag', $tag)
     }
 
-    & npm publish @publishArgs
+    # npm also refuses a stable version that is lower than the one already on
+    # 'latest' ("Cannot implicitly apply the "latest" tag because previously
+    # published version X is higher"), which is every older version once the
+    # newest has moved. Retry those under a throwaway dist-tag, then remove the
+    # tag, so the version lands and 'latest' stays on the highest version.
+    $output = @(& npm publish @publishArgs 2>&1 | ForEach-Object { $line = "$_"; Write-Host $line; $line })
+    if ($LASTEXITCODE -ne 0 -and ($output -join "`n") -match 'Cannot implicitly apply the "latest" tag') {
+        $backfillTag = 'migration-backfill'
+        Write-Host "    $name $ver is older than 'latest' on the target; publishing under '$backfillTag'."
+        & npm publish @publishArgs --tag $backfillTag
+        if ($LASTEXITCODE -ne 0) { throw "npm publish failed for $name $ver" }
+        & npm dist-tag rm $name $backfillTag --userconfig $npmrc --registry $TargetSource 2>&1 | ForEach-Object { Write-Host "$_" }
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Published $name $ver, but could not remove dist-tag '$backfillTag'; remove it by hand." }
+        return
+    }
     if ($LASTEXITCODE -ne 0) { throw "npm publish failed for $name $ver" }
 }
 
