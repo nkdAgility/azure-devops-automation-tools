@@ -44,6 +44,10 @@
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'migrate-repos-config.json'),
 
+    # The source project to migrate. A migration runs ONE project at a time: when the
+    # config's Runs name more than one SourceProject this is required.
+    [string]$Project,
+
     [switch]$Inventory,
 
     [switch]$SkipArtifacts,
@@ -60,6 +64,8 @@ $ErrorActionPreference = 'Stop'
 # variable into an error instead of a silent empty string mid-migration.
 Set-StrictMode -Version Latest
 
+# Captured before init.ps1 is dot-sourced, which declares parameters of its own.
+$requestedProject = $Project
 . "$PSScriptRoot\..\..\init.ps1"
 # Record this run's whole console to output\runs\ (committed engagement history).
 # Called from another runbook, it writes into the caller's log instead.
@@ -154,6 +160,16 @@ foreach ($prop in $config.PSObject.Properties) {
         continue
     }
     $shared[$prop.Name] = $prop.Value
+}
+# One source project per run, never several at once.
+$runProject = { param($r) $p = $r.PSObject.Properties['SourceProject']; if ($p -and $p.Value) { [string]$p.Value } else { [string]$shared['SourceProject'] } }
+$configuredProjects = @($runs | ForEach-Object { & $runProject $_ } | Where-Object { $_ } | Select-Object -Unique)
+if ($requestedProject) {
+    $runs = @($runs | Where-Object { (& $runProject $_) -eq $requestedProject })
+    if (-not $runs) { throw "No run in $ConfigPath has SourceProject '$requestedProject'. Configured: $($configuredProjects -join ', ')." }
+}
+elseif ($configuredProjects.Count -gt 1) {
+    throw "$ConfigPath has runs for $($configuredProjects.Count) source projects ($($configuredProjects -join ', ')). Migrations run one project at a time: pass -Project <name>."
 }
 if (-not $runs) {
     $runs = @([pscustomobject]@{})

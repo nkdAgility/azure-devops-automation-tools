@@ -16,7 +16,11 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [switch]$SkipArtifacts
+    [switch]$SkipArtifacts,
+
+    # Source project to migrate. Migrations run ONE project at a time; required when the
+    # repo/artifact config has runs for more than one.
+    [string]$Project
 )
 
 $ErrorActionPreference = 'Stop'
@@ -124,6 +128,8 @@ function Invoke-RunScript {
 
 try {
     $runArgs = @{}
+    # One source project per run: the repo and artifact runbooks filter their Runs to it.
+    if ($Project) { $runArgs['Project'] = $Project }
     if ($WhatIfPreference) { $runArgs['WhatIf'] = $true }
 
     # 0. Source inventory, always first. Read-only, so it runs under -WhatIf too.
