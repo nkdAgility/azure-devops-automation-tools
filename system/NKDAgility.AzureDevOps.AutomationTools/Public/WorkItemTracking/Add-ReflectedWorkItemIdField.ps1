@@ -118,7 +118,8 @@ function Add-ReflectedWorkItemIdField {
     $processName = $Process
     if ($processName) {
         $processes = Invoke-AzureDevOpsApi @auth -Collection $Collection -Path '_apis/work/processes' -ApiVersion $processApi
-        $processId = @($processes.value | Where-Object { $_.name -eq $processName } | ForEach-Object typeId)[0]
+        # .typeId, not ForEach-Object typeId: ForEach-Object -MemberName honours -WhatIf and returns nothing.
+        $processId = @($processes.value | Where-Object { $_.name -eq $processName })[0].typeId
         if (-not $processId) {
             throw "Process '$processName' was not found in '$Collection'."
         }
