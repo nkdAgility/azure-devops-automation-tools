@@ -1558,7 +1558,11 @@ function Migrate-NpmPackage {
     # published version X is higher"), which is every older version once the
     # newest has moved. Retry those under a throwaway dist-tag, then remove the
     # tag, so the version lands and 'latest' stays on the highest version.
-    $output = @(& npm publish @publishArgs 2>&1 | ForEach-Object { $line = "$_"; Write-Host $line; $line })
+    # The exit code is inspected here, so a caller's
+    # $PSNativeCommandUseErrorActionPreference = $true (Sync.ps1 sets it) must not
+    # turn npm's non-zero exit into a terminating error before the retry runs.
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output =@(& npm publish @publishArgs 2>&1 | ForEach-Object { $line = "$_"; Write-Host $line; $line })
     if ($LASTEXITCODE -ne 0 -and ($output -join "`n") -match 'Cannot implicitly apply the "latest" tag') {
         $backfillTag = 'migration-backfill'
         Write-Host "    $name $ver is older than 'latest' on the target; publishing under '$backfillTag'."
