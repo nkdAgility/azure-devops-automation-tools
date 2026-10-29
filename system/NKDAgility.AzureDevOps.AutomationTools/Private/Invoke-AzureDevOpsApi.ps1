@@ -81,10 +81,25 @@ function Invoke-AzureDevOpsApi {
         $arguments.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 10 }
     }
 
+    # A query string written into -Path ('..._apis/work/processes?$expand=projects') is
+    # merged into the parameters. Appending '?api-version=' after it would give the URL a
+    # second '?', and the service then silently ignores the caller's parameters - $expand
+    # comes back unexpanded, $top is ignored - instead of failing.
+    $pathQuery = [ordered]@{}
+    $requestPath = $Path
+    if ($requestPath.Contains('?')) {
+        $requestPath, $rawQuery = $requestPath.Split('?', 2)
+        foreach ($pair in ($rawQuery -split '&' | Where-Object { $_ })) {
+            $key, $value = $pair.Split('=', 2)
+            $pathQuery[[uri]::UnescapeDataString($key)] = if ($null -ne $value) { [uri]::UnescapeDataString($value) } else { '' }
+        }
+    }
+
     $values = @()
     $continuationToken = $null
     do {
         $parameters = @{}
+        foreach ($key in $pathQuery.Keys) { $parameters[$key] = $pathQuery[$key] }
         if ($Query) { foreach ($key in $Query.Keys) { $parameters[$key] = $Query[$key] } }
         if ($continuationToken) { $parameters['continuationToken'] = $continuationToken }
         $parameters['api-version'] = $ApiVersion
@@ -92,7 +107,7 @@ function Invoke-AzureDevOpsApi {
                 '{0}={1}' -f $_.Key, [uri]::EscapeDataString([string]$_.Value)
             }) -join '&'
 
-        $uri = '{0}/{1}?{2}' -f $Collection.TrimEnd('/'), $Path.TrimStart('/'), $queryString
+        $uri = '{0}/{1}?{2}' -f $Collection.TrimEnd('/'), $requestPath.TrimStart('/'), $queryString
         $arguments.Uri = $uri
 
         Write-DebugLog "REST {method} {uri}" -PropertyValues $Method, $uri
