@@ -75,10 +75,14 @@ $workDir = [Environment]::ExpandEnvironmentVariables([string]$config.MigrationPl
 $outDir = Join-Path $PSScriptRoot 'output'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $copied = 0
+# A single-project config gets project-named copies, so one run per project never overwrites another.
+$projects = @($config.MigrationPlatform.Organisations | ForEach-Object { $_.Projects } | Where-Object { $_ })
+$suffix = if ($projects.Count -eq 1) { "-$($projects[0])" } else { '' }
 foreach ($name in 'inventory.csv', 'inventory.json') {
     $inventoryFile = Join-Path $workDir $name
     if (Test-Path -LiteralPath $inventoryFile) {
-        Copy-Item -LiteralPath $inventoryFile -Destination (Join-Path $outDir $name) -Force
+        $target = [IO.Path]::GetFileNameWithoutExtension($name) + $suffix + [IO.Path]::GetExtension($name)
+        Copy-Item -LiteralPath $inventoryFile -Destination (Join-Path $outDir $target) -Force
         $copied++
     }
 }
