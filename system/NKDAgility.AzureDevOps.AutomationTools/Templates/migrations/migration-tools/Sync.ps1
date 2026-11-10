@@ -63,11 +63,27 @@ if (-not $devopsMigration) {
     throw "devopsmigration.exe was not found on PATH. Install the Azure DevOps Migration Tools (https://devopsmigration.io) and ensure devopsmigration.exe is on PATH."
 }
 
+# Config per source project: '<base>-<Project>.json' when it exists, else the shared
+# '<base>.json'. Per-project configs without -Project are refused (one project per run).
+function Resolve-StepConfig([string]$Base) {
+    $perProject = @(Get-ChildItem -LiteralPath $here -Filter "$Base-*.json" -File)
+    if ($Project) {
+        $own = "$Base-$Project.json"
+        if (Test-Path -LiteralPath (Join-Path $here $own)) { return $own }
+        if ($perProject.Count) { throw "No $own here, although per-project $Base configs exist." }
+    }
+    elseif ($perProject.Count) {
+        throw "$Base has per-project configs ($($perProject.Name -join ', ')); pass -Project."
+    }
+    "$Base.json"
+}
+
 # devopsmigration.exe steps: label + config file (relative to this folder).
 $pipelineSteps = @(
-    @{ Label = 'Pipelines'; Config = 'configuration-pipelines.json' }
+    @{ Label = 'Pipelines'; Config = (Resolve-StepConfig 'configuration-pipelines') }
 )
-$workItemsConfig = 'configuration-workitems.json'
+$workItemsConfig = Resolve-StepConfig 'configuration-workitems'
+$inventoryConfig = Join-Path $here (Resolve-StepConfig 'platform-config')
 
 $stepNumber = 0
 $totalSteps = @($Only | Where-Object { $_ -ne 'Pipelines' }).Count + $(if ($Only -contains 'Pipelines') { $pipelineSteps.Count } else { 0 })
@@ -141,7 +157,7 @@ try {
 
     # 0. Source inventory, first. Read-only, so it runs under -WhatIf too.
     if ($Only -contains 'Inventory') {
-        Invoke-RunScript -Label 'Inventory (Run-Inventory.ps1)' -ScriptName 'Run-Inventory.ps1'
+        Invoke-RunScript -Label 'Inventory (Run-Inventory.ps1)' -ScriptName 'Run-Inventory.ps1' -Arguments @{ ConfigPath = $inventoryConfig }
     }
 
     # 1. Repositories.
