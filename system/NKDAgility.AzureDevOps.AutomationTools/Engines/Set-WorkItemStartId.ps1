@@ -18,9 +18,11 @@
     ID of at least -MinId.
 
     Because each work item creation only advances the counter by one, closing a
-    large gap can take many requests. Creations are issued in batches of
-    -BatchSize to reduce overhead, and the batch is trimmed automatically as the
-    target is approached so the counter is not overshot by more than one.
+    large gap takes many work items. Each batch of -BatchSize (1 to 200) is ONE
+    create call through the work item $batch endpoint and ONE bulk destroy
+    call, and the batch is trimmed automatically as the target is approached so
+    the counter is not overshot. Throwaway items left by a run stopped between
+    those two calls are found by title and destroyed at the start of the next.
 
     Authentication is ambient-identity first, stored token as the fallback:
     Entra by default. When the automation module is loaded the script acquires
@@ -59,8 +61,9 @@
     Title used for the throwaway work items. Default marks them as temporary.
 
 .PARAMETER BatchSize
-    Number of work items to create before re-evaluating progress. The batch is
-    automatically trimmed near the target. Default: 50.
+    Work items per create request and per destroy request, 1 to 200 (the $batch
+    limit). 1 behaves like the old one-at-a-time loop. The batch is trimmed near
+    the target. Default: 200.
 
 .PARAMETER MaxRetries
     Maximum number of times a single throttled request (HTTP 429/5xx or the
@@ -108,7 +111,7 @@ param(
     [string]$Title = 'TEMP - ID reservation (safe to delete)',
 
     [ValidateRange(1, 200)]
-    [int]$BatchSize = 50,
+    [int]$BatchSize = 200,
 
     [ValidateRange(0, 20)]
     [int]$MaxRetries = 8,
@@ -184,7 +187,7 @@ $script:AuthMode = $null
 Initialize-Auth
 
 $apiVersion = '7.1'
-$createUri = "$collectionBase/$Project/_apis/wit/workitems/`$$WorkItemType`?api-version=$apiVersion"
+$projectSegment = [Uri]::EscapeDataString($Project)
 
 function Invoke-AdoRestWithRetry {
     # Wraps Invoke-RestMethod with exponential backoff so transient Azure DevOps
@@ -211,7 +214,10 @@ function Invoke-AdoRestWithRetry {
         }
         catch {
             $attempt++
-            $resp = $_.Exception.Response
+            # Not every exception carries a Response (only web errors do); under
+            # StrictMode reading a missing property throws and hides the real error.
+            $respProp = $_.Exception.PSObject.Properties['Response']
+            $resp = if ($respProp) { $respProp.Value } else { $null }
             $status = $null
             if ($resp -and ($resp.PSObject.Properties.Name -contains 'StatusCode')) {
                 $status = [int]$resp.StatusCode
@@ -242,19 +248,99 @@ function Invoke-AdoRestWithRetry {
     }
 }
 
-function New-ThrowawayWorkItem {
-    # Creates a single work item and returns its assigned ID.
-    $body = @(
-        @{ op = 'add'; path = '/fields/System.Title'; value = $Title }
-    ) | ConvertTo-Json -Depth 5 -AsArray
-    $wi = Invoke-AdoRestWithRetry -RequestArgs @{
-        Uri         = $createUri
+function New-ThrowawayWorkItemBatch {
+    # Creates -Count work items in ONE request through the work item $batch
+    # endpoint (up to 200 operations per call) and returns the IDs it assigned.
+    # One round trip per batch instead of one per work item: creating one at a
+    # time ran at ~23 IDs a minute against slb-swt (2026-11-12).
+    # Errors for individual operations come back per item; they are returned,
+    # not thrown, so the caller can destroy whatever was created first.
+    param([int]$Count)
+    $ops = @(@{ op = 'add'; path = '/fields/System.Title'; value = $Title })
+    $requests = foreach ($n in 1..$Count) {
+        @{
+            method  = 'PATCH'
+            uri     = "/$projectSegment/_apis/wit/workitems/`$$WorkItemType`?suppressNotifications=true&api-version=$apiVersion"
+            headers = @{ 'Content-Type' = 'application/json-patch+json' }
+            body    = $ops
+        }
+    }
+    $resp = Invoke-AdoRestWithRetry -RequestArgs @{
+        Uri         = "$collectionBase/_apis/wit/`$batch?api-version=$apiVersion"
         Headers     = $script:Headers
         Method      = 'Post'
-        Body        = $body
-        ContentType = 'application/json-patch+json'
+        Body        = (ConvertTo-Json -InputObject @($requests) -Depth 8)
+        ContentType = 'application/json'
     }
-    [int]$wi.id
+    $ids = [System.Collections.Generic.List[int]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+    foreach ($r in @($resp.value)) {
+        $code = [int]$r.code
+        $body = if ($r.body -is [string]) { $r.body | ConvertFrom-Json } else { $r.body }
+        if ($code -ge 200 -and $code -lt 300 -and $body.id) { $ids.Add([int]$body.id) }
+        else { $errors.Add("HTTP $code $($r.body)") }
+    }
+    @{ Ids = @($ids); Errors = @($errors) }
+}
+
+function Remove-WorkItemBatch {
+    # Permanently destroys work items in one request (Work Items - Delete Work
+    # Items, destroy=true), so they do not sit in the recycle bin. Falls back to
+    # destroying one at a time if the bulk call is refused.
+    param([int[]]$Ids)
+    if (-not $Ids -or $Ids.Count -eq 0) { return }
+    try {
+        Invoke-AdoRestWithRetry -RequestArgs @{
+            Uri         = "$collectionBase/$projectSegment/_apis/wit/workitemsdelete?api-version=7.1-preview.1"
+            Headers     = $script:Headers
+            Method      = 'Post'
+            Body        = (@{ ids = @($Ids); destroy = $true; skipNotifications = $true } | ConvertTo-Json -Depth 4)
+            ContentType = 'application/json'
+        } | Out-Null
+    }
+    catch {
+        Write-Warning "Bulk destroy refused ($($_.Exception.Message)); destroying $($Ids.Count) work item(s) one at a time."
+        foreach ($id in $Ids) {
+            try { Remove-WorkItem -Id $id }
+            catch { Write-Warning "Failed to destroy work item $id ($($_.Exception.Message)). It may need to be removed manually." }
+        }
+    }
+}
+
+function Remove-LeftoverThrowawayWorkItem {
+    # A run stopped between a create batch and its destroy leaves up to
+    # -BatchSize throwaway items behind. Find them by their title and destroy
+    # them before starting.
+    $titleLiteral = $Title.Replace("'", "''")
+    $wiql = @{ query = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Title] = '$titleLiteral'" } |
+        ConvertTo-Json
+    $result = Invoke-AdoRestWithRetry -RequestArgs @{
+        Uri         = "$collectionBase/$projectSegment/_apis/wit/wiql?api-version=$apiVersion"
+        Headers     = $script:Headers
+        Method      = 'Post'
+        Body        = $wiql
+        ContentType = 'application/json'
+    }
+    $ids = @(@($result.workItems) | Where-Object { $_ } | ForEach-Object { [int]$_.id })
+    if ($ids.Count -eq 0) { return }
+    Write-Step "Destroying $($ids.Count) throwaway work item(s) left by an earlier run."
+    for ($i = 0; $i -lt $ids.Count; $i += 200) {
+        Remove-WorkItemBatch -Ids $ids[$i..([Math]::Min($i + 199, $ids.Count - 1))]
+    }
+}
+
+function Test-StopRequested {
+    # True when Ctrl+C was pressed since the last check. Only meaningful while
+    # Ctrl+C is being read as input (see the main loop); anywhere without a
+    # console it is simply never true.
+    try {
+        while ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq [ConsoleKey]::C -and ($key.Modifiers -band [ConsoleModifiers]::Control)) { return $true }
+        }
+    }
+    catch { }
+    $false
 }
 
 function Remove-WorkItem {
@@ -282,11 +368,22 @@ if (-not $PSCmdlet.ShouldProcess(
 
 Write-Step "Advancing work item counter in '$org' so the next ID is >= $MinId."
 
+Remove-LeftoverThrowawayWorkItem
+
 $lastId = 0
 $consumed = 0
 $startTime = Get-Date
 $startId = 0
+$stopped = $false
 
+# Ctrl+C must not cut a batch in half: up to -BatchSize created items would be
+# left behind. Read it as a key press instead, and stop only after the current
+# batch has been destroyed. Restored in the finally block.
+$ctrlCWasInput = $null
+try { $ctrlCWasInput = [Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput = $true } catch { }
+if ($null -ne $ctrlCWasInput) { Write-Step 'Press Ctrl+C to stop cleanly after the current batch.' }
+
+try {
 while ($lastId -lt $target) {
     # Renew a near-expiry Entra token before each batch (cache hit otherwise).
     Initialize-Auth
@@ -301,62 +398,74 @@ while ($lastId -lt $target) {
         $count = [Math]::Min($BatchSize, $remaining)
     }
 
-    for ($i = 0; $i -lt $count; $i++) {
-        $id = New-ThrowawayWorkItem
-        $consumed++
-        try {
-            Remove-WorkItem -Id $id
-        }
-        catch {
-            Write-Warning "Failed to destroy work item $id ($($_.Exception.Message)). It may need to be removed manually from the recycle bin."
-        }
-        if ($id -gt $lastId) { $lastId = $id }
-        # Anchor the ID-gap measurement to the first observed ID so throughput
-        # reflects actual counter movement, not the initial jump to $startId.
-        if ($startId -eq 0) {
-            $startId = $lastId
-            # The very first created item reveals where the counter currently
-            # sits: the next real work item would have had ID ($lastId + 1).
-            Write-Step "Current work item counter is at $lastId (next new ID would be $($lastId + 1))."
-            if ($lastId -ge $target) {
-                Write-Step "Counter is already >= $MinId; nothing to advance."
-            }
-            else {
-                Write-Step "Need to consume $($target - $lastId) more ID(s) to reach $MinId."
-            }
-        }
+    # One create call and one destroy call per batch. Whatever the create call
+    # managed is destroyed before any failure is raised.
+    $created = New-ThrowawayWorkItemBatch -Count $count
+    $ids = @($created.Ids)
+    $consumed += $ids.Count
+    Remove-WorkItemBatch -Ids $ids
+    if (@($created.Errors).Count -gt 0) {
+        throw "Creating throwaway work items failed for $(@($created.Errors).Count) of ${count}: $(@($created.Errors)[0])"
+    }
+    if ($ids.Count -eq 0) { throw 'The create batch returned no work item IDs.' }
 
-        $elapsed = (Get-Date) - $startTime
-        $rate = if ($elapsed.TotalMinutes -gt 0) { $consumed / $elapsed.TotalMinutes } else { 0 }
-        $idsToGo = [Math]::Max(0, $target - $lastId)
-        $spanTotal = [Math]::Max(1, $target - $startId)
-        $spanDone = [Math]::Max(0, $lastId - $startId)
-        $percent = [Math]::Min(100, [int](($spanDone / $spanTotal) * 100))
-
-        if ($rate -gt 0 -and $idsToGo -gt 0) {
-            $etaMin = $idsToGo / $rate
-            $eta = [TimeSpan]::FromMinutes($etaMin)
-            $etaText = '{0:hh\:mm\:ss}' -f $eta
-            $finishText = (Get-Date).Add($eta).ToString('HH:mm:ss')
+    $batchMax = ($ids | Measure-Object -Maximum).Maximum
+    if ($batchMax -gt $lastId) { $lastId = [int]$batchMax }
+    # Anchor the ID-gap measurement to the first observed ID so throughput
+    # reflects actual counter movement, not the initial jump to $startId.
+    if ($startId -eq 0) {
+        $startId = $lastId
+        # The very first created item reveals where the counter currently
+        # sits: the next real work item would have had ID ($lastId + 1).
+        Write-Step "Current work item counter is at $lastId (next new ID would be $($lastId + 1))."
+        if ($lastId -ge $target) {
+            Write-Step "Counter is already >= $MinId; nothing to advance."
         }
         else {
-            $etaText = '--:--:--'
-            $finishText = '--:--:--'
+            Write-Step "Need to consume $($target - $lastId) more ID(s) to reach $MinId, in batches of $BatchSize."
         }
-
-        Write-Progress -Activity "Advancing work item ID counter in '$org'" `
-            -Status ("ID {0} / {1}  |  {2:n0}/min  |  {3} consumed  |  ETA {4} (~{5})" -f `
-                $lastId, $target, $rate, $consumed, $etaText, $finishText) `
-            -PercentComplete $percent
-
-        if ($lastId -ge $target) { break }
     }
+
+    $elapsed = (Get-Date) - $startTime
+    $rate = if ($elapsed.TotalMinutes -gt 0) { $consumed / $elapsed.TotalMinutes } else { 0 }
+    $idsToGo = [Math]::Max(0, $target - $lastId)
+    $spanTotal = [Math]::Max(1, $target - $startId)
+    $spanDone = [Math]::Max(0, $lastId - $startId)
+    $percent = [Math]::Min(100, [int](($spanDone / $spanTotal) * 100))
+
+    if ($rate -gt 0 -and $idsToGo -gt 0) {
+        $eta = [TimeSpan]::FromMinutes($idsToGo / $rate)
+        # Days included: hh:mm:ss alone dropped them (a 29-day run read 22:25:15).
+        $etaText = if ($eta.Days -gt 0) { '{0}d {1:hh\:mm\:ss}' -f $eta.Days, $eta } else { '{0:hh\:mm\:ss}' -f $eta }
+        $finishText = (Get-Date).Add($eta).ToString('yyyy-MM-dd HH:mm')
+    }
+    else {
+        $etaText = '--:--:--'
+        $finishText = '--'
+    }
+
+    Write-Progress -Activity "Advancing work item ID counter in '$org'" `
+        -Status ("ID {0} / {1}  |  {2:n0}/min  |  {3} consumed  |  ETA {4} (~{5})" -f `
+            $lastId, $target, $rate, $consumed, $etaText, $finishText) `
+        -PercentComplete $percent
+
+    if ($lastId -lt $target -and (Test-StopRequested)) { $stopped = $true; break }
+}
+}
+finally {
+    if ($null -ne $ctrlCWasInput) { [Console]::TreatControlCAsInput = $ctrlCWasInput }
 }
 
 Write-Progress -Activity "Advancing work item ID counter in '$org'" -Completed
 
 $totalElapsed = (Get-Date) - $startTime
-Write-Step ("Done in {0:hh\:mm\:ss}. Highest ID consumed: {1} ({2} created). The next work item will have ID >= {3}." -f `
-        $totalElapsed, $lastId, $consumed, $MinId)
+if ($stopped) {
+    Write-Step ("Stopped by Ctrl+C after a complete batch, in {0:hh\:mm\:ss}. Counter is at {1} ({2} created and destroyed); {3} ID(s) still to go to reach {4}. Run again to continue." -f `
+            $totalElapsed, $lastId, $consumed, ($target - $lastId), $MinId)
+}
+else {
+    Write-Step ("Done in {0:hh\:mm\:ss}. Highest ID consumed: {1} ({2} created). The next work item will have ID >= {3}." -f `
+            $totalElapsed, $lastId, $consumed, $MinId)
+}
 $lastId
 
