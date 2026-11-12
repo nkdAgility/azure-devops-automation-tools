@@ -75,6 +75,11 @@
     A server-provided Retry-After header is honoured when present but still
     capped by this value. Default: 60.
 
+.PARAMETER LogEveryMinutes
+    How often a plain progress line (counter, rate, ETA, finish time) is written
+    to the console, so the run log records progress; the progress bar itself
+    is not recorded. Default: 5.
+
 .EXAMPLE
     # Ambient identity: Entra, no PAT.
     .\Set-WorkItemStartId.ps1 -OrgUrl https://dev.azure.com/machining -Project Milling -MinId 100000
@@ -117,7 +122,10 @@ param(
     [int]$MaxRetries = 8,
 
     [ValidateRange(1, 600)]
-    [double]$MaxBackoffSeconds = 60
+    [double]$MaxBackoffSeconds = 60,
+
+    [ValidateRange(1, 1440)]
+    [int]$LogEveryMinutes = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -379,6 +387,7 @@ $consumed = 0
 $startTime = Get-Date
 $startId = 0
 $stopped = $false
+$lastLogged = Get-Date
 
 # Ctrl+C must not cut a batch in half: up to -BatchSize created items would be
 # left behind. Read it as a key press instead, and stop only after the current
@@ -440,18 +449,27 @@ while ($lastId -lt $target) {
     if ($rate -gt 0 -and $idsToGo -gt 0) {
         $eta = [TimeSpan]::FromMinutes($idsToGo / $rate)
         # Days included: hh:mm:ss alone dropped them (a 29-day run read 22:25:15).
-        $etaText = if ($eta.Days -gt 0) { '{0}d {1:hh\:mm\:ss}' -f $eta.Days, $eta } else { '{0:hh\:mm\:ss}' -f $eta }
-        $finishText = (Get-Date).Add($eta).ToString('yyyy-MM-dd HH:mm')
+        $etaText = if ($eta.Days -gt 0) { '{0}d{1}h{2:00}m' -f $eta.Days, $eta.Hours, $eta.Minutes } else { '{0}h{1:00}m' -f $eta.Hours, $eta.Minutes }
+        $finish = (Get-Date).Add($eta)
+        $finishText = if ($finish.Date -eq (Get-Date).Date) { $finish.ToString('HH:mm') } else { $finish.ToString('ddd dd MMM HH:mm') }
     }
     else {
-        $etaText = '--:--:--'
+        $etaText = '--'
         $finishText = '--'
     }
 
-    Write-Progress -Activity "Advancing work item ID counter in '$org'" `
-        -Status ("ID {0} / {1}  |  {2:n0}/min  |  {3} consumed  |  ETA {4} (~{5})" -f `
-            $lastId, $target, $rate, $consumed, $etaText, $finishText) `
-        -PercentComplete $percent
+    # Kept short, most useful first: the console cuts a progress line at its
+    # width with an ellipsis, and the finish time used to be what was lost.
+    $status = '{0:n0} -> {1:n0}  |  {2:n0}/min  |  ETA {3}, ~{4}  |  {5:n0} done' -f `
+        $lastId, $target, $rate, $etaText, $finishText, $consumed
+    Write-Progress -Activity $org -Status $status -PercentComplete $percent
+
+    # The progress bar is not recorded by the run log, so write a plain line
+    # every -LogEveryMinutes: the committed log then shows how the run went.
+    if (((Get-Date) - $lastLogged).TotalMinutes -ge $LogEveryMinutes) {
+        Write-Host ("==> [{0:HH:mm}] {1}  ({2}%)" -f (Get-Date), $status, $percent)
+        $lastLogged = Get-Date
+    }
 
     if ($lastId -lt $target -and (Test-StopRequested)) { $stopped = $true; break }
 }
