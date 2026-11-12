@@ -28,6 +28,11 @@ Describe 'Set-WorkItemStartId' {
             if ($u -match '/_apis/wit/\$batch') {
                 $requests = @($Body | ConvertFrom-Json)
                 $global:Fake.Calls.Add("batch:$($requests.Count)")
+                # Azure DevOps refuses a batch whose new items share a temporary ID (VS403357).
+                $tempIds = @($requests | ForEach-Object { @($_.body | Where-Object { $_.path -eq '/id' })[0].value })
+                if (@($tempIds | Where-Object { $null -eq $_ }).Count -gt 0 -or @($tempIds | Select-Object -Unique).Count -ne $requests.Count) {
+                    throw 'VS403357: Work items in the batch are expected to be unique'
+                }
                 $value = foreach ($r in $requests) {
                     $id = $global:Fake.Next; $global:Fake.Next++
                     $global:Fake.Created.Add($id)

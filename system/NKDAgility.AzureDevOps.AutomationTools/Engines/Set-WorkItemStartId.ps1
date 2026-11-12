@@ -256,13 +256,17 @@ function New-ThrowawayWorkItemBatch {
     # Errors for individual operations come back per item; they are returned,
     # not thrown, so the caller can destroy whatever was created first.
     param([int]$Count)
-    $ops = @(@{ op = 'add'; path = '/fields/System.Title'; value = $Title })
+    # Every new work item in one $batch needs its own temporary ID (-1, -2, ...);
+    # without it they all default to -1 and the batch is refused (VS403357).
     $requests = foreach ($n in 1..$Count) {
         @{
             method  = 'PATCH'
             uri     = "/$projectSegment/_apis/wit/workitems/`$$WorkItemType`?suppressNotifications=true&api-version=$apiVersion"
             headers = @{ 'Content-Type' = 'application/json-patch+json' }
-            body    = $ops
+            body    = @(
+                @{ op = 'add'; path = '/id'; value = -$n }
+                @{ op = 'add'; path = '/fields/System.Title'; value = $Title }
+            )
         }
     }
     $resp = Invoke-AdoRestWithRetry -RequestArgs @{
