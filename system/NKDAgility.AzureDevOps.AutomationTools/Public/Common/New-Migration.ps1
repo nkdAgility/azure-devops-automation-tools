@@ -92,5 +92,15 @@ function New-Migration {
         Write-Host "    $_" -ForegroundColor DarkGray
     }
 
+    # devopsmigration.exe takes its tokens only from the MigrationTools__Endpoints__* names,
+    # which Set-AutomationSecrets fills only for secrets.json entries listing them in EnvVars.
+    # Say so now: a scaffold without them previews clean and fails on the real run.
+    if ($Type -eq 'MigrationTools') {
+        Write-Host '    Before the first devopsmigration.exe step, secrets.json needs:' -ForegroundColor Yellow
+        Write-Host '      source org entry: "EnvVars": ["MigrationTools__Endpoints__Source__Authentication__AccessToken"]' -ForegroundColor Yellow
+        Write-Host '      target org entry: "EnvVars": ["MigrationTools__Endpoints__Target__Authentication__AccessToken"]' -ForegroundColor Yellow
+        Write-Host '    Sync.ps1 -WhatIf checks this (Test-MigrationToolsEndpointTokens) and names any entry missing one.' -ForegroundColor Yellow
+    }
+
     return Get-Item -LiteralPath $migrationFolder
 }

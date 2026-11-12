@@ -103,6 +103,8 @@ function Invoke-DevOpsMigration {
     # feed devopsmigration.exe for this step only.
     $stepEndpoints = (Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).MigrationTools.Endpoints
     Set-AutomationSecrets -Project @($stepEndpoints.Source.Project, $stepEndpoints.Target.Project) | Out-Null
+    # Before the -WhatIf gate, so a preview fails on a missing token instead of the real run.
+    Test-MigrationToolsEndpointTokens -ConfigPath $configPath
     if (-not $PSCmdlet.ShouldProcess($ConfigFile, 'devopsmigration.exe execute')) {
         return
     }

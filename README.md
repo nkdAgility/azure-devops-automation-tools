@@ -28,7 +28,7 @@ Use `New-ExportSnapshot -Source '<Collection>'` to create a dated location for p
 | Workflow | What to use |
 | --- | --- |
 | Microsoft Data Import Tool, Server to Services | `DataImport` template and module commands for `Migrator.exe` preparation, validation summaries, and `witadmin` process fixes |
-| Azure DevOps Migration Tools | `MigrationTools` template with `Sync.ps1`, configuration, and binders for repository and Azure Artifacts feed migration |
+| Azure DevOps Migration Tools | `MigrationTools` template with `Sync.ps1`, configuration, and binders for repository and Azure Artifacts feed migration. `Test-MigrationToolsEndpointTokens` checks before every devopsmigration.exe step, `-WhatIf` included, that its Source/Target tokens are bound from `secrets.json` `EnvVars` |
 | Azure DevOps Migration Platform | `MigrationPlatform` template and platform configuration |
 | Azure DevOps to GitHub repositories | `GitHubRepos` template with inventory, approval, preview, and migration runbooks |
 | Related repairs and transfers | Module engines for wiki and comment links, work item ID alignment, and historical pipeline artifact publishing |

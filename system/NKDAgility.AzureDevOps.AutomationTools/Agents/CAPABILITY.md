@@ -82,9 +82,17 @@ hold no account in (a customer's source organisation, reached only through its t
 Sign-in only acquires a credential, so it runs under `-WhatIf` too; a sign-in that fails is
 remembered for the session rather than retried on every call.
 
-The exception is `devopsmigration.exe`. `Set-AutomationSecrets` binds its
-`configuration-*.json` `AccessToken` env vars to the organisation's PAT, or to an Entra
-token when the organisation has no PAT. The tool reads that token once and cannot renew it,
+The exception is `devopsmigration.exe`. Its `configuration-*.json` leave `AccessToken`
+empty and it binds `MigrationTools__Endpoints__Source__Authentication__AccessToken` and
+`…Target…` from the environment. **`Set-AutomationSecrets` fills those names only for a
+`secrets.json` entry that lists them in `EnvVars`** — the source organisation's entry lists
+the Source name, the target's the Target name — and clears them otherwise; nothing derives
+them from the config. Every MigrationTools engagement therefore needs both `EnvVars` on its
+two organisations before its first `devopsmigration.exe` step. `Sync.ps1` runs
+`Test-MigrationToolsEndpointTokens` before each step, `-WhatIf` included, and fails naming
+the entry that is missing one; "cleared (absent from current secrets)" for these names at
+init is the same gap. The bound value is the organisation's PAT, or an Entra token when it
+has no PAT. The tool reads that token once and cannot renew it,
 so an Entra-fed run fails with 401 after about an hour. **A long `devopsmigration.exe` run
 needs a PAT for that organisation.**
 

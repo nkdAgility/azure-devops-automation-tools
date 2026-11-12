@@ -31,6 +31,7 @@
         'Test-AzureDevOpsHosted'
         'Get-AzureDevOpsAccessToken'
         'Set-AutomationSecrets'
+        'Test-MigrationToolsEndpointTokens'
         # Common - workspace
         'Initialize-AutomationWorkspace'
         'Invoke-AutomationWorkspaceInit'

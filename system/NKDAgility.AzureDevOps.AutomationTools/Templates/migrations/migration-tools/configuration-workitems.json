@@ -65,7 +65,7 @@
         "ShouldCreateMissingRevisionPaths": true
       },
       "FieldMappingTool": {
-        "Enabled": false,
+        "Enabled": true,
         "FieldMaps": []
       }
     }
