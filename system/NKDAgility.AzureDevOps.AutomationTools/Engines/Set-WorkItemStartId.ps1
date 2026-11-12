@@ -478,7 +478,7 @@ finally {
     if ($null -ne $ctrlCWasInput) { [Console]::TreatControlCAsInput = $ctrlCWasInput }
 }
 
-Write-Progress -Activity "Advancing work item ID counter in '$org'" -Completed
+Write-Progress -Activity $org -Completed
 
 $totalElapsed = (Get-Date) - $startTime
 if ($stopped) {
